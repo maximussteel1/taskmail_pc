@@ -1,0 +1,15 @@
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+
+.idea/
+
+config.yaml
+mail_config.local.yaml
+
+tasks/*
+!tasks/.gitkeep
+
+_tmp_*/

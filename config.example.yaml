@@ -1,0 +1,24 @@
+imap_host: imap.example.com
+imap_port: 993
+imap_user: your_imap_user
+imap_password: your_imap_password
+smtp_host: smtp.example.com
+smtp_port: 465
+smtp_user: your_smtp_user
+smtp_password: your_smtp_password
+poll_seconds: 30
+task_root: tasks
+default_timeout_minutes: 60
+mock_sleep_seconds: 1.0
+# Empty means auto-discover the CLI. Use "demo" for local adapter dry runs.
+opencode_command: ""
+codex_command: ""
+# Optional profile-to-model mappings. Keys are high-level profile names used in mail/snapshots.
+opencode_profile_models:
+  fast: openai/gpt-5-mini
+  strong: openai/gpt-5
+codex_profile_models:
+  fast: gpt-5-mini
+  strong: gpt-5-codex
+from_name: Mail Runner
+from_addr: runner@example.com
