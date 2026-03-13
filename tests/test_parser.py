@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from mail_runner.parser import normalize_subject, parse_initial_task, parse_subject
+from mail_runner.parser import extract_session_tag, normalize_subject, parse_initial_task, parse_subject
 from mail_runner.status import BACKEND_CODEX, BACKEND_OPENCODE
 
 
@@ -35,6 +35,12 @@ def test_normalize_subject_strips_reply_and_status_prefixes() -> None:
     assert normalize_subject("Re: [DONE] Demo task") == "demo task"
     assert normalize_subject("FW: [STATUS] Demo task") == "demo task"
     assert normalize_subject("Re: [QUESTION] Demo task") == "demo task"
+    assert normalize_subject("Re: [DONE][S:thread_001] Demo task") == "demo task"
+    assert normalize_subject("回复：[DONE] Demo task") == "demo task"
+    assert normalize_subject("回复: [DONE] Demo task") == "demo task"
+    assert normalize_subject("答复：[DONE] Demo task") == "demo task"
+    assert normalize_subject("答复: [DONE] Demo task") == "demo task"
+    assert extract_session_tag("Re: [DONE][S:thread_001] Demo task") == "thread_001"
 
 
 def test_parse_initial_task_reads_sections_and_defaults() -> None:

@@ -1,6 +1,6 @@
 # Mail-Based Task Manager
 
-本项目当前已完成 `Phase 6`。当前已经实现 IMAP/SMTP 接入、新任务首封邮件解析、reply 线程恢复、规则版意图解析、`STATUS` / `RERUN` / `KILL` / `UPDATE_TASK` / `APPEND_CONTEXT` 闭环，以及真实 `OpenCodeAdapter` / `CodexAdapter` 的 CLI 薄封装。`summary.md` 第一行、`thread_state.last_summary` 和状态邮件里的 `Summary:` 现在都会优先展示真实后端输出的用户摘要，而不是固定模板文案。Phase 6 进一步启用了显式问题协议、`awaiting_user_input` 等待态、`[QUESTION]` 邮件、回答后继续执行，以及按后端分开的 `profile -> model` 映射。
+本项目当前已完成 `Phase 7` 的第一轮会话续接改造。当前已经实现 IMAP/SMTP 接入、新任务首封邮件解析、reply 线程恢复、slash 命令驱动的 reply 语义、`/resume` / `/new` / `/sessions` / `/status` / `/rerun` / `/kill` 闭环，以及真实 `OpenCodeAdapter` / `CodexAdapter` 的 CLI 薄封装。`summary.md` 第一行、`thread_state.last_summary` 和状态邮件里的 `Summary:` 现在都会优先展示真实后端输出的用户摘要，而不是固定模板文案。当前版本进一步启用了显式问题协议、`awaiting_user_input` 等待态、`[QUESTION]` 邮件、回答后继续执行、按后端分开的 `profile -> model` 映射，以及 native backend session id 落盘和 resume 路径。
 
 ## 当前能力
 
@@ -13,12 +13,13 @@
 - 提供等待态回复恢复：用户回复答案后会生成新的 snapshot 并继续执行，而不是直接丢弃等待中的任务主线
 - 提供 `mail_io.py` 的 IMAP/SMTP SSL 接入
 - 提供 `parser.py` 的 `[OC]` / `[CX]` 首封任务主题和正文解析
-- 提供 `quote_extractor.py`、`context_layer.py`、`intent_parser.py`、`task_compiler.py` 的 Phase 3 reply 处理链
+- 提供 `quote_extractor.py`、`context_layer.py`、`intent_parser.py`、`task_compiler.py` 的 reply 对话处理链
 - 提供 `reporter.py` 的 `[ACCEPTED]` / `[RUNNING]` / `[DONE]` / `[FAILED]` / `[STATUS]` / `[KILLED]` / `[QUESTION]` 状态邮件正文生成
 - 提供 `app.py --once` 的同步批处理路径，以及 `app.py --loop` 的单 worker 后台轮询路径
-- 支持 reply 邮件通过 `In-Reply-To` / `References` / `state capsule` / `subject_norm` 命中原线程
-- 支持规则版 reply 动作解析：`UPDATE_TASK`、`APPEND_CONTEXT`、`ANSWER_QUESTION`、`STATUS_QUERY`、`RERUN`、`KILL`
+- 支持 reply 邮件通过 `In-Reply-To` / `References` / `state capsule` / `subject [S:session_id] tag` 命中原线程
+- 支持 slash 命令版 reply 动作解析：`/resume`、`/new`、`/sessions`、`/status`、`/rerun`、`/kill`
 - 支持 `profile` 字段在 snapshot / thread state / action 中持久化，并在真实 adapter 中按后端映射到实际 model 参数
+- 支持在 thread/session/run 结果中持久化 `backend_session_id`，并在后续 `/resume` 时走 native `codex exec resume` / `opencode run --session`
 - Windows 下在 `opencode_command` / `codex_command` 为空时，会优先自动发现 `opencode.cmd` / `codex.cmd`
 - 支持将 `opencode_command: demo` / `codex_command: demo` 作为本地演示后端，用于不消耗真实模型额度的验证
 - 已完成真实邮箱验证：Phase 2 验证了新任务 happy path；Phase 3 验证了 `NEW_TASK -> STATUS_QUERY -> KILL`；Phase 5 验证了真实邮箱入口下的 `[OC]`、`[CX]`、`STATUS_QUERY` 和 `RERUN`，并额外完成了一轮新的 live `[OC]` + `[CX]` 联调
@@ -77,6 +78,10 @@ task.md
   会被当作完整命令前缀解析，再由 adapter 追加固定子命令参数。
 - `opencode_profile_models` / `codex_profile_models`
   表示后端自己的 `profile -> model` 映射。邮件和 snapshot 里只允许出现 `fast` / `strong` / `vision` 这类 profile 标签，不直接出现 raw model id。
+- `max_concurrent_runs: 2`
+  表示全局最多允许多少个 session 同时运行。不同 `workdir` 的 session 可以并发；同一个 `workspace(repo + workdir)` 仍然保持串行。
+- `auto_create_workdir: false`
+  表示默认要求 `Repo + Workdir` 已存在；若设为 `true`，当 `Repo` 已存在且 `Workdir` 是仓库内的相对路径时，会在执行前自动创建该目录。
 
 本地文件约定：
 
@@ -98,6 +103,22 @@ task.md
 .\\.venv\\Scripts\\python.exe -m mail_runner.app --loop --config .\\mail_config.local.yaml
 .\\.venv\\Scripts\\python.exe -m mail_runner.runner --snapshot .\\seed.json --config .\\config.yaml
 ```
+
+后台服务推荐直接使用仓库内脚本：
+
+```powershell
+.\scripts\start_mail_runner.cmd
+.\scripts\restart_mail_runner.cmd
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\manage_mail_runner.ps1 status
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\manage_mail_runner.ps1 stop
+```
+
+脚本默认行为：
+
+- 默认优先使用 `._tmp_live_mail_runner\mail_config.loop_30s.yaml`；如果不存在，则回退到仓库根目录 `mail_config.local.yaml`
+- 运行态 pid、stdout/stderr 和辅助脚本都落在 `._tmp_live_mail_runner\`
+- `restart` 会先停止旧的 mail-runner 进程链，再用最新代码重启后台轮询
+- `status` 会列出当前 mail-runner 的 `cmd -> powershell -> python` 进程链，方便确认服务是否真的在跑
 
 本地 demo `snapshot` 示例：
 
@@ -150,19 +171,37 @@ Task:
 回复邮件示例：
 
 ```text
-what is the status?
+/status
 ```
 
 ```text
-rerun
+/resume
+请继续把日志目录也整理一下。
 ```
 
 ```text
+/new
 Timeout: 120
 Mode: analysis_only
 Task:
 Only analyze the issue and list risks.
 ```
+
+```text
+/sessions
+```
+
+普通 reply 继续当前 session 的示例：
+
+```text
+请继续把日志目录也整理一下，并说明为什么这样改。
+```
+
+主题兼容说明：
+
+- 新任务主题仍然使用 `[OC]` / `[CX]`
+- reply 主题除了常见的 `Re:` / `FW:` / `Fwd:`，现在也兼容中文客户端常见的 `回复:` / `回复：` / `答复:` / `答复：`
+- reply 命中线程时优先看 `In-Reply-To` / `References`；主题前缀兼容主要用于更稳定地做 `subject_norm` 归一化，而不是用“相同主题”强行串 session
 
 等待提问后的回复示例：
 
@@ -178,7 +217,9 @@ Use the lighter profile first, then summarize the risks.
 ## 当前限制
 
 - 当前仍然只支持单用户、本地、单任务串行执行；`--loop` 虽然能后台跑一个任务并继续收邮件，但不引入任务队列或并发 worker
-- reply 线程恢复仍然是最小够用版，优先 header，再用 state capsule，最后才 subject 兜底；没有做复杂邮箱启发式
+- reply 线程恢复现在只接受显式 session 线索：优先 header，再用 state capsule，最后才用 subject 里的 `[S:session_id]` 标签；不再使用“同主题自动接旧 session”的兜底策略
+- 普通 reply 默认会续接当前线程对应的 native backend context；只有新发邮件或显式 `/new` 才会启动 fresh session。`[QUESTION]` 等待态回复仍允许直接回答，不强制写 `/resume`
+- 邮件正文提取现在支持 `text/plain` 优先、空 plain part 自动回退 `text/html`；对只发 HTML 正文的网页邮箱更友好
 - 当前的问答恢复是“应用层恢复”：后端提问后本轮退出，用户回答后生成新的 snapshot 再继续；不是同一个 CLI session 进程原地续跑
 - `profile` 现在会在真实 adapter 中映射为后端自己的 `-m` 参数；如果 profile 已设置但对应映射缺失，本轮会直接失败并返回清晰错误
 - 同账号给自己发 reply 是否会重新进入 `INBOX` 取决于邮箱服务商行为；当前 reply 实机验证使用了真实 IMAP 收件链路，但为了规避服务商路由差异，验证时采用了可控的 inbox injection
@@ -209,6 +250,7 @@ Use the lighter profile first, then summarize the risks.
 - `summary.md` 第一行和状态邮件里的 `Summary:` 来自启发式提取；如果某个 CLI 版本改了输出格式，优先查看 `stdout.log` / `stderr.log` 原始内容。
 - 如果后端进入等待态，stdout 里必须输出完整的 `question capsule`；自由文本问题不会被识别为 `[QUESTION]`。
 - 如果邮件或 snapshot 里指定了 `profile`，但 `config.yaml` 对应后端没有配置映射，本轮会失败并在错误信息里明确指出缺失的 profile 名称。
+- 如果网页邮箱发出的新任务邮件只有 HTML 正文、没有有效 `text/plain`，当前版本也会自动回退解析；如果仍然看起来“没响应”，先去 `INBOX` 搜索 `[ACCEPTED]` / `[DONE]`，再检查 [loop.stderr.log](E:/projects/mail_based_task_manager/_tmp_live_mail_runner/loop.stderr.log)。
 
 ## 下一阶段
 
@@ -220,3 +262,38 @@ Use the lighter profile first, then summarize the risks.
 - 真实 backend 邮件链路里的 `KILL` 固定验收路径
 
 如果后续优先执行会话调度重构，则会先按 `docs/session_scheduler_plan.md` 中定义的 3 个阶段推进，再回到上述更深层的运行时增强项。
+## Transcript Export
+
+可以使用仓库内脚本把某个线程的多轮对话按时间顺序导出并拼接成 transcript。
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\export_thread_conversation.py thread_013 --task-root .\_tmp_live_mail_runner\tasks
+```
+
+默认输出为 Markdown，也可以显式写入文件：
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\export_thread_conversation.py thread_013 --task-root .\_tmp_live_mail_runner\tasks --output .\thread_013_transcript.md
+```
+
+可选参数：
+- `--format markdown|json`
+- `--include-empty`
+- `--output <path>`
+
+导出规则：
+- 按 `mail/raw_*.json` 的顺序输出
+- 用户邮件会优先提取真正的新回复内容，而不是整段引用
+- 系统状态邮件会优先提取 `Reply:`、`Summary:`、`Question:` 或简化后的状态文本
+
+## Web Search
+
+可以通过配置项 `enable_web_search` 控制后端是否启用联网搜索能力。
+
+- `Codex` 开启后会以顶层参数形式附加 `--search`，即 `codex --search exec ...`
+- `OpenCode` 开启后会注入 `OPENCODE_ENABLE_EXA=1`
+- `OpenCode` 动态权限配置里会显式允许 `websearch` / `webfetch`
+
+当前项目里的本地运行配置已经打开：
+- [mail_config.local.yaml](E:/projects/mail_based_task_manager/mail_config.local.yaml)
+- [_tmp_live_mail_runner/mail_config.loop_30s.yaml](E:/projects/mail_based_task_manager/_tmp_live_mail_runner/mail_config.loop_30s.yaml)

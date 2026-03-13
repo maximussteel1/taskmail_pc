@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from mail_runner.models import ParsedMailAction, TaskSnapshot, ThreadState
-from mail_runner.status import BACKEND_OPENCODE, THREAD_STATUS_DONE
+from mail_runner.status import BACKEND_CODEX, BACKEND_OPENCODE, THREAD_STATUS_DONE
 from mail_runner.task_compiler import compile_task
 
 
@@ -50,6 +50,7 @@ def test_compile_task_updates_selected_fields_and_keeps_profile() -> None:
         ParsedMailAction(
             action="UPDATE_TASK",
             confidence=0.9,
+            backend=BACKEND_CODEX,
             task_text_delta="Only analyze the issue.",
             timeout_minutes=120,
             mode="analysis_only",
@@ -63,6 +64,7 @@ def test_compile_task_updates_selected_fields_and_keeps_profile() -> None:
 
     assert compiled is not None
     assert compiled.task_id == "task_002"
+    assert compiled.backend == BACKEND_CODEX
     assert compiled.task_text == "Only analyze the issue."
     assert compiled.timeout_minutes == 120
     assert compiled.mode == "analysis_only"
@@ -113,3 +115,47 @@ def test_compile_task_answers_pending_question_and_updates_profile() -> None:
     assert compiled.profile == "strong"
     assert "Answer to pending question (question_task_001):" in compiled.task_text
     assert "Yes, update both modules." in compiled.task_text
+
+
+def test_compile_task_resumes_native_session_without_rewriting_task_text() -> None:
+    state = _thread_state()
+    state.backend_session_id = "native-session-001"
+    state.backend_session_resumable = True
+    compiled = compile_task(
+        ParsedMailAction(
+            action="CONTINUE_SESSION",
+            confidence=1.0,
+            raw_user_text="Please continue with the cleanup.",
+        ),
+        state,
+        _snapshot(),
+        task_id="task_006",
+        now="2026-03-12T12:45:00",
+    )
+
+    assert compiled is not None
+    assert compiled.run_mode == "resume"
+    assert compiled.backend_session_id == "native-session-001"
+    assert compiled.turn_text == "Please continue with the cleanup."
+    assert compiled.task_text == "Original task text"
+
+
+def test_compile_task_builds_new_session_snapshot_with_new_thread() -> None:
+    compiled = compile_task(
+        ParsedMailAction(
+            action="NEW_SESSION",
+            confidence=0.8,
+            raw_user_text="Also organize the logs directory.",
+        ),
+        _thread_state(),
+        _snapshot(),
+        task_id="task_007",
+        thread_id="thread_002",
+        now="2026-03-12T12:50:00",
+    )
+
+    assert compiled is not None
+    assert compiled.thread_id == "thread_002"
+    assert compiled.run_mode == "new"
+    assert compiled.backend_session_id is None
+    assert "Also organize the logs directory." in compiled.task_text

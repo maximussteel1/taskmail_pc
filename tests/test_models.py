@@ -11,8 +11,10 @@ from mail_runner.models import (
     ModelValidationError,
     ParsedMailAction,
     RunResult,
+    SessionState,
     TaskSnapshot,
     ThreadState,
+    WorkspaceState,
 )
 
 
@@ -87,4 +89,38 @@ def test_run_result_requires_log_paths() -> None:
             finished_at="2026-03-12T10:00:01",
             stdout_file="",
             stderr_file="stderr.log",
+        )
+
+
+def test_workspace_state_accepts_valid_input() -> None:
+    workspace = WorkspaceState(
+        workspace_id="workspace_123",
+        repo_path="D:\\repo",
+        workdir="src",
+        workspace_norm="d:/repo|src",
+        session_ids=["thread_001"],
+        active_session_id="thread_001",
+        created_at="2026-03-12T10:00:00",
+        updated_at="2026-03-12T10:05:00",
+    )
+
+    assert workspace.workspace_id == "workspace_123"
+
+
+def test_session_state_rejects_invalid_status() -> None:
+    with pytest.raises(ModelValidationError):
+        SessionState(
+            session_id="thread_001",
+            workspace_id="workspace_123",
+            thread_id="thread_001",
+            session_name="Demo task",
+            session_norm="demo task",
+            backend="opencode",
+            repo_path="D:\\repo",
+            workdir="src",
+            status="broken",  # type: ignore[arg-type]
+            current_task_id="task_001",
+            last_task_snapshot_file="snapshots/task_001.json",
+            created_at="2026-03-12T10:00:00",
+            updated_at="2026-03-12T10:05:00",
         )

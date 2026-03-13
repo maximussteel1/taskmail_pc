@@ -18,10 +18,17 @@ _INT_FIELDS = {
     "smtp_port",
     "poll_seconds",
     "default_timeout_minutes",
+    "max_concurrent_runs",
 }
 
 _FLOAT_FIELDS = {
     "mock_sleep_seconds",
+}
+
+_BOOL_FIELDS = {
+    "auto_create_workdir",
+    "enable_web_search",
+    "prune_old_status_mails",
 }
 
 _MAP_FIELDS = {
@@ -43,6 +50,10 @@ class AppConfig:
     poll_seconds: int = 30
     task_root: str = "tasks"
     default_timeout_minutes: int = 60
+    max_concurrent_runs: int = 2
+    auto_create_workdir: bool = False
+    enable_web_search: bool = False
+    prune_old_status_mails: bool = False
     opencode_command: str = ""
     codex_command: str = ""
     from_name: str = "Mail Runner"
@@ -67,6 +78,15 @@ def _coerce_value(field_name: str, value: Any) -> Any:
         for key, item in value.items():
             coerced[str(key).strip()] = str(item).strip()
         return coerced
+    if field_name in _BOOL_FIELDS:
+        if isinstance(value, bool):
+            return value
+        normalized = str(value).strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        raise ValueError(f"{field_name} must be a boolean value")
     if field_name in _INT_FIELDS:
         return int(value)
     if field_name in _FLOAT_FIELDS:

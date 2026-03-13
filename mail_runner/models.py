@@ -11,32 +11,42 @@ from .status import BACKEND_NAMES, CURRENT_RUN_STATUSES, CURRENT_THREAD_STATUSES
 BackendName = Literal["opencode", "codex"]
 MailAction = Literal[
     "NEW_TASK",
+    "NEW_SESSION",
+    "CONTINUE_SESSION",
     "UPDATE_TASK",
     "APPEND_CONTEXT",
     "ANSWER_QUESTION",
+    "LIST_SESSIONS",
     "STATUS_QUERY",
     "RERUN",
     "KILL",
     "UNKNOWN",
 ]
 TaskMode = Literal["modify", "analysis_only"]
+TaskRunMode = Literal["new", "resume"]
 ThreadStatus = Literal["idle", "accepted", "running", "done", "failed", "killed", "awaiting_user_input", "paused"]
 RunStatus = Literal["success", "failed", "killed", "awaiting_user_input", "paused"]
+SessionStatus = Literal["queued", "running", "waiting_user", "done", "failed", "killed", "archived"]
 
 _BACKENDS = set(BACKEND_NAMES)
 _ACTIONS = {
     "NEW_TASK",
+    "NEW_SESSION",
+    "CONTINUE_SESSION",
     "UPDATE_TASK",
     "APPEND_CONTEXT",
     "ANSWER_QUESTION",
+    "LIST_SESSIONS",
     "STATUS_QUERY",
     "RERUN",
     "KILL",
     "UNKNOWN",
 }
 _MODES = {"modify", "analysis_only"}
+_TASK_RUN_MODES = {"new", "resume"}
 _THREAD_STATUSES = set(CURRENT_THREAD_STATUSES)
 _RUN_STATUSES = set(CURRENT_RUN_STATUSES)
+_SESSION_STATUSES = {"queued", "running", "waiting_user", "done", "failed", "killed", "archived"}
 
 
 class ModelValidationError(ValueError):
@@ -109,6 +119,7 @@ class ParsedMailAction:
     timeout_minutes: int | None = None
     mode: TaskMode | None = None
     raw_user_text: str = ""
+    target_session_id: str | None = None
     notes: str | None = None
 
     def __post_init__(self) -> None:
@@ -128,6 +139,7 @@ class ParsedMailAction:
             _require_literal(self.mode, "mode", _MODES)
         if not isinstance(self.raw_user_text, str):
             raise ModelValidationError("raw_user_text must be a string")
+        _require_optional_text(self.target_session_id, "target_session_id")
         _require_optional_text(self.notes, "notes")
 
 
@@ -146,6 +158,9 @@ class TaskSnapshot:
     attachments: list[str] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+    run_mode: TaskRunMode = "new"
+    backend_session_id: str | None = None
+    turn_text: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.task_id, "task_id")
@@ -160,6 +175,83 @@ class TaskSnapshot:
             raise ModelValidationError("timeout_minutes must be positive")
         _require_literal(self.mode, "mode", _MODES)
         _require_string_list(self.attachments, "attachments")
+        _require_text(self.created_at, "created_at")
+        _require_text(self.updated_at, "updated_at")
+        _require_literal(self.run_mode, "run_mode", _TASK_RUN_MODES)
+        _require_optional_text(self.backend_session_id, "backend_session_id")
+        _require_optional_text(self.turn_text, "turn_text")
+
+
+@dataclass(slots=True)
+class WorkspaceState:
+    workspace_id: str
+    repo_path: str
+    workdir: str | None
+    workspace_norm: str
+    session_ids: list[str] = field(default_factory=list)
+    active_session_id: str | None = None
+    queued_session_ids: list[str] = field(default_factory=list)
+    created_at: str = ""
+    updated_at: str = ""
+
+    def __post_init__(self) -> None:
+        _require_text(self.workspace_id, "workspace_id")
+        _require_text(self.repo_path, "repo_path")
+        _require_optional_text(self.workdir, "workdir")
+        _require_text(self.workspace_norm, "workspace_norm")
+        _require_string_list(self.session_ids, "session_ids")
+        _require_optional_text(self.active_session_id, "active_session_id")
+        _require_string_list(self.queued_session_ids, "queued_session_ids")
+        _require_text(self.created_at, "created_at")
+        _require_text(self.updated_at, "updated_at")
+
+
+@dataclass(slots=True)
+class SessionState:
+    session_id: str
+    workspace_id: str
+    thread_id: str
+    session_name: str
+    session_norm: str
+    backend: BackendName
+    profile: str | None = None
+    repo_path: str = ""
+    workdir: str | None = None
+    status: SessionStatus = "queued"
+    current_task_id: str = ""
+    last_task_snapshot_file: str = ""
+    queued_task_id: str | None = None
+    queued_snapshot_file: str | None = None
+    pending_task_count: int = 0
+    history_files: list[str] = field(default_factory=list)
+    last_summary: str | None = None
+    backend_session_id: str | None = None
+    backend_session_resumable: bool = False
+    created_at: str = ""
+    updated_at: str = ""
+
+    def __post_init__(self) -> None:
+        _require_text(self.session_id, "session_id")
+        _require_text(self.workspace_id, "workspace_id")
+        _require_text(self.thread_id, "thread_id")
+        _require_text(self.session_name, "session_name")
+        _require_text(self.session_norm, "session_norm")
+        _require_literal(self.backend, "backend", _BACKENDS)
+        _require_optional_text(self.profile, "profile")
+        _require_text(self.repo_path, "repo_path")
+        _require_optional_text(self.workdir, "workdir")
+        _require_literal(self.status, "status", _SESSION_STATUSES)
+        _require_text(self.current_task_id, "current_task_id")
+        _require_text(self.last_task_snapshot_file, "last_task_snapshot_file")
+        _require_optional_text(self.queued_task_id, "queued_task_id")
+        _require_optional_text(self.queued_snapshot_file, "queued_snapshot_file")
+        if not isinstance(self.pending_task_count, int) or self.pending_task_count < 0:
+            raise ModelValidationError("pending_task_count must be a non-negative integer")
+        _require_string_list(self.history_files, "history_files")
+        _require_optional_text(self.last_summary, "last_summary")
+        _require_optional_text(self.backend_session_id, "backend_session_id")
+        if not isinstance(self.backend_session_resumable, bool):
+            raise ModelValidationError("backend_session_resumable must be a bool")
         _require_text(self.created_at, "created_at")
         _require_text(self.updated_at, "updated_at")
 
@@ -183,6 +275,15 @@ class ThreadState:
     pending_question_text: str | None = None
     pending_choices: list[str] = field(default_factory=list)
     awaiting_since: str | None = None
+    workspace_id: str | None = None
+    workspace_norm: str | None = None
+    session_id: str | None = None
+    session_name: str | None = None
+    session_norm: str | None = None
+    backend_session_id: str | None = None
+    backend_session_resumable: bool = False
+    queued_task_id: str | None = None
+    queued_snapshot_file: str | None = None
     created_at: str = ""
     updated_at: str = ""
 
@@ -204,6 +305,16 @@ class ThreadState:
         _require_optional_text(self.pending_question_text, "pending_question_text")
         _require_string_list(self.pending_choices, "pending_choices")
         _require_optional_text(self.awaiting_since, "awaiting_since")
+        _require_optional_text(self.workspace_id, "workspace_id")
+        _require_optional_text(self.workspace_norm, "workspace_norm")
+        _require_optional_text(self.session_id, "session_id")
+        _require_optional_text(self.session_name, "session_name")
+        _require_optional_text(self.session_norm, "session_norm")
+        _require_optional_text(self.backend_session_id, "backend_session_id")
+        if not isinstance(self.backend_session_resumable, bool):
+            raise ModelValidationError("backend_session_resumable must be a bool")
+        _require_optional_text(self.queued_task_id, "queued_task_id")
+        _require_optional_text(self.queued_snapshot_file, "queued_snapshot_file")
         _require_text(self.created_at, "created_at")
         _require_text(self.updated_at, "updated_at")
 
@@ -227,6 +338,8 @@ class RunResult:
     question_id: str | None = None
     question_text: str | None = None
     pending_choices: list[str] = field(default_factory=list)
+    backend_session_id: str | None = None
+    backend_session_resumable: bool = False
 
     def __post_init__(self) -> None:
         _require_text(self.task_id, "task_id")
@@ -248,3 +361,6 @@ class RunResult:
         _require_optional_text(self.question_id, "question_id")
         _require_optional_text(self.question_text, "question_text")
         _require_string_list(self.pending_choices, "pending_choices")
+        _require_optional_text(self.backend_session_id, "backend_session_id")
+        if not isinstance(self.backend_session_resumable, bool):
+            raise ModelValidationError("backend_session_resumable must be a bool")

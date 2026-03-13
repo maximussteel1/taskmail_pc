@@ -21,9 +21,17 @@ _QUESTION_RE = re.compile(
 )
 _QUOTE_SPLIT_PATTERNS = (
     re.compile(r"(?im)^On .+wrote:\s*$"),
-    re.compile(r"(?im)^在.+写道[:：]\s*$"),
+    re.compile(r"(?im)\s+On .+wrote:\s*$"),
+    re.compile(r"(?im)^回复[:：]\s*$"),
+    re.compile(r"(?im)^答复[:：]\s*$"),
     re.compile(r"(?im)^-----Original Message-----\s*$"),
+    re.compile(r"(?im)\s+-----Original Message-----\s*"),
     re.compile(r"(?im)^From:\s+.+\nSent:\s+.+\nTo:\s+.+\nSubject:\s+.+$"),
+    re.compile(r"(?im)^-----原始邮件-----\s*$"),
+    re.compile(r"(?im)\s+-----原始邮件-----\s*"),
+    re.compile(r"(?im)^---原始邮件---\s*$"),
+    re.compile(r"(?im)\s+---原始邮件---\s*"),
+    re.compile(r"(?im)^发件人[:：]\s+.+\n发送时间[:：]\s+.+\n收件人[:：]\s+.+\n主题[:：]\s+.+$"),
     re.compile(r"(?m)^>+"),
 )
 

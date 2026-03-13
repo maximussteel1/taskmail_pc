@@ -42,19 +42,23 @@ class MockAdapter(WorkerAdapter):
         with self._lock:
             self._active_stops[task.task_id] = stop_event
 
-        template_path = TEMPLATES_DIR / f"{task.backend}_prompt.txt"
-        prompt_text = template_path.read_text(encoding="utf-8").format(
-            task_id=task.task_id,
-            thread_id=task.thread_id,
-            profile=task.profile or "",
-            repo_path=task.repo_path,
-            workdir=task.workdir or "",
-            mode=task.mode,
-            timeout_minutes=task.timeout_minutes,
-            task_text=task.task_text,
-            acceptance=_format_acceptance(task.acceptance),
-        )
+        if task.run_mode == "resume":
+            prompt_text = task.turn_text or "Continue the previous task."
+        else:
+            template_path = TEMPLATES_DIR / f"{task.backend}_prompt.txt"
+            prompt_text = template_path.read_text(encoding="utf-8").format(
+                task_id=task.task_id,
+                thread_id=task.thread_id,
+                profile=task.profile or "",
+                repo_path=task.repo_path,
+                workdir=task.workdir or "",
+                mode=task.mode,
+                timeout_minutes=task.timeout_minutes,
+                task_text=task.task_text,
+                acceptance=_format_acceptance(task.acceptance),
+            )
         (run_path / "prompt.txt").write_text(prompt_text, encoding="utf-8")
+        backend_session_id = task.backend_session_id or f"mock-session-{task.backend}-{task.thread_id}"
 
         elapsed = 0.0
         sleep_step = 0.05
@@ -128,6 +132,8 @@ class MockAdapter(WorkerAdapter):
                 changed_files=[],
                 tests_passed=None,
                 error_message=error_message,
+                backend_session_id=backend_session_id,
+                backend_session_resumable=not stop_event.is_set(),
             )
         finally:
             with self._lock:

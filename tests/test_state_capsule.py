@@ -18,6 +18,9 @@ def test_render_and_parse_state_capsule() -> None:
     rendered = render_state_capsule(
         {
             "thread_id": "thread_001",
+            "workspace_id": "workspace_001",
+            "session_id": "thread_001",
+            "session_name": "Demo task",
             "task_id": "task_001",
             "backend": "opencode",
             "repo_path": "D:\\repo",
@@ -34,6 +37,8 @@ def test_render_and_parse_state_capsule() -> None:
     assert rendered.endswith(END_MARKER)
     assert parsed is not None
     assert parsed["thread_id"] == "thread_001"
+    assert parsed["workspace_id"] == "workspace_001"
+    assert parsed["session_name"] == "Demo task"
     assert parsed["status"] == "done"
 
 

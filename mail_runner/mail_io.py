@@ -8,7 +8,7 @@ import mimetypes
 import re
 import smtplib
 from email import message_from_bytes, policy
-from email.header import decode_header, make_header
+from email.header import decode_header
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid, parseaddr
 from pathlib import Path
@@ -24,10 +24,40 @@ _BREAK_TAG_RE = re.compile(r"(?i)</?(?:br|p|div|li|tr|h[1-6])[^>]*>")
 _STYLE_SCRIPT_RE = re.compile(r"(?is)<(script|style).*?>.*?</\1>")
 
 
+def _decode_bytes_value(payload: bytes, charset: str | None = None) -> str:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for candidate in (charset, "utf-8", "gb18030", "gbk", "latin-1"):
+        if not candidate:
+            continue
+        normalized = candidate.strip().strip('"').lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        candidates.append(normalized)
+
+    for candidate in candidates:
+        try:
+            return payload.decode(candidate)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return payload.decode("utf-8", errors="replace")
+
+
+def _normalize_mail_text(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n").replace("\ufeff", "")
+
+
 def _decode_header_value(value: str | None) -> str:
     if not value:
         return ""
-    return str(make_header(decode_header(value)))
+    parts: list[str] = []
+    for chunk, charset in decode_header(value):
+        if isinstance(chunk, bytes):
+            parts.append(_decode_bytes_value(chunk, charset))
+        else:
+            parts.append(chunk)
+    return _normalize_mail_text("".join(parts))
 
 
 def _extract_references(value: str | None) -> list[str]:
@@ -44,7 +74,7 @@ def _html_to_text(value: str) -> str:
     cleaned = _BREAK_TAG_RE.sub("\n", cleaned)
     cleaned = _TAG_RE.sub("", cleaned)
     cleaned = html.unescape(cleaned)
-    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = _normalize_mail_text(cleaned)
     lines = [line.rstrip() for line in cleaned.splitlines()]
     return "\n".join(line for line in lines if line.strip()).strip()
 
@@ -61,21 +91,24 @@ def _extract_body_text(message: EmailMessage) -> str:
         content_type = part.get_content_type()
         try:
             content = part.get_content()
-        except LookupError:
+        except (LookupError, UnicodeError):
             payload = part.get_payload(decode=True) or b""
-            charset = part.get_content_charset() or "utf-8"
-            content = payload.decode(charset, errors="replace")
+            content = _decode_bytes_value(payload, part.get_content_charset())
         if not isinstance(content, str):
             continue
+        content = _normalize_mail_text(content)
         if content_type == "text/plain":
             plain_parts.append(content.strip())
         elif content_type == "text/html":
             html_parts.append(_html_to_text(content))
 
-    if plain_parts:
-        return "\n\n".join(part for part in plain_parts if part).strip()
-    if html_parts:
-        return "\n\n".join(part for part in html_parts if part).strip()
+    rendered_plain = "\n\n".join(part for part in plain_parts if part).strip()
+    if rendered_plain:
+        return rendered_plain
+
+    rendered_html = "\n\n".join(part for part in html_parts if part).strip()
+    if rendered_html:
+        return rendered_html
     return ""
 
 
@@ -109,9 +142,12 @@ class MailClient:
     def __init__(self, config: AppConfig) -> None:
         self._config = config
 
+    def _imap_client(self):
+        return imaplib.IMAP4_SSL(self._config.imap_host, self._config.imap_port)
+
     def fetch_unseen_messages(self) -> list[MailEnvelope]:
         messages: list[MailEnvelope] = []
-        client = imaplib.IMAP4_SSL(self._config.imap_host, self._config.imap_port)
+        client = self._imap_client()
         try:
             client.login(self._config.imap_user, self._config.imap_password)
             status, _ = client.select("INBOX")
@@ -140,6 +176,60 @@ class MailClient:
             except Exception:
                 pass
         return messages
+
+    def delete_messages_by_message_ids(self, message_ids: list[str], mailbox: str = "INBOX") -> list[str]:
+        normalized_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for raw_message_id in message_ids:
+            message_id = str(raw_message_id or "").strip()
+            if not message_id or message_id in seen_ids:
+                continue
+            seen_ids.add(message_id)
+            normalized_ids.append(message_id)
+        if not normalized_ids:
+            return []
+
+        client = self._imap_client()
+        deleted_ids: list[str] = []
+        try:
+            client.login(self._config.imap_user, self._config.imap_password)
+            status, _ = client.select(mailbox)
+            if status != "OK":
+                raise RuntimeError(f"Unable to select mailbox: {mailbox}")
+
+            matched_imap_ids: list[bytes] = []
+            matched_seen: set[bytes] = set()
+            for message_id in normalized_ids:
+                status, data = client.search(None, "HEADER", "Message-ID", f'"{message_id}"')
+                if status != "OK" or not data:
+                    continue
+                current_matches = [item for item in data[0].split() if item]
+                if not current_matches:
+                    continue
+                deleted_ids.append(message_id)
+                for raw_id in current_matches:
+                    if raw_id in matched_seen:
+                        continue
+                    matched_seen.add(raw_id)
+                    matched_imap_ids.append(raw_id)
+
+            deleted_any = False
+            for raw_id in matched_imap_ids:
+                status, _ = client.store(raw_id, "+FLAGS", "\\Deleted")
+                if status == "OK":
+                    deleted_any = True
+            if deleted_any:
+                client.expunge()
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+            try:
+                client.logout()
+            except Exception:
+                pass
+        return deleted_ids
 
     def send_mail(
         self,

@@ -17,12 +17,32 @@ class WorkspaceManager:
 
     def ensure_layout(self) -> None:
         self.task_root.mkdir(parents=True, exist_ok=True)
+        self.scheduler_meta_dir().mkdir(parents=True, exist_ok=True)
+        self.workspaces_dir().mkdir(parents=True, exist_ok=True)
 
     def thread_dir(self, thread_id: str) -> Path:
         return self.task_root / thread_id
 
     def thread_state_path(self, thread_id: str) -> Path:
         return self.thread_dir(thread_id) / "thread_state.json"
+
+    def scheduler_meta_dir(self) -> Path:
+        return self.task_root / "_scheduler"
+
+    def workspaces_dir(self) -> Path:
+        return self.scheduler_meta_dir() / "workspaces"
+
+    def workspace_dir(self, workspace_id: str) -> Path:
+        return self.workspaces_dir() / workspace_id
+
+    def workspace_state_path(self, workspace_id: str) -> Path:
+        return self.workspace_dir(workspace_id) / "workspace_state.json"
+
+    def workspace_sessions_dir(self, workspace_id: str) -> Path:
+        return self.workspace_dir(workspace_id) / "sessions"
+
+    def session_state_path(self, workspace_id: str, session_id: str) -> Path:
+        return self.workspace_sessions_dir(workspace_id) / f"{session_id}.json"
 
     def snapshots_dir(self, thread_id: str) -> Path:
         return self.thread_dir(thread_id) / "snapshots"
@@ -40,6 +60,12 @@ class WorkspaceManager:
         self.runs_dir(thread_id).mkdir(parents=True, exist_ok=True)
         self.mail_dir(thread_id).mkdir(parents=True, exist_ok=True)
         return thread_dir
+
+    def ensure_workspace_layout(self, workspace_id: str) -> Path:
+        workspace_dir = self.workspace_dir(workspace_id)
+        self.ensure_layout()
+        self.workspace_sessions_dir(workspace_id).mkdir(parents=True, exist_ok=True)
+        return workspace_dir
 
     def snapshot_path(self, thread_id: str, task_id: str) -> Path:
         return self.snapshots_dir(thread_id) / f"{task_id}.json"

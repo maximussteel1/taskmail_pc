@@ -22,11 +22,14 @@ from .status import (
     FINAL_THREAD_STATUS_BY_RUN_STATUS,
     RUN_STATUS_AWAITING_USER_INPUT,
     RUN_STATUS_FAILED,
+    RUN_STATUS_KILLED,
     RUN_STATUS_SUCCESS,
     THREAD_STATUS_ACCEPTED,
+    THREAD_STATUS_AWAITING_USER_INPUT,
+    THREAD_STATUS_FAILED,
     THREAD_STATUS_RUNNING,
 )
-from .thread_store import create_thread, load_thread_state, save_thread_state
+from .thread_store import build_workspace_id, build_workspace_norm, create_thread, load_thread_state, save_thread_state
 from .workspace import WorkspaceManager
 
 LOGGER = logging.getLogger(__name__)
@@ -94,14 +97,30 @@ class _ActiveRun:
     result: RunResult | None = None
 
 
+@dataclass(slots=True)
+class _QueuedRun:
+    snapshot: TaskSnapshot
+    snapshot_rel: str
+    root_message_id: str | None
+    latest_message_id: str | None
+    subject_norm: str | None
+    session_name: str | None
+    on_running: StateCallback | None
+    on_finished: FinishedCallback | None
+
+
 class SerialTaskRunner:
     """Coordinates one local task at a time."""
 
-    def __init__(self, task_root: str | Path, dispatcher: Dispatcher) -> None:
+    def __init__(self, task_root: str | Path, dispatcher: Dispatcher, max_concurrent_runs: int = 2) -> None:
         self.workspace = WorkspaceManager(task_root)
         self.dispatcher = dispatcher
+        self.max_concurrent_runs = max(1, int(max_concurrent_runs))
         self._lock = threading.Lock()
-        self._active_run: _ActiveRun | None = None
+        self._active_runs: dict[str, _ActiveRun] = {}
+        self._queued_runs: list[_QueuedRun] = []
+        self.workspace.ensure_layout()
+        self._recover_persisted_queue()
 
     def start(self, snapshot_path: str | Path) -> RunResult:
         return self.run_snapshot_seed(_load_snapshot_seed(snapshot_path))
@@ -135,6 +154,9 @@ class SerialTaskRunner:
             attachments=list(attachments),
             created_at=created_at,
             updated_at=updated_at,
+            run_mode=_empty_to_none(snapshot_seed.get("run_mode")) or "new",
+            backend_session_id=_empty_to_none(snapshot_seed.get("backend_session_id")),
+            turn_text=_empty_to_none(snapshot_seed.get("turn_text")),
         )
         return self.run_task_snapshot(snapshot)
 
@@ -145,6 +167,7 @@ class SerialTaskRunner:
         root_message_id: str | None = None,
         latest_message_id: str | None = None,
         subject_norm: str | None = None,
+        session_name: str | None = None,
         on_accepted: StateCallback | None = None,
         on_running: StateCallback | None = None,
         on_finished: FinishedCallback | None = None,
@@ -154,14 +177,16 @@ class SerialTaskRunner:
             root_message_id=root_message_id,
             latest_message_id=latest_message_id,
             subject_norm=subject_norm,
+            session_name=session_name,
             on_accepted=on_accepted,
             on_running=on_running,
             on_finished=on_finished,
         )
-        result = self.wait_for_active()
-        if result is None:
-            raise RuntimeError("Active task vanished before completion.")
-        return result
+        self.wait_until_idle()
+        result_path = self.workspace.run_file_path(snapshot.thread_id, snapshot.task_id, "result.json")
+        if not result_path.exists():
+            raise RuntimeError(f"Task result was not written for {snapshot.task_id}.")
+        return self.workspace.load_run_result(snapshot.thread_id, f"runs/{snapshot.task_id}/result.json")
 
     def start_background_task(
         self,
@@ -170,14 +195,11 @@ class SerialTaskRunner:
         root_message_id: str | None = None,
         latest_message_id: str | None = None,
         subject_norm: str | None = None,
+        session_name: str | None = None,
         on_accepted: StateCallback | None = None,
         on_running: StateCallback | None = None,
         on_finished: FinishedCallback | None = None,
     ) -> ThreadState:
-        with self._lock:
-            if self._active_run is not None:
-                raise RuntimeError("Runner is already executing another task.")
-
         self.workspace.ensure_layout()
         snapshot_path = self.workspace.snapshot_path(snapshot.thread_id, snapshot.task_id)
         run_dir = self.workspace.run_dir(snapshot.thread_id, snapshot.task_id)
@@ -188,99 +210,138 @@ class SerialTaskRunner:
 
         saved_snapshot_path = self.workspace.save_snapshot(snapshot)
         snapshot_rel = self.workspace.to_thread_relative(snapshot.thread_id, saved_snapshot_path)
+        with self._lock:
+            active_thread_ids = {active.snapshot.thread_id for active in self._active_runs.values()}
         state = self._prepare_thread_state(
             snapshot,
             snapshot_rel,
             root_message_id=root_message_id,
             latest_message_id=latest_message_id,
             subject_norm=subject_norm,
+            session_name=session_name,
+            active_thread_ids=active_thread_ids,
         )
         if on_accepted is not None:
             on_accepted(state)
 
-        run_path = self.workspace.create_run_dir(snapshot.thread_id, snapshot.task_id)
-        state.status = THREAD_STATUS_RUNNING
-        state.updated_at = _timestamp()
-        save_thread_state(state, self.workspace.task_root)
-        if on_running is not None:
-            on_running(state)
-
-        done = threading.Event()
-        active = _ActiveRun(
+        queued = _QueuedRun(
             snapshot=snapshot,
-            state=state,
-            run_path=run_path,
-            dispatch_started_at=_timestamp(),
+            snapshot_rel=snapshot_rel,
+            root_message_id=root_message_id,
+            latest_message_id=latest_message_id,
+            subject_norm=subject_norm,
+            session_name=session_name,
+            on_running=on_running,
             on_finished=on_finished,
-            done=done,
-            thread=threading.Thread(
-                target=self._dispatch_active_run,
-                args=(snapshot, run_path, _timestamp(), done),
-                daemon=True,
-                name=f"mail-runner-{snapshot.task_id}",
-            ),
         )
-        with self._lock:
-            self._active_run = active
-        active.thread.start()
+        self._upsert_queued_run(queued)
+        self.dispatch_ready()
         return state
 
     def collect_finished(self) -> list[tuple[ThreadState, RunResult]]:
         with self._lock:
-            active = self._active_run
-        if active is None or not active.done.is_set():
+            finished_runs = [active for active in self._active_runs.values() if active.done.is_set()]
+        if not finished_runs:
+            self.dispatch_ready()
             return []
+        finalized: list[tuple[ThreadState, RunResult]] = []
+        for active in finished_runs:
+            active.thread.join(timeout=0)
+            if active.result is None:
+                active.result = self._build_failure_result(
+                    active.snapshot,
+                    active.run_path,
+                    active.dispatch_started_at,
+                    RuntimeError("Background dispatch finished without producing a result."),
+                )
 
-        active.thread.join(timeout=0)
-        if active.result is None:
-            active.result = self._build_failure_result(
-                active.snapshot,
-                active.run_path,
-                active.dispatch_started_at,
-                RuntimeError("Background dispatch finished without producing a result."),
-            )
-
-        result_path = self.workspace.save_run_result(active.snapshot.thread_id, active.snapshot.task_id, active.result)
-        final_state = self._finalize_thread_state(active.state, active.result, result_path)
-        with self._lock:
-            if self._active_run is active:
-                self._active_run = None
-        if active.on_finished is not None:
-            active.on_finished(final_state, active.result)
-        return [(final_state, active.result)]
+            result_path = self.workspace.save_run_result(active.snapshot.thread_id, active.snapshot.task_id, active.result)
+            final_state = self._finalize_thread_state(active.state, active.result, result_path)
+            with self._lock:
+                self._active_runs.pop(active.snapshot.task_id, None)
+            if active.result.status == RUN_STATUS_AWAITING_USER_INPUT:
+                final_state = self._drop_queued_for_thread(active.snapshot.thread_id, clear_state=True) or final_state
+            if active.on_finished is not None:
+                active.on_finished(final_state, active.result)
+            finalized.append((final_state, active.result))
+        self.dispatch_ready()
+        return finalized
 
     def wait_for_active(self, poll_seconds: float = 0.05) -> RunResult | None:
         while True:
             with self._lock:
-                active = self._active_run
-            if active is None:
+                has_active = bool(self._active_runs)
+            if not has_active:
                 return None
-            if active.done.wait(timeout=poll_seconds):
-                finished = self.collect_finished()
-                return finished[0][1] if finished else None
+            time.sleep(poll_seconds)
+            finished = self.collect_finished()
+            if finished:
+                return finished[0][1]
+
+    def wait_until_idle(self, poll_seconds: float = 0.05) -> None:
+        while True:
+            self.collect_finished()
+            self.dispatch_ready()
+            with self._lock:
+                if not self._active_runs and not self._queued_runs:
+                    return
+            time.sleep(poll_seconds)
 
     def kill(self, task_id: str) -> bool:
         with self._lock:
-            active = self._active_run
-        if active is None or active.snapshot.task_id != task_id:
+            active = self._active_runs.get(task_id)
+        if active is None:
             return False
         return self.dispatcher.kill(active.snapshot.backend, task_id)
 
     def is_busy(self) -> bool:
         with self._lock:
-            return self._active_run is not None
+            return bool(self._active_runs) or bool(self._queued_runs)
 
     def active_task_id(self) -> str | None:
         with self._lock:
-            return None if self._active_run is None else self._active_run.snapshot.task_id
+            active = next(iter(self._active_runs.values()), None)
+        return None if active is None else active.snapshot.task_id
 
     def active_thread_id(self) -> str | None:
         with self._lock:
-            return None if self._active_run is None else self._active_run.snapshot.thread_id
+            active = next(iter(self._active_runs.values()), None)
+        return None if active is None else active.snapshot.thread_id
 
     def active_snapshot(self) -> TaskSnapshot | None:
         with self._lock:
-            return None if self._active_run is None else self._active_run.snapshot
+            active = next(iter(self._active_runs.values()), None)
+        return None if active is None else active.snapshot
+
+    def queued_count(self) -> int:
+        with self._lock:
+            return len(self._queued_runs)
+
+    def active_count(self) -> int:
+        with self._lock:
+            return len(self._active_runs)
+
+    def dispatch_ready(self) -> bool:
+        started = False
+        while True:
+            with self._lock:
+                if len(self._active_runs) >= self.max_concurrent_runs or not self._queued_runs:
+                    return started
+                active_workspace_ids = {
+                    active.state.workspace_id or build_workspace_id(active.snapshot.repo_path, active.snapshot.workdir)
+                    for active in self._active_runs.values()
+                }
+                candidate_index = None
+                for index, queued in enumerate(self._queued_runs):
+                    workspace_id = build_workspace_id(queued.snapshot.repo_path, queued.snapshot.workdir)
+                    if workspace_id not in active_workspace_ids:
+                        candidate_index = index
+                        break
+                if candidate_index is None:
+                    return started
+                queued = self._queued_runs.pop(candidate_index)
+            self._start_queued_run(queued)
+            started = True
 
     def next_thread_id(self) -> str:
         return self._next_thread_id()
@@ -298,8 +359,9 @@ class SerialTaskRunner:
             except Exception as exc:
                 result = self._build_failure_result(snapshot, run_path, dispatch_started_at, exc)
             with self._lock:
-                if self._active_run is not None and self._active_run.snapshot.task_id == snapshot.task_id:
-                    self._active_run.result = result
+                active = self._active_runs.get(snapshot.task_id)
+                if active is not None:
+                    active.result = result
         finally:
             done.set()
 
@@ -320,6 +382,8 @@ class SerialTaskRunner:
         root_message_id: str | None = None,
         latest_message_id: str | None = None,
         subject_norm: str | None = None,
+        session_name: str | None = None,
+        active_thread_ids: set[str] | None = None,
     ) -> ThreadState:
         state_path = self.workspace.thread_state_path(snapshot.thread_id)
         if state_path.exists():
@@ -328,14 +392,28 @@ class SerialTaskRunner:
             state.profile = snapshot.profile
             state.repo_path = snapshot.repo_path
             state.workdir = snapshot.workdir
-            state.current_task_id = snapshot.task_id
-            state.last_task_snapshot_file = snapshot_rel
-            state.status = THREAD_STATUS_ACCEPTED
-            state.last_summary = None
-            state.pending_question_id = None
-            state.pending_question_text = None
-            state.pending_choices = []
-            state.awaiting_since = None
+            state.workspace_id = state.workspace_id or build_workspace_id(snapshot.repo_path, snapshot.workdir)
+            state.workspace_norm = state.workspace_norm or build_workspace_norm(snapshot.repo_path, snapshot.workdir)
+            state.session_id = state.session_id or snapshot.thread_id
+            state.session_name = state.session_name or session_name or subject_norm or snapshot.thread_id
+            state.session_norm = state.session_norm or subject_norm or state.subject_norm
+            if snapshot.thread_id in (active_thread_ids or set()) and state.status == THREAD_STATUS_RUNNING:
+                state.queued_task_id = snapshot.task_id
+                state.queued_snapshot_file = snapshot_rel
+            else:
+                state.current_task_id = snapshot.task_id
+                state.last_task_snapshot_file = snapshot_rel
+                state.status = THREAD_STATUS_ACCEPTED
+                state.last_summary = None
+                state.pending_question_id = None
+                state.pending_question_text = None
+                state.pending_choices = []
+                state.awaiting_since = None
+                state.queued_task_id = None
+                state.queued_snapshot_file = None
+                if snapshot.run_mode == "new":
+                    state.backend_session_id = None
+                    state.backend_session_resumable = False
             state.updated_at = snapshot.updated_at
             save_thread_state(state, self.workspace.task_root)
             return state
@@ -345,6 +423,7 @@ class SerialTaskRunner:
             root_message_id=root_message_id or f"local-root:{snapshot.thread_id}",
             latest_message_id=latest_message_id or f"local-latest:{snapshot.thread_id}",
             subject_norm=subject_norm or f"local-demo:{snapshot.thread_id}",
+            session_name=session_name or subject_norm or f"local-demo:{snapshot.thread_id}",
             backend=snapshot.backend,
             profile=snapshot.profile,
             repo_path=snapshot.repo_path,
@@ -359,8 +438,151 @@ class SerialTaskRunner:
             pending_question_text=None,
             pending_choices=[],
             awaiting_since=None,
+            backend_session_id=None,
+            backend_session_resumable=False,
+            queued_task_id=None,
+            queued_snapshot_file=None,
             created_at=snapshot.created_at,
             updated_at=snapshot.updated_at,
+        )
+
+    def _upsert_queued_run(self, queued: _QueuedRun) -> None:
+        with self._lock:
+            for index, existing in enumerate(self._queued_runs):
+                if existing.snapshot.thread_id == queued.snapshot.thread_id:
+                    self._queued_runs[index] = queued
+                    return
+            self._queued_runs.append(queued)
+
+    def _start_queued_run(self, queued: _QueuedRun) -> None:
+        state = self._activate_thread_state(queued.snapshot, queued.snapshot_rel)
+        run_path = self.workspace.create_run_dir(queued.snapshot.thread_id, queued.snapshot.task_id)
+        if queued.on_running is not None:
+            queued.on_running(state)
+
+        done = threading.Event()
+        active = _ActiveRun(
+            snapshot=queued.snapshot,
+            state=state,
+            run_path=run_path,
+            dispatch_started_at=_timestamp(),
+            on_finished=queued.on_finished,
+            done=done,
+            thread=threading.Thread(
+                target=self._dispatch_active_run,
+                args=(queued.snapshot, run_path, _timestamp(), done),
+                daemon=True,
+                name=f"mail-runner-{queued.snapshot.task_id}",
+            ),
+        )
+        with self._lock:
+            self._active_runs[queued.snapshot.task_id] = active
+        active.thread.start()
+
+    def _activate_thread_state(self, snapshot: TaskSnapshot, snapshot_rel: str) -> ThreadState:
+        state = load_thread_state(snapshot.thread_id, self.workspace.task_root)
+        state.backend = snapshot.backend
+        state.profile = snapshot.profile
+        state.repo_path = snapshot.repo_path
+        state.workdir = snapshot.workdir
+        if state.queued_task_id == snapshot.task_id:
+            state.current_task_id = snapshot.task_id
+            state.last_task_snapshot_file = state.queued_snapshot_file or snapshot_rel
+            state.queued_task_id = None
+            state.queued_snapshot_file = None
+        else:
+            state.current_task_id = snapshot.task_id
+            state.last_task_snapshot_file = snapshot_rel
+        state.status = THREAD_STATUS_RUNNING
+        state.updated_at = _timestamp()
+        save_thread_state(state, self.workspace.task_root)
+        return state
+
+    def _drop_queued_for_thread(self, thread_id: str, *, clear_state: bool) -> ThreadState | None:
+        removed = False
+        with self._lock:
+            kept: list[_QueuedRun] = []
+            for queued in self._queued_runs:
+                if queued.snapshot.thread_id == thread_id:
+                    removed = True
+                    continue
+                kept.append(queued)
+            self._queued_runs = kept
+        if not clear_state or not removed:
+            return None
+        state = load_thread_state(thread_id, self.workspace.task_root)
+        state.queued_task_id = None
+        state.queued_snapshot_file = None
+        state.updated_at = _timestamp()
+        save_thread_state(state, self.workspace.task_root)
+        return state
+
+    def _recover_persisted_queue(self) -> None:
+        for thread_dir in sorted(self.workspace.task_root.glob("thread_*")):
+            if not thread_dir.is_dir():
+                continue
+            state_path = self.workspace.thread_state_path(thread_dir.name)
+            if not state_path.exists():
+                continue
+            state = load_thread_state(thread_dir.name, self.workspace.task_root)
+            if state.status == THREAD_STATUS_ACCEPTED:
+                self._recover_snapshot_for_state(state, state.current_task_id, state.last_task_snapshot_file)
+                continue
+            if state.status == THREAD_STATUS_RUNNING:
+                self._recover_running_state(state)
+                continue
+            if state.queued_task_id and state.queued_snapshot_file:
+                self._promote_queued_snapshot(state, note_prefix="Recovered queued follow-up after runner restart.")
+
+    def _recover_running_state(self, state: ThreadState) -> None:
+        if state.queued_task_id and state.queued_snapshot_file:
+            self._promote_queued_snapshot(state, note_prefix="Runner restarted while the previous run was still executing.")
+            return
+        state.status = THREAD_STATUS_FAILED
+        state.last_summary = "Runner restarted while task was running."
+        state.pending_question_id = None
+        state.pending_question_text = None
+        state.pending_choices = []
+        state.awaiting_since = None
+        state.updated_at = _timestamp()
+        save_thread_state(state, self.workspace.task_root)
+
+    def _promote_queued_snapshot(self, state: ThreadState, *, note_prefix: str) -> None:
+        queued_task_id = state.queued_task_id
+        queued_snapshot_file = state.queued_snapshot_file
+        if not queued_task_id or not queued_snapshot_file:
+            return
+        state.current_task_id = queued_task_id
+        state.last_task_snapshot_file = queued_snapshot_file
+        state.status = THREAD_STATUS_ACCEPTED
+        state.queued_task_id = None
+        state.queued_snapshot_file = None
+        state.last_summary = note_prefix
+        state.pending_question_id = None
+        state.pending_question_text = None
+        state.pending_choices = []
+        state.awaiting_since = None
+        state.updated_at = _timestamp()
+        save_thread_state(state, self.workspace.task_root)
+        self._recover_snapshot_for_state(state, state.current_task_id, state.last_task_snapshot_file)
+
+    def _recover_snapshot_for_state(self, state: ThreadState, task_id: str, snapshot_rel: str) -> None:
+        try:
+            snapshot = self.workspace.load_snapshot(state.thread_id, snapshot_rel)
+        except FileNotFoundError:
+            LOGGER.warning("Unable to recover queued snapshot for %s: missing %s", state.thread_id, snapshot_rel)
+            return
+        self._upsert_queued_run(
+            _QueuedRun(
+                snapshot=snapshot,
+                snapshot_rel=snapshot_rel,
+                root_message_id=state.root_message_id,
+                latest_message_id=state.latest_message_id,
+                subject_norm=state.subject_norm,
+                session_name=state.session_name,
+                on_running=None,
+                on_finished=None,
+            )
         )
 
     def _build_failure_result(
@@ -395,6 +617,12 @@ class SerialTaskRunner:
         state.history_files.append(self.workspace.to_thread_relative(state.thread_id, result_path))
         state.last_summary = _extract_summary(self.workspace.thread_dir(state.thread_id), result)
         state.status = FINAL_THREAD_STATUS_BY_RUN_STATUS[result.status]
+        state.backend_session_id = result.backend_session_id or state.backend_session_id
+        state.backend_session_resumable = bool(state.backend_session_id) and bool(result.backend_session_resumable)
+        if result.status == RUN_STATUS_KILLED and state.backend_session_id:
+            # A killed run may still have a usable native session id. We keep it resumable
+            # and let the mail layer mark the next continuation as a risk recovery.
+            state.backend_session_resumable = True
         if result.status == RUN_STATUS_AWAITING_USER_INPUT:
             state.pending_question_id = result.question_id or _generate_question_id(result.task_id)
             state.pending_question_text = result.question_text
@@ -429,7 +657,7 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config(args.config)
     config_base_dir = Path(args.config).resolve().parent if args.config else None
     task_root = Path(args.task_root) if args.task_root else config.resolve_task_root(config_base_dir)
-    runner = SerialTaskRunner(task_root, _build_dispatcher(config))
+    runner = SerialTaskRunner(task_root, _build_dispatcher(config), max_concurrent_runs=config.max_concurrent_runs)
     try:
         result = runner.start(args.snapshot)
     except Exception:

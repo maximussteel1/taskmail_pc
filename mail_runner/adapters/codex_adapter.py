@@ -45,13 +45,29 @@ class CodexAdapter(BaseCliAdapter, WorkerAdapter):
         if resolved.prefix == [DEMO_COMMAND]:
             command, display = build_demo_command(self.backend)
             return command, prompt_text, display
-        command = [
-            *resolved.prefix,
-            "exec",
-            "--full-auto",
-            "--cd",
-            str(cwd),
-        ]
+        if task.run_mode == "resume":
+            if not task.backend_session_id:
+                raise ValueError("Codex resume requires backend_session_id.")
+            command = [*resolved.prefix]
+            if self._config.enable_web_search:
+                command.append("--search")
+            command.extend(
+                [
+                    "exec",
+                    "resume",
+                    "--skip-git-repo-check",
+                ]
+            )
+            command.append("--full-auto")
+            if model_name:
+                command.extend(["-m", model_name])
+            command.extend([task.backend_session_id, "-"])
+            return command, prompt_text, " ".join(command)
+
+        command = [*resolved.prefix]
+        if self._config.enable_web_search:
+            command.append("--search")
+        command.extend(["exec", "--skip-git-repo-check", "--full-auto", "--cd", str(cwd)])
         if model_name:
             command.extend(["-m", model_name])
         command.append("-")

@@ -11,6 +11,7 @@ from .status import THREAD_STATUS_AWAITING_USER_INPUT
 _HEADER_RE = re.compile(r"^\s*(Task|Acceptance|Timeout|Mode|Profile)\s*:\s*(.*)$", re.IGNORECASE)
 _LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*]|\d+[.)])\s*")
 _TIMEOUT_RE = re.compile(r"(?i)timeout[^\d]{0,12}(\d+)|(\d+)\s*(?:minutes?|mins?|分钟)")
+_COMMAND_RE = re.compile(r"^\s*/([a-z][a-z0-9_-]*)(?:\s+(.+?))?\s*$", re.IGNORECASE)
 _STATUS_PATTERNS = ("status", "progress", "how is it going", "what is the status", "状态", "进展", "现在如何")
 _RERUN_PATTERNS = ("rerun", "run again", "retry", "重新跑", "重跑", "再跑一次", "重新执行")
 _KILL_PATTERNS = ("kill", "terminate", "stop the task", "stop current task", "终止", "停止当前任务", "杀掉")
@@ -25,9 +26,38 @@ _PROFILE_PATTERNS = (
 
 def _contains_any(text: str, patterns: tuple[str, ...]) -> bool:
     lowered = text.lower()
-    return any(pattern in lowered for pattern in patterns)
+    for pattern in patterns:
+        normalized = pattern.lower()
+        if re.search(r"[a-z]", normalized):
+            if re.search(rf"(?<![a-z]){re.escape(normalized)}(?![a-z])", lowered):
+                return True
+            continue
+        if normalized in lowered:
+            return True
+    return False
 
 
+def _split_leading_command(text: str) -> tuple[str | None, str | None, str, bool]:
+    normalized_lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    first_content_index: int | None = None
+    for index, raw_line in enumerate(normalized_lines):
+        if raw_line.strip():
+            first_content_index = index
+            break
+    if first_content_index is None:
+        return None, None, "", False
+
+    first_line = normalized_lines[first_content_index].strip()
+    if not first_line.startswith("/"):
+        return None, None, text.strip(), False
+
+    match = _COMMAND_RE.match(first_line)
+    body = "\n".join(normalized_lines[first_content_index + 1 :]).strip()
+    if not match:
+        return None, None, body, True
+    command = match.group(1).strip().lower()
+    argument = (match.group(2) or "").strip() or None
+    return command, argument, body, False
 def _extract_timeout(text: str) -> int | None:
     match = _TIMEOUT_RE.search(text)
     if not match:
@@ -108,22 +138,113 @@ def parse_action(context: dict[str, Any], subject_info: dict[str, Any] | None = 
     if subject_info and subject_info.get("action") == "KILL":
         return ParsedMailAction(action="KILL", confidence=1.0, raw_user_text=raw_user_text)
 
-    if not raw_user_text:
+    command_name, target_session_id, command_body, invalid_command = _split_leading_command(raw_user_text)
+    effective_text = command_body if command_name is not None or invalid_command else raw_user_text
+    effective_text = effective_text.strip()
+
+    if invalid_command:
+        return ParsedMailAction(
+            action="UNKNOWN",
+            confidence=0.0,
+            raw_user_text=effective_text,
+            notes="Unknown slash command.",
+        )
+
+    if command_name == "sessions":
+        return ParsedMailAction(
+            action="LIST_SESSIONS",
+            confidence=1.0,
+            raw_user_text="",
+            target_session_id=target_session_id,
+        )
+    if command_name == "status":
+        return ParsedMailAction(
+            action="STATUS_QUERY",
+            confidence=1.0,
+            raw_user_text=effective_text,
+            target_session_id=target_session_id,
+        )
+    if command_name == "kill":
+        return ParsedMailAction(
+            action="KILL",
+            confidence=1.0,
+            raw_user_text=effective_text,
+            target_session_id=target_session_id,
+        )
+    if command_name == "rerun":
+        return ParsedMailAction(
+            action="RERUN",
+            confidence=1.0,
+            raw_user_text=effective_text,
+            target_session_id=target_session_id,
+        )
+
+    if not raw_user_text and command_name is None:
         return ParsedMailAction(action="UNKNOWN", confidence=0.0, raw_user_text="")
 
-    if _contains_any(raw_user_text, _KILL_PATTERNS):
-        return ParsedMailAction(action="KILL", confidence=0.95, raw_user_text=raw_user_text)
-    if _contains_any(raw_user_text, _RERUN_PATTERNS):
-        return ParsedMailAction(action="RERUN", confidence=0.9, raw_user_text=raw_user_text)
-    if _contains_any(raw_user_text, _STATUS_PATTERNS):
-        return ParsedMailAction(action="STATUS_QUERY", confidence=0.85, raw_user_text=raw_user_text)
+    if command_name is None:
+        if _contains_any(raw_user_text, _KILL_PATTERNS):
+            return ParsedMailAction(action="KILL", confidence=0.95, raw_user_text=raw_user_text)
+        if _contains_any(raw_user_text, _RERUN_PATTERNS):
+            return ParsedMailAction(action="RERUN", confidence=0.9, raw_user_text=raw_user_text)
+        if _contains_any(raw_user_text, _STATUS_PATTERNS):
+            return ParsedMailAction(action="STATUS_QUERY", confidence=0.85, raw_user_text=raw_user_text)
 
-    structured = _parse_structured_update(raw_user_text)
-    timeout_minutes = structured["timeout_minutes"] or _extract_timeout(raw_user_text)
-    mode = structured["mode"] or _extract_mode(raw_user_text)
-    profile = structured["profile"] or _extract_profile(raw_user_text)
+    structured = _parse_structured_update(effective_text)
+    timeout_minutes = structured["timeout_minutes"] or _extract_timeout(effective_text)
+    mode = structured["mode"] or _extract_mode(effective_text)
+    profile = structured["profile"] or _extract_profile(effective_text)
     task_text_delta = structured["task_text_delta"]
     acceptance_delta = structured["acceptance_delta"]
+
+    if command_name == "resume":
+        if awaiting_user_input and effective_text:
+            return ParsedMailAction(
+                action="ANSWER_QUESTION",
+                confidence=1.0,
+                profile=profile,
+                task_text_delta=task_text_delta,
+                acceptance_delta=acceptance_delta,
+                timeout_minutes=timeout_minutes,
+                mode=mode,
+                raw_user_text=effective_text,
+                target_session_id=target_session_id,
+            )
+        if awaiting_user_input and not effective_text:
+            return ParsedMailAction(action="UNKNOWN", confidence=0.0, raw_user_text="")
+        return ParsedMailAction(
+            action="CONTINUE_SESSION",
+            confidence=1.0,
+            profile=profile,
+            task_text_delta=task_text_delta,
+            acceptance_delta=acceptance_delta,
+            timeout_minutes=timeout_minutes,
+            mode=mode,
+            raw_user_text=effective_text,
+            target_session_id=target_session_id,
+        )
+
+    if command_name == "new":
+        return ParsedMailAction(
+            action="NEW_SESSION",
+            confidence=1.0,
+            profile=profile,
+            task_text_delta=task_text_delta,
+            acceptance_delta=acceptance_delta,
+            timeout_minutes=timeout_minutes,
+            mode=mode,
+            raw_user_text=effective_text,
+        )
+
+    if command_name is not None:
+        return ParsedMailAction(
+            action="UNKNOWN",
+            confidence=0.0,
+            raw_user_text=effective_text,
+            target_session_id=target_session_id,
+            notes=f"Unsupported slash command: /{command_name}",
+        )
+
     if awaiting_user_input:
         return ParsedMailAction(
             action="ANSWER_QUESTION",
@@ -133,21 +254,15 @@ def parse_action(context: dict[str, Any], subject_info: dict[str, Any] | None = 
             acceptance_delta=acceptance_delta,
             timeout_minutes=timeout_minutes,
             mode=mode,
-            raw_user_text=raw_user_text,
+            raw_user_text=effective_text,
         )
-    if any(
-        value is not None
-        for value in [task_text_delta, acceptance_delta, timeout_minutes, mode, profile]
-    ):
-        return ParsedMailAction(
-            action="UPDATE_TASK",
-            confidence=0.8,
-            profile=profile,
-            task_text_delta=task_text_delta,
-            acceptance_delta=acceptance_delta,
-            timeout_minutes=timeout_minutes,
-            mode=mode,
-            raw_user_text=raw_user_text,
-        )
-
-    return ParsedMailAction(action="APPEND_CONTEXT", confidence=0.6, raw_user_text=raw_user_text)
+    return ParsedMailAction(
+        action="CONTINUE_SESSION",
+        confidence=0.7,
+        profile=profile,
+        task_text_delta=task_text_delta,
+        acceptance_delta=acceptance_delta,
+        timeout_minutes=timeout_minutes,
+        mode=mode,
+        raw_user_text=effective_text,
+    )

@@ -14,6 +14,9 @@ QUESTION_BEGIN_MARKER = "---TASK-QUESTION-BEGIN---"
 QUESTION_END_MARKER = "---TASK-QUESTION-END---"
 CAPSULE_FIELDS = (
     "thread_id",
+    "workspace_id",
+    "session_id",
+    "session_name",
     "task_id",
     "backend",
     "repo_path",

@@ -38,9 +38,11 @@ class FakeMailClient:
 class QuestionThenSuccessAdapter(WorkerAdapter):
     def __init__(self) -> None:
         self.calls = 0
+        self.tasks: list[TaskSnapshot] = []
 
     def run(self, task: TaskSnapshot, run_dir: str) -> RunResult:
         self.calls += 1
+        self.tasks.append(task)
         run_path = Path(run_dir)
         run_path.mkdir(parents=True, exist_ok=True)
         (run_path / "prompt.txt").write_text("prompt", encoding="utf-8")
@@ -66,6 +68,8 @@ class QuestionThenSuccessAdapter(WorkerAdapter):
             question_id="question_task_001" if self.calls == 1 else None,
             question_text="Should I update both modules?" if self.calls == 1 else None,
             pending_choices=["yes", "no"] if self.calls == 1 else [],
+            backend_session_id="native-session-001",
+            backend_session_resumable=True,
         )
 
     def kill(self, task_id: str) -> bool:
@@ -117,15 +121,18 @@ def test_process_once_handles_question_then_answer_flow(tmp_path) -> None:
     assert first_state["status"] == "awaiting_user_input"
     assert first_state["pending_question_text"] == "Should I update both modules?"
     assert second_state["status"] == "done"
+    assert adapter.tasks[1].run_mode == "resume"
+    assert adapter.tasks[1].backend_session_id == "native-session-001"
+    assert adapter.tasks[1].turn_text == "Profile: strong\nYes, update both modules."
     assert latest_snapshot["profile"] == "strong"
     assert "Answer to pending question (question_task_001):" in latest_snapshot["task_text"]
     assert [item["subject"] for item in client.sent_messages] == [
-        "[ACCEPTED] Demo task",
-        "[RUNNING] Demo task",
-        "[QUESTION] Demo task",
-        "[ACCEPTED] demo task",
-        "[RUNNING] demo task",
-        "[DONE] demo task",
+        "[ACCEPTED][S:thread_001] Demo task",
+        "[RUNNING][S:thread_001] Demo task",
+        "[QUESTION][S:thread_001] Demo task",
+        "[ACCEPTED][S:thread_001] Demo task",
+        "[RUNNING][S:thread_001] Demo task",
+        "[DONE][S:thread_001] Demo task",
     ]
 
 
@@ -167,5 +174,5 @@ def test_process_once_returns_status_for_rerun_while_waiting(tmp_path) -> None:
     stats = process_once(config, base_dir=tmp_path, mail_client=client, dispatcher=dispatcher)
 
     assert stats == {"fetched": 1, "processed": 1, "skipped": 0, "failed": 0}
-    assert client.sent_messages[-1]["subject"] == "[STATUS] demo task"
+    assert client.sent_messages[-1]["subject"] == "[STATUS][S:thread_001] Demo task"
     assert "awaiting an answer to the pending question" in client.sent_messages[-1]["body"]

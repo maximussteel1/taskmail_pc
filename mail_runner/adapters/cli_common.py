@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -26,6 +27,8 @@ _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _TIMESTAMP_LOG_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T.*\b(?:ERROR|WARN|INFO)\b", re.IGNORECASE)
 _LS_LINE_RE = re.compile(r"^[dl-][rwx-]{9}\b")
 _NUMBER_ONLY_RE = re.compile(r"^[\d,\s]+$")
+_SEPARATOR_LINE_RE = re.compile(r"^[=\-_*]{3,}$")
+_SESSION_ID_RE = re.compile(r"(?im)^\s*session id:\s*([0-9a-z_-]{8,})\s*$")
 DEMO_SCRIPT = (
     "import os,sys,time\n"
     "backend=os.environ.get('MAIL_RUNNER_DEMO_BACKEND','demo')\n"
@@ -34,12 +37,15 @@ DEMO_SCRIPT = (
     "question_text=os.environ.get('MAIL_RUNNER_DEMO_QUESTION_TEXT','').strip()\n"
     "question_choices=os.environ.get('MAIL_RUNNER_DEMO_QUESTION_CHOICES','').strip()\n"
     "question_id=os.environ.get('MAIL_RUNNER_DEMO_QUESTION_ID','').strip()\n"
+    "session_id=os.environ.get('MAIL_RUNNER_DEMO_SESSION_ID','').strip()\n"
     "stdin_text=sys.stdin.read() if not sys.stdin.closed else ''\n"
     "print(f'Demo backend {backend} starting')\n"
     "if prompt_path:\n"
     "    print(f'Prompt file: {prompt_path}')\n"
     "if stdin_text:\n"
     "    print(f'Stdin chars: {len(stdin_text)}')\n"
+    "if session_id:\n"
+    "    print(f'session id: {session_id}')\n"
     "print('Demo backend is running')\n"
     "time.sleep(max(0.0, sleep_seconds))\n"
     "if question_text:\n"
@@ -72,6 +78,25 @@ _NOISE_EXACT = {
     "user",
     "codex",
     "tokens used",
+}
+_SUMMARY_CHATTER_EXACT = {
+    "analysis complete.",
+    "need anything else?",
+}
+_SUMMARY_CHATTER_PREFIXES = (
+    "continue if you have next steps",
+    "the analysis task is complete",
+    "the analysis task was completed successfully",
+    "no work is pending",
+    "let me know if you'd like",
+)
+_META_SECTION_HEADINGS = {
+    "goal",
+    "instructions",
+    "discoveries",
+    "accomplished",
+    "relevant files",
+    "relevant files / directories",
 }
 
 
@@ -114,8 +139,53 @@ def _render_prompt(task: TaskSnapshot, backend: str) -> str:
     )
 
 
+def render_task_input(task: TaskSnapshot, backend: str) -> str:
+    if task.run_mode == "resume":
+        return (task.turn_text or "").strip() or "Continue the previous task."
+    return _render_prompt(task, backend)
+
+
 def normalize_log_text(text: str) -> str:
     return _ANSI_RE.sub("", text).replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _find_session_id_value(payload: object) -> str | None:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            normalized = str(key).strip().lower()
+            if normalized in {"session_id", "sessionid", "session", "conversation_id", "conversationid"}:
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            nested = _find_session_id_value(value)
+            if nested:
+                return nested
+        return None
+    if isinstance(payload, list):
+        for item in payload:
+            nested = _find_session_id_value(item)
+            if nested:
+                return nested
+    return None
+
+
+def extract_backend_session_id(*texts: str) -> str | None:
+    for text in texts:
+        match = _SESSION_ID_RE.search(normalize_log_text(text))
+        if match:
+            return match.group(1).strip()
+    for text in texts:
+        for raw_line in normalize_log_text(text).splitlines():
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            session_id = _find_session_id_value(payload)
+            if session_id:
+                return session_id
+    return None
 
 
 def _is_noise_line(line: str) -> bool:
@@ -162,6 +232,9 @@ def _extract_blocks(text: str) -> list[list[str]]:
 
 def extract_output_block(text: str) -> list[str]:
     blocks = _extract_blocks(text)
+    for block in reversed(blocks):
+        if _summary_candidates(block):
+            return block
     return blocks[-1] if blocks else []
 
 
@@ -172,17 +245,53 @@ def _looks_like_heading(line: str) -> bool:
     return len(simplified.removesuffix(":").split()) <= 4
 
 
-def extract_summary_line(text: str) -> str | None:
-    block = extract_output_block(text)
-    if not block:
-        return None
+def _normalize_summary_line(line: str) -> str:
+    return re.sub(r"[*_`#>\-]", "", line).strip()
+
+
+def _is_meta_section_heading(line: str) -> bool:
+    lowered = _normalize_summary_line(line).removesuffix(":").strip().lower()
+    return lowered in _META_SECTION_HEADINGS
+
+
+def _is_summary_chatter_line(line: str) -> bool:
+    lowered = _normalize_summary_line(line).lower()
+    if lowered in _SUMMARY_CHATTER_EXACT:
+        return True
+    return any(lowered.startswith(prefix) for prefix in _SUMMARY_CHATTER_PREFIXES)
+
+
+def _summary_candidates(block: list[str]) -> list[str]:
+    candidates: list[str] = []
     for line in block:
-        if line.startswith("- "):
+        stripped = line.strip()
+        if not stripped:
             continue
-        if _looks_like_heading(line):
+        if stripped.startswith("#"):
             continue
-        return line
-    return block[0]
+        if _SEPARATOR_LINE_RE.match(stripped):
+            continue
+        if stripped.startswith("- "):
+            continue
+        if _looks_like_heading(stripped):
+            continue
+        if _is_meta_section_heading(stripped):
+            continue
+        if _is_summary_chatter_line(stripped):
+            continue
+        candidates.append(stripped)
+    return candidates
+
+
+def extract_summary_line(text: str) -> str | None:
+    blocks = _extract_blocks(text)
+    for block in reversed(blocks):
+        candidates = _summary_candidates(block)
+        if candidates:
+            return candidates[0]
+    if not blocks:
+        return None
+    return blocks[-1][0]
 
 
 def extract_error_excerpt(stderr_text: str, stdout_text: str = "") -> str | None:
@@ -223,7 +332,39 @@ def resolve_command_prefix(configured_command: str, executable_name: str) -> _Re
 
 def resolve_task_cwd(task: TaskSnapshot) -> Path:
     repo_path = Path(task.repo_path)
-    return repo_path / task.workdir if task.workdir else repo_path
+    if not task.workdir:
+        return repo_path
+    workdir = Path(task.workdir)
+    return workdir if workdir.is_absolute() else (repo_path / workdir)
+
+
+def prepare_task_cwd(task: TaskSnapshot, *, auto_create_workdir: bool = False) -> Path:
+    repo_path = Path(task.repo_path)
+    if not repo_path.exists():
+        raise FileNotFoundError(f"Task repository path does not exist: {repo_path}")
+    if not repo_path.is_dir():
+        raise NotADirectoryError(f"Task repository path is not a directory: {repo_path}")
+
+    cwd = resolve_task_cwd(task)
+    if cwd.exists():
+        if not cwd.is_dir():
+            raise NotADirectoryError(f"Task working directory is not a directory: {cwd}")
+        return cwd
+
+    if not task.workdir or not auto_create_workdir:
+        raise FileNotFoundError(f"Task working directory does not exist: {cwd}")
+
+    workdir = Path(task.workdir)
+    if workdir.is_absolute():
+        raise FileNotFoundError(f"Task working directory does not exist: {cwd}")
+
+    repo_root = repo_path.resolve()
+    candidate = cwd.resolve(strict=False)
+    if not candidate.is_relative_to(repo_root):
+        raise ValueError(f"Auto-created workdir must stay within repo_path: {cwd}")
+
+    candidate.mkdir(parents=True, exist_ok=True)
+    return candidate
 
 
 def build_demo_command(backend: str) -> tuple[list[str], str]:
@@ -246,6 +387,8 @@ def build_run_result(
     question_id: str | None = None,
     question_text: str | None = None,
     pending_choices: list[str] | None = None,
+    backend_session_id: str | None = None,
+    backend_session_resumable: bool = False,
 ) -> RunResult:
     return RunResult(
         task_id=task.task_id,
@@ -265,6 +408,8 @@ def build_run_result(
         question_id=question_id,
         question_text=question_text,
         pending_choices=list(pending_choices or []),
+        backend_session_id=backend_session_id,
+        backend_session_resumable=backend_session_resumable,
     )
 
 
@@ -349,6 +494,15 @@ class BaseCliAdapter:
     ) -> tuple[list[str], str | None, str]:
         raise NotImplementedError
 
+    def _build_environment_overrides(
+        self,
+        *,
+        task: TaskSnapshot,
+        resolved: _ResolvedCommand,
+        cwd: Path,
+    ) -> dict[str, str]:
+        return {}
+
     def resolve_profile_model(self, profile: str | None) -> str | None:
         if profile is None:
             return None
@@ -357,6 +511,38 @@ class BaseCliAdapter:
         if profile_name not in mapping:
             raise ValueError(f"{self.backend_label} profile mapping is missing for profile '{profile_name}'")
         return mapping[profile_name]
+
+    def _extract_backend_session_id(
+        self,
+        *,
+        task: TaskSnapshot,
+        resolved: _ResolvedCommand,
+        cwd: Path,
+        stdout_text: str,
+        stderr_text: str,
+    ) -> str | None:
+        return extract_backend_session_id(stdout_text, stderr_text) or task.backend_session_id
+
+    def _build_subprocess_env(
+        self,
+        *,
+        task: TaskSnapshot,
+        resolved: _ResolvedCommand,
+        cwd: Path,
+        prompt_path: Path | None = None,
+    ) -> dict[str, str] | None:
+        env_overrides = self._build_environment_overrides(task=task, resolved=resolved, cwd=cwd)
+        if not env_overrides and not resolved.is_demo:
+            return None
+        env = os.environ.copy()
+        env.update(env_overrides)
+        if resolved.is_demo:
+            env["MAIL_RUNNER_DEMO_BACKEND"] = self.backend
+            env["MAIL_RUNNER_DEMO_SLEEP"] = str(self._config.mock_sleep_seconds)
+            if prompt_path is not None:
+                env["MAIL_RUNNER_PROMPT_PATH"] = str(prompt_path)
+            env["MAIL_RUNNER_DEMO_SESSION_ID"] = task.backend_session_id or f"demo-session-{self.backend}-{task.thread_id}"
+        return env
 
     def run(self, task: TaskSnapshot, run_dir: str) -> RunResult:
         started_at = _timestamp()
@@ -367,25 +553,18 @@ class BaseCliAdapter:
         stdout_path = run_path / "stdout.log"
         stderr_path = run_path / "stderr.log"
         summary_path = run_path / "summary.md"
-        prompt_path.write_text(_render_prompt(task, self.backend), encoding="utf-8")
+        prompt_path.write_text(render_task_input(task, self.backend), encoding="utf-8")
 
         try:
             resolved = resolve_command_prefix(self._configured_command(), self._default_executable())
-            cwd = resolve_task_cwd(task)
-            if not cwd.exists():
-                raise FileNotFoundError(f"Task working directory does not exist: {cwd}")
+            cwd = prepare_task_cwd(task, auto_create_workdir=self._config.auto_create_workdir)
             command, stdin_text, display_command = self._build_backend_command(
                 task=task,
                 resolved=resolved,
                 prompt_path=prompt_path,
                 cwd=cwd,
             )
-            env = None
-            if resolved.is_demo:
-                env = os.environ.copy()
-                env["MAIL_RUNNER_DEMO_BACKEND"] = self.backend
-                env["MAIL_RUNNER_DEMO_SLEEP"] = str(self._config.mock_sleep_seconds)
-                env["MAIL_RUNNER_PROMPT_PATH"] = str(prompt_path)
+            env = self._build_subprocess_env(task=task, resolved=resolved, cwd=cwd, prompt_path=prompt_path)
 
             creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if WINDOWS else 0
             with stdout_path.open("w", encoding="utf-8", errors="replace") as stdout_handle:
@@ -419,6 +598,13 @@ class BaseCliAdapter:
             stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
             primary_output = extract_output_block(stdout_text)
             question_block = parse_question_capsule(normalize_log_text(stdout_text))
+            backend_session_id = self._extract_backend_session_id(
+                task=task,
+                resolved=resolved,
+                cwd=cwd,
+                stdout_text=stdout_text,
+                stderr_text=stderr_text,
+            )
             if killed:
                 status = RUN_STATUS_KILLED
                 exit_code = None
@@ -456,6 +642,7 @@ class BaseCliAdapter:
                 question_id = None
                 question_text = None
                 pending_choices = []
+            backend_session_resumable = bool(backend_session_id) and status != RUN_STATUS_KILLED
 
             write_summary(
                 path=summary_path,
@@ -485,6 +672,8 @@ class BaseCliAdapter:
                 question_id=question_id,
                 question_text=question_text,
                 pending_choices=pending_choices,
+                backend_session_id=backend_session_id,
+                backend_session_resumable=backend_session_resumable,
             )
         except Exception as exc:
             with self._lock:
@@ -523,6 +712,8 @@ class BaseCliAdapter:
                 question_id=None,
                 question_text=None,
                 pending_choices=[],
+                backend_session_id=None,
+                backend_session_resumable=False,
             )
 
     def kill(self, task_id: str) -> bool:

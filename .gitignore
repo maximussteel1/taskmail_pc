@@ -13,3 +13,6 @@ tasks/*
 !tasks/.gitkeep
 
 _tmp_*/
+nul
+scripts/test_fetch_*.json
+scriptsTEST_FILES_README.txt

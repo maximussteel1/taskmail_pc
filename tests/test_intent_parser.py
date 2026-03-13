@@ -13,20 +13,20 @@ def test_parse_action_identifies_status_rerun_and_kill() -> None:
     assert parse_action({"reply_delta": "终止当前任务"}).action == "KILL"
 
 
-def test_parse_action_identifies_structured_updates() -> None:
+def test_parse_action_defaults_plain_reply_to_continue_session() -> None:
     action = parse_action({"reply_delta": "Timeout: 120\nMode: analysis_only\nProfile: strong\nTask:\nOnly analyze the issue."})
 
-    assert action.action == "UPDATE_TASK"
+    assert action.action == "CONTINUE_SESSION"
     assert action.timeout_minutes == 120
     assert action.mode == "analysis_only"
     assert action.profile == "strong"
     assert action.task_text_delta == "Only analyze the issue."
 
 
-def test_parse_action_defaults_to_append_context() -> None:
+def test_parse_action_defaults_free_text_reply_to_continue_session() -> None:
     action = parse_action({"reply_delta": "补充一点，这个脚本会被 report_main.py 调用。"})
 
-    assert action.action == "APPEND_CONTEXT"
+    assert action.action == "CONTINUE_SESSION"
     assert action.raw_user_text == "补充一点，这个脚本会被 report_main.py 调用。"
 
 
@@ -58,3 +58,18 @@ def test_parse_action_uses_answer_question_in_waiting_state() -> None:
 
     assert action.action == "ANSWER_QUESTION"
     assert action.profile == "strong"
+
+
+def test_parse_action_supports_resume_and_sessions_commands() -> None:
+    resume = parse_action({"reply_delta": "/resume\nPlease continue with the cleanup."})
+    sessions = parse_action({"reply_delta": "/sessions"})
+
+    assert resume.action == "CONTINUE_SESSION"
+    assert resume.raw_user_text == "Please continue with the cleanup."
+    assert sessions.action == "LIST_SESSIONS"
+
+
+def test_parse_action_does_not_confuse_skill_with_kill() -> None:
+    action = parse_action({"reply_delta": "你是否能看一下你有什么skill以及你能动用哪些工具，关键是我想知道你是否具有联网搜索的能力"})
+
+    assert action.action == "CONTINUE_SESSION"

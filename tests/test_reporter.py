@@ -61,12 +61,20 @@ def test_build_status_subject_and_mail_include_capsule() -> None:
         error_message=None,
     )
 
-    subject = build_status_subject(MAIL_STATUS_DONE, "Demo task")
-    body = build_status_mail(MAIL_STATUS_DONE, state, task_snapshot=snapshot, result=result)
+    subject = build_status_subject(MAIL_STATUS_DONE, "Demo task", "thread_001")
+    body = build_status_mail(
+        MAIL_STATUS_DONE,
+        state,
+        task_snapshot=snapshot,
+        result=result,
+        captured_reply="OpenCode raw reply text.",
+    )
 
-    assert subject == "[DONE] Demo task"
+    assert subject == "[DONE][S:thread_001] Demo task"
     assert "Status: DONE" in body
-    assert "Summary: Completed successfully." in body
+    assert "Session ID: thread_001" in body
+    assert "Reply:\nOpenCode raw reply text." in body
+    assert "Summary: Completed successfully." not in body
     assert "---TASK-STATE-BEGIN---" in body
     assert "task_id: task_001" in body
 
@@ -119,11 +127,17 @@ def test_build_failed_status_mail_includes_user_error_message() -> None:
         error_message="attempt to write a readonly database",
     )
 
-    body = build_status_mail(MAIL_STATUS_FAILED, state, task_snapshot=snapshot, result=result)
+    body = build_status_mail(
+        MAIL_STATUS_FAILED,
+        state,
+        task_snapshot=snapshot,
+        result=result,
+        captured_reply="stderr excerpt",
+    )
 
     assert "Status: FAILED" in body
     assert "Error: attempt to write a readonly database" in body
-    assert "Summary: attempt to write a readonly database" in body
+    assert "Reply:\nstderr excerpt" in body
 
 
 def test_build_question_mail_includes_question_capsule() -> None:

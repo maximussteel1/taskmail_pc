@@ -9,6 +9,10 @@ smtp_password: your_smtp_password
 poll_seconds: 30
 task_root: tasks
 default_timeout_minutes: 60
+max_concurrent_runs: 2
+auto_create_workdir: false
+enable_web_search: false
+prune_old_status_mails: false
 mock_sleep_seconds: 1.0
 # Empty means auto-discover the CLI. Use "demo" for local adapter dry runs.
 opencode_command: ""

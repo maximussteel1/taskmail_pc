@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import logging
+import re
 import secrets
 import time
 from datetime import datetime
@@ -18,7 +20,7 @@ from .context_layer import build_context
 from .dispatcher import Dispatcher
 from .intent_parser import parse_action
 from .mail_io import MailClient, SYSTEM_MESSAGE_HEADER, SYSTEM_MESSAGE_HEADER_VALUE
-from .models import MailEnvelope, RunResult, TaskSnapshot, ThreadState
+from .models import MailEnvelope, ParsedMailAction, RunResult, TaskSnapshot, ThreadState
 from .parser import parse_initial_task, parse_subject
 from .reporter import (
     MAIL_STATUS_ACCEPTED,
@@ -42,11 +44,18 @@ from .status import (
     THREAD_STATUS_KILLED,
 )
 from .task_compiler import compile_task
-from .thread_store import load_thread_state, resolve_thread, save_raw_mail, save_thread_state
+from .thread_store import (
+    list_workspace_sessions,
+    load_thread_state,
+    resolve_thread,
+    save_raw_mail,
+    save_thread_state,
+)
 
 LOGGER = logging.getLogger(__name__)
 PACKAGE_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_ROOT.parent
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 BOOTSTRAP_MODULES = (
     "mail_runner.config",
@@ -169,9 +178,61 @@ def _store_outgoing_mail(
         },
         task_root,
     )
+    if in_reply_to is None and state.root_message_id.startswith("local-root:"):
+        state.root_message_id = message_id
     state.latest_message_id = message_id
     state.updated_at = _timestamp()
     save_thread_state(state, task_root)
+
+
+def _list_previous_status_message_ids(task_root: Path, state: ThreadState, *, keep_message_id: str) -> list[str]:
+    mail_dir = task_root / state.thread_id / "mail"
+    if not mail_dir.exists():
+        return []
+
+    message_ids: list[str] = []
+    seen_ids: set[str] = set()
+    for raw_path in sorted(mail_dir.glob("raw_*.json")):
+        try:
+            payload = json.loads(raw_path.read_text(encoding="utf-8"))
+        except Exception:
+            LOGGER.warning("Unable to parse stored mail payload: %s", raw_path)
+            continue
+        if not isinstance(payload, dict):
+            continue
+        message_id = str(payload.get("message_id") or "").strip()
+        if not message_id or message_id == keep_message_id or message_id in seen_ids:
+            continue
+        raw_headers = payload.get("raw_headers") or {}
+        if not isinstance(raw_headers, dict):
+            continue
+        if str(raw_headers.get(SYSTEM_MESSAGE_HEADER) or "").strip() != SYSTEM_MESSAGE_HEADER_VALUE:
+            continue
+        seen_ids.add(message_id)
+        message_ids.append(message_id)
+    return message_ids
+
+
+def _prune_previous_status_mails(mail_client: Any, config: AppConfig, task_root: Path, state: ThreadState, *, keep_message_id: str) -> None:
+    if not config.prune_old_status_mails:
+        return
+    delete_fn = getattr(mail_client, "delete_messages_by_message_ids", None)
+    if not callable(delete_fn):
+        return
+    previous_message_ids = _list_previous_status_message_ids(task_root, state, keep_message_id=keep_message_id)
+    if not previous_message_ids:
+        return
+    try:
+        deleted_ids = list(delete_fn(previous_message_ids, mailbox="INBOX") or [])
+    except Exception:
+        LOGGER.exception("Unable to prune old status mails for thread %s", state.thread_id)
+        return
+    if deleted_ids:
+        LOGGER.info(
+            "Pruned %s old status mails from INBOX for thread %s",
+            len(deleted_ids),
+            state.thread_id,
+        )
 
 
 def _send_status_update(
@@ -188,23 +249,29 @@ def _send_status_update(
     intro: str | None = None,
     reply_message_id: str | None = None,
     references: list[str] | None = None,
+    reply_to_existing: bool = True,
 ) -> str | None:
     try:
         question_id = result.question_id if result and result.question_id else state.pending_question_id
         question_text = result.question_text if result and result.question_text else state.pending_question_text
         pending_choices = list(result.pending_choices) if result and result.pending_choices else list(state.pending_choices)
+        captured_reply = _load_captured_reply(task_root, result)
         body = build_status_mail(
             status_label,
             state,
             task_snapshot=task_snapshot,
             result=result,
+            captured_reply=captured_reply,
             intro=intro,
             question_id=question_id,
             question_text=question_text,
             pending_choices=pending_choices,
         )
-        subject = build_status_subject(status_label, subject_text)
-        if reply_message_id is None:
+        subject = build_status_subject(status_label, subject_text, state.session_id or state.thread_id)
+        if not reply_to_existing:
+            reply_message_id = None
+            references = []
+        elif reply_message_id is None:
             reply_message_id, references = _default_reply_headers(state)
         elif references is None:
             references = _build_references(reply_message_id, [])
@@ -229,19 +296,42 @@ def _send_status_update(
                 in_reply_to=reply_message_id,
                 references=list(references or []),
             )
+            _prune_previous_status_mails(mail_client, config, task_root, state, keep_message_id=sent_message_id)
         return sent_message_id
     except Exception:
         LOGGER.exception("Unable to send status mail for task %s", state.current_task_id)
         return None
 
 
+def _normalize_captured_output(text: str) -> str:
+    return _ANSI_RE.sub("", text).replace("\r\n", "\n").replace("\r", "\n").replace("\ufeff", "").strip()
+
+
+def _load_captured_reply(task_root: Path, result: RunResult | None) -> str | None:
+    if result is None:
+        return None
+
+    candidate_rel_paths = [result.stdout_file]
+    if result.status not in {RUN_STATUS_SUCCESS, RUN_STATUS_AWAITING_USER_INPUT}:
+        candidate_rel_paths.append(result.stderr_file)
+
+    for rel_path in candidate_rel_paths:
+        candidate = task_root / result.thread_id / rel_path
+        if not candidate.exists():
+            continue
+        content = _normalize_captured_output(candidate.read_text(encoding="utf-8", errors="replace"))
+        if content:
+            return content
+    return None
+
+
 def _subject_text_for_thread(subject_info: dict[str, Any], envelope: MailEnvelope, state: ThreadState | None = None) -> str:
     if state is not None and not subject_info.get("is_new_task"):
-        return state.subject_norm or envelope.subject.strip()
+        return state.session_name or state.subject_norm or envelope.subject.strip()
     if subject_info.get("subject_text"):
         return str(subject_info["subject_text"]).strip()
-    if state is not None and state.subject_norm:
-        return state.subject_norm
+    if state is not None and (state.session_name or state.subject_norm):
+        return state.session_name or state.subject_norm
     return envelope.subject.strip()
 
 
@@ -264,6 +354,50 @@ def _status_label_for_result(result: RunResult) -> str:
     return MAIL_STATUS_FAILED
 
 
+def _send_session_listing(
+    envelope: MailEnvelope,
+    config: AppConfig,
+    task_root: Path,
+    mail_client: Any,
+    state: ThreadState,
+    snapshot: TaskSnapshot,
+    latest_result: RunResult | None,
+) -> bool:
+    sessions = list_workspace_sessions(state.repo_path, state.workdir, task_root)
+    if sessions:
+        lines = ["Sessions in this workspace:"]
+        for session in sessions[:10]:
+            summary = session.last_summary or "No summary yet."
+            label = " (current)" if session.session_id == (state.session_id or state.thread_id) else ""
+            lines.append(
+                f"- {session.session_id}{label} | {session.status} | {session.session_name} | {summary}"
+            )
+        lines.extend(
+            [
+                "",
+                "Reply to a session's latest mail to continue its native context.",
+                "Reply here with /new to start a fresh session from this thread.",
+            ]
+        )
+    else:
+        lines = ["No sessions were found for this workspace yet."]
+    _send_status_update(
+        mail_client,
+        config,
+        task_root,
+        to_addr=envelope.from_addr,
+        subject_text=state.session_name or state.subject_norm,
+        status_label=MAIL_STATUS_STATUS,
+        state=state,
+        task_snapshot=snapshot,
+        result=latest_result,
+        intro="\n".join(lines),
+        reply_message_id=envelope.message_id,
+        references=_build_references(envelope.message_id, envelope.references),
+    )
+    return True
+
+
 def _start_snapshot_run(
     runner: SerialTaskRunner,
     snapshot: TaskSnapshot,
@@ -276,8 +410,11 @@ def _start_snapshot_run(
     root_message_id: str,
     latest_message_id: str,
     subject_norm: str,
+    session_name: str | None,
     save_incoming_on_accept: bool,
     background: bool,
+    reply_to_incoming: bool = True,
+    accepted_intro: str | None = None,
 ) -> bool:
     def on_accepted(state: ThreadState) -> None:
         if save_incoming_on_accept:
@@ -291,8 +428,14 @@ def _start_snapshot_run(
             status_label=MAIL_STATUS_ACCEPTED,
             state=state,
             task_snapshot=snapshot,
-            reply_message_id=incoming_envelope.message_id,
-            references=_build_references(incoming_envelope.message_id, incoming_envelope.references),
+            intro=accepted_intro,
+            reply_message_id=incoming_envelope.message_id if reply_to_incoming else None,
+            references=(
+                _build_references(incoming_envelope.message_id, incoming_envelope.references)
+                if reply_to_incoming
+                else None
+            ),
+            reply_to_existing=reply_to_incoming,
         )
 
     def on_running(state: ThreadState) -> None:
@@ -330,6 +473,7 @@ def _start_snapshot_run(
             root_message_id=root_message_id,
             latest_message_id=latest_message_id,
             subject_norm=subject_norm,
+            session_name=session_name,
             on_accepted=on_accepted,
             on_running=on_running,
             on_finished=on_finished,
@@ -340,11 +484,53 @@ def _start_snapshot_run(
             root_message_id=root_message_id,
             latest_message_id=latest_message_id,
             subject_norm=subject_norm,
+            session_name=session_name,
             on_accepted=on_accepted,
             on_running=on_running,
             on_finished=on_finished,
         )
     return True
+
+
+def _start_new_session_from_reply(
+    envelope: MailEnvelope,
+    config: AppConfig,
+    task_root: Path,
+    mail_client: Any,
+    runner: SerialTaskRunner,
+    *,
+    state: ThreadState,
+    snapshot: TaskSnapshot,
+    subject_text: str,
+    action: ParsedMailAction,
+    background: bool,
+) -> bool:
+    compiled = compile_task(
+        action,
+        state,
+        snapshot,
+        task_id=_generate_task_id(),
+        now=_timestamp(),
+        thread_id=runner.next_thread_id(),
+    )
+    if compiled is None:
+        return False
+    return _start_snapshot_run(
+        runner,
+        compiled,
+        task_root=task_root,
+        config=config,
+        mail_client=mail_client,
+        incoming_envelope=envelope,
+        subject_text=subject_text,
+        root_message_id=f"local-root:{compiled.thread_id}",
+        latest_message_id=f"local-latest:{compiled.thread_id}",
+        subject_norm=state.subject_norm,
+        session_name=state.session_name or subject_text,
+        save_incoming_on_accept=True,
+        background=background,
+        reply_to_incoming=False,
+    )
 
 
 def _send_busy_status(
@@ -365,7 +551,7 @@ def _send_busy_status(
         config,
         task_root,
         to_addr=envelope.from_addr,
-        subject_text=state.subject_norm,
+        subject_text=state.session_name or state.subject_norm,
         status_label=MAIL_STATUS_STATUS,
         state=state,
         task_snapshot=snapshot,
@@ -387,9 +573,6 @@ def _process_new_task_mail(
     *,
     background: bool,
 ) -> bool:
-    if background and runner.is_busy():
-        return _send_busy_status(envelope, config, task_root, mail_client, runner)
-
     try:
         task_data = parse_initial_task(envelope.body_text, default_timeout_minutes=config.default_timeout_minutes)
     except ValueError as exc:
@@ -423,6 +606,7 @@ def _process_new_task_mail(
         root_message_id=envelope.message_id,
         latest_message_id=envelope.message_id,
         subject_norm=subject_info["subject_norm"],
+        session_name=subject_text,
         save_incoming_on_accept=True,
         background=background,
     )
@@ -450,7 +634,7 @@ def _handle_direct_kill(
             config,
             task_root,
             to_addr=envelope.from_addr,
-            subject_text=state.subject_norm,
+            subject_text=state.session_name or state.subject_norm,
             status_label=MAIL_STATUS_STATUS,
             state=state,
             task_snapshot=context["latest_snapshot"],
@@ -484,11 +668,48 @@ def _process_existing_thread_mail(
         return False
 
     state = load_thread_state(thread_id, task_root)
-    _record_incoming_mail(state, envelope, task_root)
     context = build_context(envelope, state, task_root)
     snapshot = context["latest_snapshot"]
     subject_text = _subject_text_for_thread(subject_info, envelope, state)
     action = parse_action(context, subject_info)
+    if action.action != "NEW_SESSION":
+        _record_incoming_mail(state, envelope, task_root)
+
+    return _handle_existing_action(
+        envelope,
+        config,
+        task_root,
+        mail_client,
+        runner,
+        state=state,
+        snapshot=snapshot,
+        latest_result=context["latest_result"],
+        subject_text=subject_text,
+        action=action,
+        direct_kill_target=(
+            str(subject_info["subject_text"]).strip()
+            if subject_info.get("action") == "KILL" and subject_info.get("subject_text")
+            else None
+        ),
+        background=background,
+    )
+
+
+def _handle_existing_action(
+    envelope: MailEnvelope,
+    config: AppConfig,
+    task_root: Path,
+    mail_client: Any,
+    runner: SerialTaskRunner,
+    *,
+    state: ThreadState,
+    snapshot: TaskSnapshot,
+    latest_result: RunResult | None,
+    subject_text: str,
+    action: ParsedMailAction,
+    direct_kill_target: str | None = None,
+    background: bool,
+) -> bool:
 
     if action.action == "STATUS_QUERY":
         _send_status_update(
@@ -500,11 +721,36 @@ def _process_existing_thread_mail(
             status_label=MAIL_STATUS_STATUS,
             state=state,
             task_snapshot=snapshot,
-            result=context["latest_result"],
+            result=latest_result,
             reply_message_id=envelope.message_id,
             references=_build_references(envelope.message_id, envelope.references),
         )
         return True
+
+    if action.action == "LIST_SESSIONS":
+        return _send_session_listing(
+            envelope,
+            config,
+            task_root,
+            mail_client,
+            state,
+            snapshot,
+            latest_result,
+        )
+
+    if action.action == "NEW_SESSION":
+        return _start_new_session_from_reply(
+            envelope,
+            config,
+            task_root,
+            mail_client,
+            runner,
+            state=state,
+            snapshot=snapshot,
+            subject_text=subject_text,
+            action=action,
+            background=background,
+        )
 
     if state.status == THREAD_STATUS_AWAITING_USER_INPUT:
         if action.action == "KILL":
@@ -540,7 +786,7 @@ def _process_existing_thread_mail(
                 status_label=MAIL_STATUS_STATUS,
                 state=state,
                 task_snapshot=snapshot,
-                result=context["latest_result"],
+                result=latest_result,
                 intro="This thread is awaiting an answer to the pending question. Reply with the answer before rerunning.",
                 reply_message_id=envelope.message_id,
                 references=_build_references(envelope.message_id, envelope.references),
@@ -556,7 +802,7 @@ def _process_existing_thread_mail(
                 status_label=MAIL_STATUS_QUESTION,
                 state=state,
                 task_snapshot=snapshot,
-                result=context["latest_result"],
+                result=latest_result,
                 intro="Reply did not include an answer. Please answer the pending question below.",
                 reply_message_id=envelope.message_id,
                 references=_build_references(envelope.message_id, envelope.references),
@@ -564,9 +810,7 @@ def _process_existing_thread_mail(
             return True
 
     if action.action == "KILL":
-        target_task_id = state.current_task_id
-        if subject_info.get("action") == "KILL" and subject_info.get("subject_text"):
-            target_task_id = str(subject_info["subject_text"]).strip()
+        target_task_id = direct_kill_target or state.current_task_id
         if runner.kill(target_task_id):
             return True
         _send_status_update(
@@ -578,14 +822,17 @@ def _process_existing_thread_mail(
             status_label=MAIL_STATUS_STATUS,
             state=state,
             task_snapshot=snapshot,
-            result=context["latest_result"],
+            result=latest_result,
             intro="No running task is available to kill for this thread.",
             reply_message_id=envelope.message_id,
             references=_build_references(envelope.message_id, envelope.references),
         )
         return True
 
-    if background and runner.is_busy():
+    can_attempt_resume = bool(state.backend_session_id) and (
+        state.backend_session_resumable or state.status == THREAD_STATUS_KILLED
+    )
+    if action.action in {"CONTINUE_SESSION", "ANSWER_QUESTION"} and not can_attempt_resume:
         _send_status_update(
             mail_client,
             config,
@@ -595,8 +842,8 @@ def _process_existing_thread_mail(
             status_label=MAIL_STATUS_STATUS,
             state=state,
             task_snapshot=snapshot,
-            result=context["latest_result"],
-            intro="Runner is busy. Wait for the current task to finish or send a kill request.",
+            result=latest_result,
+            intro="This session does not have a resumable native backend context. Use /new or /rerun instead.",
             reply_message_id=envelope.message_id,
             references=_build_references(envelope.message_id, envelope.references),
         )
@@ -612,7 +859,7 @@ def _process_existing_thread_mail(
             status_label=MAIL_STATUS_QUESTION,
             state=state,
             task_snapshot=snapshot,
-            result=context["latest_result"],
+            result=latest_result,
             intro="This thread is waiting for an answer to the pending question below.",
             reply_message_id=envelope.message_id,
             references=_build_references(envelope.message_id, envelope.references),
@@ -636,12 +883,19 @@ def _process_existing_thread_mail(
             status_label=MAIL_STATUS_STATUS,
             state=state,
             task_snapshot=snapshot,
-            result=context["latest_result"],
+            result=latest_result,
             intro="Reply was not understood. No changes were applied.",
             reply_message_id=envelope.message_id,
             references=_build_references(envelope.message_id, envelope.references),
         )
         return True
+
+    accepted_intro = None
+    if action.action in {"CONTINUE_SESSION", "ANSWER_QUESTION"} and state.status == THREAD_STATUS_KILLED:
+        accepted_intro = (
+            "Resuming a session after kill. This is a risk recovery: the previous native context "
+            "may have stopped mid-step, so you should verify the next result carefully."
+        )
 
     return _start_snapshot_run(
         runner,
@@ -654,8 +908,10 @@ def _process_existing_thread_mail(
         root_message_id=state.root_message_id,
         latest_message_id=envelope.message_id,
         subject_norm=state.subject_norm,
+        session_name=state.session_name or subject_text,
         save_incoming_on_accept=False,
         background=background,
+        accepted_intro=accepted_intro,
     )
 
 
@@ -681,6 +937,17 @@ def _process_mail(
         if _handle_direct_kill(envelope, subject_info, config, task_root, mail_client, runner):
             return True
 
+    if subject_info["is_new_task"] and not envelope.in_reply_to and not envelope.references:
+        return _process_new_task_mail(
+            envelope,
+            subject_info,
+            config,
+            task_root,
+            mail_client,
+            runner,
+            background=background,
+        )
+
     if _process_existing_thread_mail(
         envelope,
         subject_info,
@@ -692,17 +959,6 @@ def _process_mail(
         background=background,
     ):
         return True
-
-    if subject_info["is_new_task"] and not envelope.in_reply_to and not envelope.references:
-        return _process_new_task_mail(
-            envelope,
-            subject_info,
-            config,
-            task_root,
-            mail_client,
-            runner,
-            background=background,
-        )
 
     LOGGER.info("Skipping unsupported mail: %s", envelope.subject)
     return False
@@ -720,6 +976,9 @@ def _process_batch(
     stats = {"fetched": len(fetched), "processed": 0, "skipped": 0, "failed": 0}
 
     for envelope in fetched:
+        if background:
+            runner.collect_finished()
+            runner.dispatch_ready()
         try:
             handled = _process_mail(
                 envelope,
@@ -737,6 +996,9 @@ def _process_batch(
             stats["processed"] += 1
         else:
             stats["skipped"] += 1
+        if background:
+            runner.collect_finished()
+            runner.dispatch_ready()
     return stats
 
 
@@ -751,7 +1013,7 @@ def process_once(
     task_root = Path(details["task_root"])
     client = mail_client or MailClient(config)
     active_dispatcher = dispatcher or _build_dispatcher(config)
-    runner = SerialTaskRunner(task_root, active_dispatcher)
+    runner = SerialTaskRunner(task_root, active_dispatcher, max_concurrent_runs=config.max_concurrent_runs)
     return _process_batch(config, task_root, client, runner, background=False)
 
 
@@ -759,11 +1021,13 @@ def run_forever(config: AppConfig, *, base_dir: str | Path | None = None) -> Non
     details = bootstrap(config, base_dir)
     task_root = Path(details["task_root"])
     client = MailClient(config)
-    runner = SerialTaskRunner(task_root, _build_dispatcher(config))
+    runner = SerialTaskRunner(task_root, _build_dispatcher(config), max_concurrent_runs=config.max_concurrent_runs)
     while True:
         runner.collect_finished()
+        runner.dispatch_ready()
         stats = _process_batch(config, task_root, client, runner, background=True)
         runner.collect_finished()
+        runner.dispatch_ready()
         LOGGER.info(
             "Polling cycle complete. fetched=%s processed=%s skipped=%s failed=%s busy=%s",
             stats["fetched"],

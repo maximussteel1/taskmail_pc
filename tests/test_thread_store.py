@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from mail_runner.models import MailEnvelope
 from mail_runner.status import BACKEND_OPENCODE, THREAD_STATUS_ACCEPTED
-from mail_runner.thread_store import create_thread, load_thread_state, resolve_thread, save_raw_mail
+from mail_runner.thread_store import (
+    build_workspace_id,
+    create_thread,
+    find_session,
+    find_thread_for_workspace_session,
+    load_thread_state,
+    load_workspace_state,
+    resolve_thread,
+    save_raw_mail,
+)
 
 
 def _create_thread(task_root, thread_id: str | None = None):
@@ -50,6 +59,18 @@ def test_load_thread_state_and_save_raw_mail(tmp_path) -> None:
     assert raw_one.name == "raw_001.json"
     assert raw_two.name == "raw_002.json"
 
+    workspace_id = build_workspace_id("D:\\repo", "src")
+    workspace_state = load_workspace_state(workspace_id, task_root)
+    session_state = find_session("D:\\repo", "src", "local-demo", task_root)
+
+    assert workspace_state.session_ids == ["thread_010"]
+    assert workspace_state.active_session_id is None
+    assert workspace_state.queued_session_ids == ["thread_010"]
+    assert session_state is not None
+    assert session_state.thread_id == "thread_010"
+    assert session_state.pending_task_count == 0
+    assert find_thread_for_workspace_session("D:\\repo", "src", "local-demo", task_root) == "thread_010"
+
 
 def test_resolve_thread_matches_reply_headers_and_capsule(tmp_path) -> None:
     task_root = tmp_path / "tasks"
@@ -89,8 +110,69 @@ def test_resolve_thread_matches_reply_headers_and_capsule(tmp_path) -> None:
         date="2026-03-12T11:23:00",
         body_text="---TASK-STATE-BEGIN---\nthread_id: thread_001\n---TASK-STATE-END---",
     )
+    tagged_reply = MailEnvelope(
+        message_id="<reply-tagged@example.com>",
+        subject="Re: [DONE][S:thread_001] Local Demo",
+        from_addr="user@example.com",
+        to_addr="runner@example.com",
+        date="2026-03-12T11:24:00",
+    )
+    subject_only_reply = MailEnvelope(
+        message_id="<reply-subject-only@example.com>",
+        subject="Re: [DONE] Local Demo",
+        from_addr="user@example.com",
+        to_addr="runner@example.com",
+        date="2026-03-12T11:25:00",
+    )
 
     assert resolve_thread(exact_match, task_root) == "thread_001"
     assert resolve_thread(reply_like, task_root) == "thread_001"
     assert resolve_thread(accepted_reply, task_root) == "thread_001"
     assert resolve_thread(capsule_reply, task_root, capsule_state={"thread_id": "thread_001"}) == "thread_001"
+    assert resolve_thread(tagged_reply, task_root) == "thread_001"
+    assert resolve_thread(subject_only_reply, task_root) is None
+
+
+def test_find_thread_for_workspace_session_separates_workspaces(tmp_path) -> None:
+    task_root = tmp_path / "tasks"
+    create_thread(
+        thread_id="thread_001",
+        root_message_id="<root-1@example.com>",
+        latest_message_id="<latest-1@example.com>",
+        subject_norm="demo task",
+        session_name="Demo task",
+        backend=BACKEND_OPENCODE,
+        profile=None,
+        repo_path="D:\\repo-one",
+        workdir="src",
+        current_task_id="task_001",
+        last_task_snapshot_file="snapshots/task_001.json",
+        task_root=task_root,
+        status=THREAD_STATUS_ACCEPTED,
+        history_files=[],
+        last_summary=None,
+        created_at="2026-03-12T11:20:00",
+        updated_at="2026-03-12T11:20:00",
+    )
+    create_thread(
+        thread_id="thread_002",
+        root_message_id="<root-2@example.com>",
+        latest_message_id="<latest-2@example.com>",
+        subject_norm="other task",
+        session_name="Other task",
+        backend=BACKEND_OPENCODE,
+        profile=None,
+        repo_path="D:\\repo-two",
+        workdir="src",
+        current_task_id="task_002",
+        last_task_snapshot_file="snapshots/task_002.json",
+        task_root=task_root,
+        status=THREAD_STATUS_ACCEPTED,
+        history_files=[],
+        last_summary=None,
+        created_at="2026-03-12T11:21:00",
+        updated_at="2026-03-12T11:21:00",
+    )
+
+    assert find_thread_for_workspace_session("D:\\repo-one", "src", "Demo task", task_root) == "thread_001"
+    assert find_thread_for_workspace_session("D:\\repo-two", "src", "Demo task", task_root) is None

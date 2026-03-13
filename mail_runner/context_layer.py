@@ -9,6 +9,7 @@ from .config import AppConfig
 from .models import MailEnvelope, RunResult, TaskSnapshot, ThreadState
 from .quote_extractor import extract_reply_delta
 from .state_capsule import parse_question_capsule, parse_state_capsule
+from .status import THREAD_STATUS_RUNNING
 from .workspace import WorkspaceManager
 
 
@@ -18,6 +19,8 @@ def _workspace(task_root: str | Path | None = None) -> WorkspaceManager:
 
 
 def _load_latest_snapshot(workspace: WorkspaceManager, state: ThreadState) -> TaskSnapshot:
+    if state.status == THREAD_STATUS_RUNNING and state.queued_snapshot_file:
+        return workspace.load_snapshot(state.thread_id, state.queued_snapshot_file)
     return workspace.load_snapshot(state.thread_id, state.last_task_snapshot_file)
 
 

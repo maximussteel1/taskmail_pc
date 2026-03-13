@@ -8,11 +8,12 @@ from typing import Any
 from .status import BACKEND_CODEX, BACKEND_OPENCODE
 
 _SUBJECT_PREFIX_RE = re.compile(r"^\s*\[(OC|CX|KILL)\]\s*(.*)$", re.IGNORECASE)
-_REPLY_PREFIX_RE = re.compile(r"^\s*((re|fw|fwd)\s*:\s*)+", re.IGNORECASE)
+_REPLY_PREFIX_RE = re.compile(r"^\s*((re|fw|fwd)\s*:\s*|(?:回复|答复)\s*[：:]\s*)+", re.IGNORECASE)
 _STATUS_PREFIX_RE = re.compile(
-    r"^\s*\[(OC|CX|KILL|ACCEPTED|RUNNING|DONE|FAILED|STATUS|KILLED|QUESTION)\]\s*",
+    r"^\s*\[(OC|CX|KILL|ACCEPTED|RUNNING|DONE|FAILED|STATUS|KILLED|QUESTION|S:[^\]]+)\]\s*",
     re.IGNORECASE,
 )
+_SESSION_TAG_RE = re.compile(r"\[S:([^\]]+)\]", re.IGNORECASE)
 _HEADER_RE = re.compile(r"^\s*(Repo|Workdir|Timeout|Mode|Profile|Task|Acceptance)\s*:\s*(.*)$", re.IGNORECASE)
 _LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*]|\d+[.)])\s*")
 
@@ -30,6 +31,14 @@ def normalize_subject(subject: str) -> str:
             break
         collapsed = updated
     return collapsed.lower()
+
+
+def extract_session_tag(subject: str) -> str | None:
+    match = _SESSION_TAG_RE.search(subject or "")
+    if not match:
+        return None
+    session_id = match.group(1).strip()
+    return session_id or None
 
 
 def parse_subject(subject: str) -> dict[str, Any]:
