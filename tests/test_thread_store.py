@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from mail_runner.models import MailEnvelope
+from mail_runner.models import MailAttachment, MailEnvelope
 from mail_runner.status import BACKEND_OPENCODE, THREAD_STATUS_ACCEPTED
 from mail_runner.thread_store import (
     build_workspace_id,
     create_thread,
     find_session,
     find_thread_for_workspace_session,
+    list_all_thread_states,
     load_thread_state,
     load_workspace_state,
     resolve_thread,
@@ -68,8 +69,12 @@ def test_load_thread_state_and_save_raw_mail(tmp_path) -> None:
     assert workspace_state.queued_session_ids == ["thread_010"]
     assert session_state is not None
     assert session_state.thread_id == "thread_010"
+    assert session_state.lifecycle == "active"
+    assert session_state.last_active_at == "2026-03-12T11:20:00"
+    assert session_state.last_progress_at == "2026-03-12T11:20:00"
     assert session_state.pending_task_count == 0
     assert find_thread_for_workspace_session("D:\\repo", "src", "local-demo", task_root) == "thread_010"
+    assert [item.thread_id for item in list_all_thread_states(task_root)] == ["thread_010"]
 
 
 def test_resolve_thread_matches_reply_headers_and_capsule(tmp_path) -> None:
@@ -176,3 +181,29 @@ def test_find_thread_for_workspace_session_separates_workspaces(tmp_path) -> Non
 
     assert find_thread_for_workspace_session("D:\\repo-one", "src", "Demo task", task_root) == "thread_001"
     assert find_thread_for_workspace_session("D:\\repo-two", "src", "Demo task", task_root) is None
+
+
+def test_save_raw_mail_persists_attachment_payloads(tmp_path) -> None:
+    envelope = MailEnvelope(
+        message_id="<root@example.com>",
+        subject="[OC] Demo",
+        from_addr="user@example.com",
+        to_addr="runner@example.com",
+        date="2026-03-14T10:00:00",
+        body_text="See attachment",
+        attachments=[
+            MailAttachment(
+                filename="photo.png",
+                content_type="image/png",
+                size_bytes=4,
+                saved_path="E:\\repo\\_mailin_20260314_001__photo.png",
+                content_bytes=b"png!",
+            )
+        ],
+    )
+
+    raw_path = save_raw_mail("thread_001", envelope, tmp_path / "tasks")
+
+    assert "photo.png" in raw_path.read_text(encoding="utf-8")
+    attachment_dir = raw_path.with_name("raw_001_attachments")
+    assert (attachment_dir / "001_photo.png").read_bytes() == b"png!"

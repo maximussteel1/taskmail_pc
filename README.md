@@ -1,6 +1,8 @@
 # Mail-Based Task Manager
 
-本项目当前已完成 `Phase 7` 的第一轮会话续接改造。当前已经实现 IMAP/SMTP 接入、新任务首封邮件解析、reply 线程恢复、slash 命令驱动的 reply 语义、`/resume` / `/new` / `/sessions` / `/status` / `/rerun` / `/kill` 闭环，以及真实 `OpenCodeAdapter` / `CodexAdapter` 的 CLI 薄封装。`summary.md` 第一行、`thread_state.last_summary` 和状态邮件里的 `Summary:` 现在都会优先展示真实后端输出的用户摘要，而不是固定模板文案。当前版本进一步启用了显式问题协议、`awaiting_user_input` 等待态、`[QUESTION]` 邮件、回答后继续执行、按后端分开的 `profile -> model` 映射，以及 native backend session id 落盘和 resume 路径。
+仓库级协作约定见 [AGENTS.md](AGENTS.md)。
+
+本项目当前代码已经在 `Phase 7` 基础上继续落地 run artifact 交付、Markdown-first 状态渲染、backend permission control、首封 `[SYNC]` 项目目录同步入口、最小 host 宿主层、最小可观测 CLI、可选的 per-thread 自动监控窗口，以及超大产物的 COS 外链交付：运行产物仍然按 `thread` 目录落盘，但已经补上 `workspace + session` 索引、后台队列调度、native backend session resume、`/sessions` 列表、`/pause -> /resume -> /end` 控制面、显式问题协议邮件闭环、`Permission:` 字段的跨 reply 持久化与后端映射、`mail_runner.host + host_state.json + runtime single-instance lock`，以及只读的 `mail_runner.observe status/list-running/list-queue/show-thread/show-thread-live`。对于 `codex + sdk` 路径，运行中的 turn 还会落盘 `stream.events.jsonl`，供 PC 侧会话窗显示带时间戳的 transcript + live output。`summary.md` 第一行、`thread_state.last_summary` 和状态邮件里的 `Summary:` 会优先展示真实后端输出的用户摘要，而不是固定模板文案。当前工作区在 `2026-03-18` 本地执行 `.\.venv\Scripts\python.exe -m pytest` 的结果为 `231 passed`。
 
 ## 当前能力
 
@@ -9,32 +11,69 @@
 - 提供 `MockAdapter`、`Dispatcher` 和本地 demo `runner`
 - 提供真实 `OpenCodeAdapter` / `CodexAdapter` CLI 薄封装，支持 `prompt.txt` 落盘、stdout/stderr 捕获、退出码回收和子进程 kill
 - 提供真实后端输出摘要提取：成功时从 `stdout` 提取用户摘要，失败时从 `stderr` 提取主要错误，并同步到 `summary.md`、`result.json`、`thread_state.json` 和状态邮件
-- 提供显式问题协议：后端可输出 `question capsule`，系统会将该轮结果落为 `awaiting_user_input` 并发送 `[QUESTION]`
+- 提供显式问题协议：后端可输出一个或多个 `question capsule`，系统会将该轮结果落为 `awaiting_user_input` 并发送 `[QUESTION]`
 - 提供等待态回复恢复：用户回复答案后会生成新的 snapshot 并继续执行，而不是直接丢弃等待中的任务主线
+- 提供失败态恢复重跑：如果 thread 已经 `[FAILED]` 且没有可恢复的 native session，普通 reply 或 `/resume` 会基于最近 snapshot 自动启动 fresh recovery run，而不是只回一封 `[STATUS]`
 - 提供 `mail_io.py` 的 IMAP/SMTP SSL 接入
-- 提供 `parser.py` 的 `[OC]` / `[CX]` 首封任务主题和正文解析
+- 提供 `parser.py` 的 `[OC]` / `[CX]` 首封任务主题、`[SYNC]` 首封只读控制主题和任务正文解析
 - 提供 `quote_extractor.py`、`context_layer.py`、`intent_parser.py`、`task_compiler.py` 的 reply 对话处理链
 - 提供 `reporter.py` 的 `[ACCEPTED]` / `[RUNNING]` / `[DONE]` / `[FAILED]` / `[STATUS]` / `[KILLED]` / `[QUESTION]` 状态邮件正文生成
-- 提供 `app.py --once` 的同步批处理路径，以及 `app.py --loop` 的单 worker 后台轮询路径
+- task thread 的 live mailbox 现在按三类保留：`[ACCEPTED]` / `[RUNNING]` / `[STATUS]` 只保留最新进度邮件；`[QUESTION]` / `[PAUSED]` 和 `[DONE]` / `[FAILED]` / `[KILLED]` 作为 action-required / receipt 邮件保留；完整历史仍保留在 `tasks/<thread_id>/mail/raw_*.json`
+- 真实 CLI / SDK 回复现在支持 structured run-result capsule：adapter 会回填 `RunResult.changed_files`、`tests_passed`、`error_type`、`error_message`，并把结果块从用户可见回复与状态邮件正文里剥离
+- 提供超大产物 COS 外链交付：小文件继续作为邮件附件，超阈值文件改为预签名下载链接并展示在单独的 `External Deliveries` 区域；`APK/IPA` 会自动改用 `.bin` 对象名绕过 COS 默认域名分发限制
+- 提供首封 `[SYNC]` 项目目录同步入口：直接回复 `D:\projects` / `E:\projects` 或配置根路径下的一级文件夹清单，不触发 backend run，也不创建 task/session
+- 提供 `[PAUSED]` 状态邮件和 `/pause`、`/resume`、`/end` 的显式控制面；paused 只阻止后续 continuation，不会暂停已经在跑的 CLI 进程
+- 提供 `app.py --once` 的同步批处理路径，以及 `app.py --loop` 的后台轮询路径
 - 支持 reply 邮件通过 `In-Reply-To` / `References` / `state capsule` / `subject [S:session_id] tag` 命中原线程
-- 支持 slash 命令版 reply 动作解析：`/resume`、`/new`、`/sessions`、`/status`、`/rerun`、`/kill`
+- 支持 slash 命令版 reply 动作解析：`/pause`、`/resume`、`/end`、`/new`、`/sessions`、`/status`、`/rerun`、`/kill`
 - 支持 `profile` 字段在 snapshot / thread state / action 中持久化，并在真实 adapter 中按后端映射到实际 model 参数
+- 支持 `permission` 字段在 snapshot / thread state / session state / action 中持久化；缺省 reply 会继承当前权限，`highest` 会映射到 `Codex` 的危险直通模式和 `OpenCode` 的 run-scoped overlay
 - 支持在 thread/session/run 结果中持久化 `backend_session_id`，并在后续 `/resume` 时走 native `codex exec resume` / `opencode run --session`
+- 支持 `tasks/_scheduler/workspaces/...` 下的 `workspace_state.json` / `session_state.json` 索引，用于 session 列表、workspace 串行约束和排队恢复
+- 支持后台队列调度：同一个 `workspace(repo_path + workdir)` 内保持串行，不同 workspace 可在 `max_concurrent_runs` 范围内并发
+- 支持同一 session 运行中暂存 follow-up snapshot，当前 run 结束后继续；runner 重启时可恢复 `accepted` / queued 状态，并把遗留 `running` 标记为失败
 - Windows 下在 `opencode_command` / `codex_command` 为空时，会优先自动发现 `opencode.cmd` / `codex.cmd`
 - 支持将 `opencode_command: demo` / `codex_command: demo` 作为本地演示后端，用于不消耗真实模型额度的验证
-- 已完成真实邮箱验证：Phase 2 验证了新任务 happy path；Phase 3 验证了 `NEW_TASK -> STATUS_QUERY -> KILL`；Phase 5 验证了真实邮箱入口下的 `[OC]`、`[CX]`、`STATUS_QUERY` 和 `RERUN`，并额外完成了一轮新的 live `[OC]` + `[CX]` 联调
+- 支持直接主题 `[KILL] <task_id>` 和 reply `/kill` 两种终止入口
+- 已完成真实邮箱验证：Phase 2 验证了新任务 happy path；Phase 3 验证了 `NEW_TASK -> STATUS_QUERY -> KILL`；Phase 5 验证了真实邮箱入口下的 `[OC]`、`[CX]`、`STATUS_QUERY` 和 `RERUN`，并额外完成了一轮新的 live `[OC]` + `[CX]` 联调；Phase 7A 已把真实 backend 的 `[QUESTION] -> ANSWER -> DONE` 与正常 mailbox loop 下的 `KILL` 固定为可重复执行的 live acceptance
+- 已完成 `Permission:` 的真实邮箱冒烟：`Codex` 与 `OpenCode` 都验证了 `highest -> inherit -> default` 三步链路，且分别命中了危险参数投影与 run-scoped overlay 投影
 - 已完成 Phase 6 本地问答恢复验证：`QUESTION -> ANSWER -> DONE` 和等待态 `RERUN` 拒绝路径均已由自动化测试覆盖
 - 提供根目录 `state.md` 记录每个阶段完成后的当前项目状态
+
+## Codex Transport
+
+- New Codex threads now default to the SDK transport for continuous sessions; old records without `backend_transport` stay on CLI for compatibility.
+- The SDK bridge is implemented as a thin Node sidecar at `scripts/codex_sdk_sidecar/dist/index.js`, while CLI remains the fallback path.
+
+## Session Lifecycle
+
+- Thread/session persistence now carries `lifecycle: active|ended` plus `last_active_at` and `last_progress_at`.
+- The active working set is capped at `4`; if a new task or ended-thread reactivation would exceed that, the oldest non-running active session is auto-ended.
+- Replying with `/end` on a non-running thread marks the same thread/session as `ended` without rewriting its last run status; `/resume` can reactivate that same thread back into the active working set.
+- `mail_runner.observe` now surfaces active vs ended counts and shows lifecycle details in thread/session views.
+
+## Health Signals
+
+- `mail_runner.observe` now derives `health=normal|stale|suspected_stuck|orphaned` for active sessions with a fixed `300s` threshold.
+- `show-thread` and `show-thread-live` now surface `Last Progress At`, `Health`, and idle-time context.
+- On the `codex + sdk` path, recent `stream.events.jsonl` activity counts as progress, so active streaming turns do not get marked stuck just because `thread_state.json` has not been rewritten yet.
 
 ## 目录
 
 ```text
 docs/
+  current/
+  plans/
+  platform/
+  research/
 mail_runner/
   adapters/
   templates/
-tests/
 tasks/
+  _scheduler/
+    workspaces/
+  thread_001/
+tests/
 config.example.yaml
 README.md
 requirements.txt
@@ -42,18 +81,28 @@ state.md
 task.md
 ```
 
-## 计划中的会话调度重构
+文档分层基线见 [docs/document_layering_plan.md](docs/document_layering_plan.md)。
+当前活跃协议文档集中在 [docs/current/README.md](docs/current/README.md)；
+当前仓库改造计划集中在 [docs/plans/README.md](docs/plans/README.md)；
+未来平台文档集中在 [docs/platform/README.md](docs/platform/README.md)；
+当前唯一的下一阶段开发计划在 [docs/plans/coding_backlog.md](docs/plans/coding_backlog.md)。
 
-当前实现仍然是以 `thread` 为中心、全局单活动任务的模型。为了更贴近 Codex / OpenCode 的实际使用方式，下一轮重构将逐步切换到 `workspace + session` 模型，并按阶段完成测试后再推进。
+## 当前架构现状
 
+当前实现已经不是“纯 thread + 全局单槽”的模型，而是 `thread` 落盘与 `workspace/session` 调度索引并存的混合架构。
+
+- 真实运行产物仍落在 `tasks/thread_xxx/`，这里仍然是日志、snapshot、result、raw mail 的事实来源
+- 额外索引会落在 `tasks/_scheduler/workspaces/<workspace_id>/`，保存 `workspace_state.json` 和 `sessions/*.json`
 - `workspace` 由 `repo_path + workdir` 唯一标识
-- 同一个 `workspace` 下允许存在多个 `session`
-- 非 reply 新邮件在同一 `workspace` 下如果命中新的 session 标题，会自动创建新的 session
-- reply 邮件只能命中已有 session，不允许在同一邮件线程里分叉出新 session
-- 同一个 `workspace` 同时只允许 1 个 active session
-- 系统架构会预留多个 running session 的扩展能力，初期默认仍可从单 worker 配置开始
+- `session` 目前仍与一个邮件线程一一对应，默认 `session_id == thread_id`
+- 非 reply 新邮件当前仍然总是创建新的 `thread/session`，即使 `repo_path`、`workdir` 和标题相同也不会自动复用旧 session
+- reply 邮件只能命中已有 session，解析优先级是 `In-Reply-To` / `References` -> `state capsule` -> 主题里的 `[S:session_id]`
+- 普通 reply、`/resume` 和回答 `[QUESTION]` 都会优先续接已有 native backend context；显式 `/new` 会从当前对话里开启 fresh session
+- 如果 thread 已经 `[FAILED]` 且缺少可恢复的 `backend_session_id`，继续回复会自动退化为“基于最近 snapshot 的 fresh recovery run”，同时在 `[ACCEPTED]` 邮件里说明这是恢复重跑
+- 后台调度遵循“同一 workspace 同时只跑 1 个 session；不同 workspace 在 `max_concurrent_runs` 范围内可并发”
+- 如果同一 session 运行中又收到 follow-up，runner 会暂存 `queued_task_id` / `queued_snapshot_file`，当前 run 结束后继续
 
-重构规划和阶段验收要求记录在 [docs/session_scheduler_plan.md](docs/session_scheduler_plan.md)。
+剩余的调度差距和后续扩展项记录在 [docs/current/session_scheduler_status.md](docs/current/session_scheduler_status.md)。
 
 ## 配置
 
@@ -79,17 +128,36 @@ task.md
 - `opencode_profile_models` / `codex_profile_models`
   表示后端自己的 `profile -> model` 映射。邮件和 snapshot 里只允许出现 `fast` / `strong` / `vision` 这类 profile 标签，不直接出现 raw model id。
 - `max_concurrent_runs: 2`
-  表示全局最多允许多少个 session 同时运行。不同 `workdir` 的 session 可以并发；同一个 `workspace(repo + workdir)` 仍然保持串行。
+  表示全局最多允许多少个 session 同时运行。不同 workspace 的 session 可以并发；同一个 `workspace(repo + workdir)` 仍然保持串行。
 - `auto_create_workdir: false`
   表示默认要求 `Repo + Workdir` 已存在；若设为 `true`，当 `Repo` 已存在且 `Workdir` 是仓库内的相对路径时，会在执行前自动创建该目录。
+- `enable_web_search: false`
+  表示是否给真实后端打开联网搜索能力。`Codex` 会附加 `--search`，`OpenCode` 会注入 `OPENCODE_ENABLE_EXA=1`。
+- `spawn_monitor_windows: false`
+  Windows-only。设为 `true` 后，后台轮询模式会为每个进入 `running` 的 thread 自动拉起一个聚焦监控窗口；窗口复用 `scripts\monitor_mail_runner.ps1`，并会在该 thread 仍处于 active/resumable native session 时持续保留，直到该 session 不再可继续/恢复后才自动关闭。
+- `monitor_window_refresh_seconds: 5`
+  表示上述聚焦监控窗口的轮询周期（秒）；窗口会按这个周期增量抓取新 transcript turn 和新的 live stream 事件，而不是整屏重绘。
+- `project_sync_roots`
+  表示首封 `[SYNC]` 项目目录同步动作允许扫描的根路径列表。默认值是 `D:\projects` 和 `E:\projects`；回复只会列出这些根下的一级文件夹，不递归，不列文件。
+- `cos_region` / `cos_bucket` / `cos_secret_id` / `cos_secret_key`
+  表示 COS 外部交付所需的地域、桶和访问凭证；也可放在本地专用的 `mail_config.cos.local.yaml` 中，仅用于超大产物外链交付。
+- `external_delivery_threshold_mb: 20`
+  表示从多大开始不再把产物作为邮件附件发送，而是改走 COS 外链。
+- `cos_presign_expire_seconds: 604800`
+  表示 COS 下载预签名链接的有效期，默认 7 天。
+- `cos_object_prefix: mail-runner`
+  表示 COS 对象键前缀；默认对象路径是 `mail-runner/<thread_id>/<task_id>/<filename>`。
+- `Permission:` 是邮件 / snapshot 字段，不是配置文件字段
+  当前只支持 `default` / `highest`。首封任务省略时走 backend 默认权限；reply 省略时继承当前 thread/session；`highest` 会投影为 backend-specific 的最高权限运行模式。
 
 本地文件约定：
 
 - 仓库内 `config.example.yaml` 是可提交的示例配置。
-- 本地真实配置建议放在 `config.yaml` 或 `mail_config.local.yaml`，这两者都应视为本地敏感文件，不提交。
+- 本地真实配置建议放在 `config.yaml`、`mail_config.local.yaml`、`mail_config.bot.local.yaml` 或 `mail_config.cos.local.yaml`，这些都应视为本地敏感文件，不提交。
+- 推荐双邮箱部署：`mail_config.bot.local.yaml` / `._tmp_live_mail_runner\mail_config.loop_30s.yaml` 供 runner 使用；`mail_config.local.yaml` 可继续保留为用户邮箱或发件端本地配置。
 - `tasks/` 是运行态状态目录，仓库只保留 `tasks/.gitkeep` 作为空目录占位。
 - `_tmp_*` 目录用于本地验证和联调产物，可按需保留排障，也可在验证完成后自行清理。
-- 根目录 `.gitignore` 已包含 `.venv/`、`.pytest_cache/`、`config.yaml`、`mail_config.local.yaml`、`tasks/*` 和 `_tmp_*/`。
+- 根目录 `.gitignore` 已包含 `.venv/`、`.pytest_cache/`、`config.yaml`、`mail_config.local.yaml`、`mail_config.*.local.yaml`、`mail_config.cos.local.yaml`、`tasks/*` 和 `_tmp_*/`。
 
 ## 运行
 
@@ -99,9 +167,17 @@ task.md
 .\.venv\Scripts\python.exe -m mail_runner.app
 .\.venv\Scripts\python.exe -m pytest
 .\.venv\Scripts\python.exe -m mail_runner.runner --snapshot .\seed.json
-.\.venv\Scripts\python.exe -m mail_runner.app --once --config .\mail_config.local.yaml
-.\\.venv\\Scripts\\python.exe -m mail_runner.app --loop --config .\\mail_config.local.yaml
+.\.venv\Scripts\python.exe -m mail_runner.app --once --config .\mail_config.bot.local.yaml
+.\\.venv\\Scripts\\python.exe -m mail_runner.app --loop --config .\\mail_config.bot.local.yaml
+.\\.venv\\Scripts\\python.exe -m mail_runner.host --config .\\mail_config.bot.local.yaml --runtime-dir .\\_tmp_live_mail_runner
+.\\.venv\\Scripts\\python.exe -m mail_runner.observe --config .\\_tmp_live_mail_runner\\mail_config.loop_30s.yaml status
+.\\.venv\\Scripts\\python.exe -m mail_runner.observe --config .\\_tmp_live_mail_runner\\mail_config.loop_30s.yaml list-running
+.\\.venv\\Scripts\\python.exe -m mail_runner.observe --config .\\_tmp_live_mail_runner\\mail_config.loop_30s.yaml list-queue
+.\\.venv\\Scripts\\python.exe -m mail_runner.observe --config .\\_tmp_live_mail_runner\\mail_config.loop_30s.yaml show-thread thread_048
+.\\.venv\\Scripts\\python.exe -m mail_runner.observe --config .\\_tmp_live_mail_runner\\mail_config.loop_30s.yaml show-thread-live thread_048
+.\\.venv\\Scripts\\python.exe -m mail_runner.observe --config .\\_tmp_live_mail_runner\\mail_config.loop_30s.yaml follow-thread-live thread_048 --exit-when-inactive
 .\\.venv\\Scripts\\python.exe -m mail_runner.runner --snapshot .\\seed.json --config .\\config.yaml
+.\\.venv\\Scripts\\python.exe .\\scripts\\live_smoke_cos_roundtrip.py --cos-config .\\mail_config.cos.local.yaml --source .\\README.md
 ```
 
 后台服务推荐直接使用仓库内脚本：
@@ -109,16 +185,49 @@ task.md
 ```powershell
 .\scripts\start_mail_runner.cmd
 .\scripts\restart_mail_runner.cmd
+.\scripts\monitor_mail_runner.cmd
+.\scripts\fetch_bot_mails.cmd
+.\scripts\fetch_user_mails.cmd
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\manage_mail_runner.ps1 status
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\manage_mail_runner.ps1 stop
 ```
 
 脚本默认行为：
 
-- 默认优先使用 `._tmp_live_mail_runner\mail_config.loop_30s.yaml`；如果不存在，则回退到仓库根目录 `mail_config.local.yaml`
+- 默认优先使用 `._tmp_live_mail_runner\mail_config.loop_30s.yaml`；如果不存在，则回退到仓库根目录 `mail_config.bot.local.yaml`，最后才回退到 `mail_config.local.yaml`
+- `scripts\manage_mail_runner.ps1` 现在会启动 `mail_runner.host`，由它包装 `run_forever()` 并在 runtime dir 下写入 `host_state.json`
+- `scripts\manage_mail_runner.ps1` 的 `status / stop / restart` 会优先通过 `Win32_Process` 识别当前 `mail_runner.host` 和同配置下残留的 legacy `mail_runner.app --loop`；如果当前 shell 无法读取 `Win32_Process`，则会回退到 `host_state.json + loop.pid` 做稳定管理
+- `scripts\manage_mail_runner.ps1` 在 `start / restart` 时会额外等待 host 进入稳定存活窗口，不再只因为 `host_state.json` 刚写出就判定启动成功；若 `stop / start` 失败，错误里会附带 `host_state`、`loop.pid` 和最近日志 tail 便于排障
 - 运行态 pid、stdout/stderr 和辅助脚本都落在 `._tmp_live_mail_runner\`
+- `loop.pid` 现在会记录 launcher/host 两个 pid，便于在受限 shell 下稳定 `stop / restart`
+- `status` 会先显示 `host_state.json`，再显示当前进程信息；拿不到完整命令行时会退回到 pid 文件 / host state 的有限视图
+- `mail_runner.observe` 是最小可观测 CLI，只读现有状态文件，不引入新的持久化层；当前支持 `show-thread-live` 做静态快照，也支持 `follow-thread-live` 以 append-only 方式持续输出 thread transcript 增量和当前 `sdk` live stream
+- `monitor_mail_runner.cmd` 会弹出独立监控窗口；不带线程号时仍循环显示 `status / running / queue`，聚焦单个 thread 时例如 `.\scripts\monitor_mail_runner.cmd -ThreadId thread_048` 会切到 append-only live follow 视图，不再整屏刷新
+- 当 `spawn_monitor_windows: true` 时，后台轮询模式还会在 Windows 上为每个进入 `running` 的 thread 自动拉起一个聚焦监控窗口；这些自动窗口会聚焦 `follow-thread-live <thread_id>`，并在对应 session 不再 active/resumable 后自行退出
+- `fetch_bot_mails.cmd` 会默认抓取 bot mailbox，并把结果写到 `._tmp_live_mail_runner\recent_bot_100_mails.json`
+- `fetch_user_mails.cmd` 会默认抓取 user mailbox，并把结果写到 `._tmp_live_mail_runner\recent_user_100_mails.json`
 - `restart` 会先停止旧的 mail-runner 进程链，再用最新代码重启后台轮询
 - `status` 会列出当前 mail-runner 的 `cmd -> powershell -> python` 进程链，方便确认服务是否真的在跑
+- 推荐让 runner 只登录 bot mailbox；用户和安卓端只登录自己的 mailbox，始终把 bot mailbox 当收件人使用
+
+真实邮箱冒烟脚本：
+
+- `.\.venv\Scripts\python.exe .\scripts\live_smoke_mail_roundtrip.py --config .\_tmp_live_mail_runner\mail_config.loop_30s.yaml --sender-config .\mail_config.local.yaml --backend codex`
+- `.\.venv\Scripts\python.exe .\scripts\live_smoke_mail_roundtrip.py --config .\_tmp_live_mail_runner\mail_config.loop_30s.yaml --sender-config .\mail_config.local.yaml --backend opencode`
+- `.\.venv\Scripts\python.exe .\scripts\live_smoke_mail_permission.py --config .\_tmp_live_mail_runner\mail_config.loop_30s.yaml --sender-config .\mail_config.local.yaml --backend codex`
+- `.\.venv\Scripts\python.exe .\scripts\live_smoke_mail_permission.py --config .\_tmp_live_mail_runner\mail_config.loop_30s.yaml --sender-config .\mail_config.local.yaml --backend opencode`
+- `.\.venv\Scripts\python.exe .\scripts\live_smoke_mail_question_answer.py --config .\_tmp_live_mail_runner\mail_config.loop_30s.yaml --sender-config .\mail_config.local.yaml --backend opencode`
+- `.\.venv\Scripts\python.exe .\scripts\live_smoke_mail_kill.py --config .\_tmp_live_mail_runner\mail_config.loop_30s.yaml --sender-config .\mail_config.local.yaml --backend codex`
+- `.\.venv\Scripts\python.exe .\scripts\live_smoke_mail_sync.py --config .\_tmp_live_mail_runner\mail_config.loop_30s.yaml --sender-config .\mail_config.local.yaml`
+
+当前最新 `Permission:` live 结果落在：
+
+- `._tmp_live_mail_permission_smoke\codex-permission-20260316_005939-b22854\result.json`
+- `._tmp_live_mail_permission_smoke\opencode-permission-20260316_011028-77bf33\result.json`
+
+当前最新 `[SYNC]` live 结果落在：
+
+- `._tmp_live_mail_sync_smoke\sync-20260316_230059-cdf157\result.json`
 
 本地 demo `snapshot` 示例：
 
@@ -126,6 +235,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\manage_mail_runner
 {
  "backend": "opencode",
   "profile": null,
+  "permission": null,
   "repo_path": "D:\\repo",
   "workdir": "src",
   "task_text": "Refactor the module without changing the API.",
@@ -141,6 +251,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\manage_mail_runner
 真实首封任务邮件示例：
 
 ```text
+Subject: [SYNC]
+```
+
+```text
 Subject: [OC] Refactor floor_shear
 
 Repo: D:\proj\my_repo
@@ -148,6 +262,7 @@ Workdir: src\postprocess
 Timeout: 60
 Mode: modify
 Profile: strong
+Permission: highest
 
 Task:
 把 floor_shear.py 重构为 dataclass 风格，保持现有输出不变
@@ -175,7 +290,12 @@ Task:
 ```
 
 ```text
+/pause
+```
+
+```text
 /resume
+Permission: highest
 请继续把日志目录也整理一下。
 ```
 
@@ -199,6 +319,7 @@ Only analyze the issue and list risks.
 
 主题兼容说明：
 
+- 首封项目目录同步主题使用 `[SYNC]`
 - 新任务主题仍然使用 `[OC]` / `[CX]`
 - reply 主题除了常见的 `Re:` / `FW:` / `Fwd:`，现在也兼容中文客户端常见的 `回复:` / `回复：` / `答复:` / `答复：`
 - reply 命中线程时优先看 `In-Reply-To` / `References`；主题前缀兼容主要用于更稳定地做 `subject_norm` 归一化，而不是用“相同主题”强行串 session
@@ -211,34 +332,150 @@ Yes, update both modules.
 
 ```text
 Profile: fast
+Permission: highest
 Use the lighter profile first, then summarize the risks.
 ```
 
+## 问题与回答规则
+
+### 后端如何提问
+
+- 后端如果需要用户补充信息，必须在 stdout 中输出显式 `question capsule`，系统才会把这一轮识别为 `[QUESTION]`
+- 一次等待态里可以输出多个 `question capsule`；这时它们必须共享同一个 `question_set_id`
+- 每个 `question capsule` 至少应包含 `question_set_id`、`question_id`、`question_type`、`required`、`question_text`
+- 选择题还应包含 `choices`；如需展示中文选项名，应同时提供 `choice_labels`
+- 自由文本描述“我有个问题”不会被识别成等待态；必须用显式协议块
+
+示例：
+
+```text
+---TASK-QUESTION-BEGIN---
+question_set_id: phase2_clarifications
+question_id: phase2_entry_position
+question_type: single_choice
+required: true
+question_text: Where should the Tasks drawer entry be placed?
+choices: top | below | section
+choice_labels: top=账户列表上方 | below=账户列表下方（设置附近） | section=独立分区
+---TASK-QUESTION-END---
+```
+
+### 单题如何回答
+
+- 如果当前只存在 1 个待回答问题，仍然支持直接自然语言回复
+- 也支持 `question_id: value` 形式
+- 也支持 `/resume` 加正文
+- 如需切换档位或权限，可以在正文前加 `Profile: fast` / `Profile: strong` 和 `Permission: default` / `Permission: highest`
+
+示例：
+
+```text
+Yes, update both modules.
+```
+
+```text
+/resume
+Profile: strong
+Permission: highest
+Proceed with both modules and keep the public API unchanged.
+```
+
+### 多题如何回答
+
+- 如果当前存在 2 个及以上待回答问题，推荐使用结构化回复
+- 推荐格式是逐行写 `question_id: value`
+- `value` 优先写 canonical key；如果直接写状态邮件中展示的选项文案，系统也会尝试归一化到 canonical key
+- `Answers:` 标题是可选的，主要用于便于复制模板
+- `:` 和 `：` 都接受
+- 解析器只会接受当前这封 `[QUESTION]` 里仍然 pending 的 `question_id`
+
+推荐格式：
+
+```text
+Answers:
+phase2_entry_position: below
+phase2_icon_strings: provide
+phase2_k9_support: thunderbird_only
+phase2_device_validation: acceptable
+```
+
+也支持更贴近真实邮箱回信的写法：
+
+```text
+question_id: phase2_entry_position
+账户列表下方（设置附近）
+question_id: phase2_icon_strings
+你提供
+question_id: phase2_k9_support
+仅 Thunderbird
+question_id: phase2_device_validation
+可接受
+```
+
+### 多题回复里什么算有效
+
+- `question_id` 必须是当前仍待回答的问题 id
+- 选择题答案必须能归一化到允许的某个 canonical key
+- 同一个 `question_id` 如果出现多次，以最后一个有效值为准
+- 空行会被忽略
+- 回复中的旧引用、旧 state capsule 和旧 question capsule 不会算成新答案
+
+### 多题回复里什么不支持
+
+- 只写一段散文，不带任何可识别的 `question_id: value` 结构
+- 回答未知 `question_id`
+- 选择题填了不在允许集合里的值
+- 指望系统从自由文本里猜多题答案含义
+
+### 部分回答与继续执行
+
+- 多题场景允许部分回答
+- 如果只答对了其中一部分，系统会先保存已经校验通过的答案，继续保持 `awaiting_user_input`
+- 下一封 `[QUESTION]` 会列出 `Received Answers` 和剩余未回答题目，避免用户重复填写
+- 只有必填题全部补齐后，系统才会继续 resume 后端
+- resume 给后端的是规范化后的答案摘要，不是原始回信全文
+
+## Paused 协议
+
+- `/pause` 只对非运行中的 thread/session 生效；如果当前是 `accepted` 或 `running`，系统会提示等待完成或使用 `/kill`
+- paused 后，thread 和 session 都会进入 `paused`；同时保留 `paused_from_status`，用于说明它是从 `done`、`failed`、`killed` 还是 `awaiting_user_input` 暂停下来的
+- paused 后，普通 reply 不会偷偷继续执行；需要显式 `/resume`
+- 如果 paused 线程仍然有 pending question：
+  - `/resume` 不带答案：退出 paused，重新发 `[QUESTION]`
+  - `/resume` 带答案：按正常 answer flow 继续；答不全则继续停在 `[QUESTION]`
+- 如果 paused 线程没有 pending question，`/resume` 会回到普通 continuation / native resume 路径
+
+## Session 生命周期
+
+- `lifecycle` 与上一轮运行结果分离；`done`、`failed`、`killed`、`paused` 都不会自动等于 `ended`
+- `/end` 只对非运行中的 thread/session 生效；它会把当前 thread/session 标成 `ended` 并退出 active working set，但不会改写上一轮结果
+- 如果当前 thread 仍是 `accepted` 或 `running`，`/end` 会拒绝并提示等待完成或先 `/kill`
+- `ended` thread 之后仍可用 `/resume` 恢复到同一条 thread；如果它只是 paused 且还在等问题答案，`/resume` 也会把同一 thread 拉回 `active`
+
 ## 当前限制
 
-- 当前仍然只支持单用户、本地、单任务串行执行；`--loop` 虽然能后台跑一个任务并继续收邮件，但不引入任务队列或并发 worker
+- 当前仍然只支持单用户、本地、文件系统落盘，不提供数据库、Web UI、多租户或分布式 worker
+- `--once` 仍然是同步批处理；只有 `--loop` / 后台 runner 路径才会利用队列和 `max_concurrent_runs`
+- 非 reply 新邮件当前总是创建 fresh session；“按 workspace + 标题自动复用已有 session” 还没有落地
+- `/sessions` 目前只负责列出当前 workspace 的 session，不会自动切换上下文；要继续某个 session，仍然需要回复该 session 最近一封状态邮件
 - reply 线程恢复现在只接受显式 session 线索：优先 header，再用 state capsule，最后才用 subject 里的 `[S:session_id]` 标签；不再使用“同主题自动接旧 session”的兜底策略
-- 普通 reply 默认会续接当前线程对应的 native backend context；只有新发邮件或显式 `/new` 才会启动 fresh session。`[QUESTION]` 等待态回复仍允许直接回答，不强制写 `/resume`
+- 普通 reply 默认会续接当前线程对应的 native backend context；只有新发邮件或显式 `/new` 才会启动 fresh session。`[QUESTION]` 等待态下，单题仍允许直接回答；多题应使用结构化回复，不强制写 `/resume`
+- `FAILED` 线程现在分成两种恢复路径：有可恢复 native session 时继续走原生 resume；没有 native session 时，把这封回复重放成一轮新的 recovery run，并保留回复中的补充上下文
 - 邮件正文提取现在支持 `text/plain` 优先、空 plain part 自动回退 `text/html`；对只发 HTML 正文的网页邮箱更友好
-- 当前的问答恢复是“应用层恢复”：后端提问后本轮退出，用户回答后生成新的 snapshot 再继续；不是同一个 CLI session 进程原地续跑
+- 当前的问答恢复仍然是“应用层生成新 snapshot + native resume”，不是同一个 CLI 进程原地继续执行
 - `profile` 现在会在真实 adapter 中映射为后端自己的 `-m` 参数；如果 profile 已设置但对应映射缺失，本轮会直接失败并返回清晰错误
-- 同账号给自己发 reply 是否会重新进入 `INBOX` 取决于邮箱服务商行为；当前 reply 实机验证使用了真实 IMAP 收件链路，但为了规避服务商路由差异，验证时采用了可控的 inbox injection
-- 当前不会解析真实 CLI 的结构化结果，因此 `changed_files` 固定为空，`tests_passed` 固定为 `null`
+- 推荐双邮箱：runner 只登录 bot mailbox，用户只在自己的 mailbox 里读信和回复。当前收件端已改为 `INBOX` 的 IMAP UID 增量扫描 + 本地 `UID/Message-ID` 去重，不再依赖 `UNSEEN` 作为唯一消费条件。
+- 真实 CLI / SDK 的 structured run-result capsule 现在会回填 `changed_files`、`tests_passed`、`error_type` 和 `error_message`；没有结果块时仍回退到现有启发式 summary / error 提取
 - 真实后端摘要提取仍是启发式规则，不保证对所有未来 CLI 输出格式都完美
-- 当前仍未把 `KILL` 纳入“真实邮箱入口 + 真实后端”的固定验收项；`KILL` 的主验证仍依赖受控长任务场景
-- `paused` 目前只在状态模型里预留，没有单独的邮件协议或用户命令
-- 问题识别只支持显式 `question capsule` 协议，不支持从任意自由文本里猜测“这是一条问题”
+- 已将 `[QUESTION] -> ANSWER -> DONE` 和真实 backend `KILL` 纳入固定的“真实邮箱入口 + 真实后端”验收项；最新工件见 `._tmp_live_mail_question_smoke\opencode-question-20260318_133540-07ef74\result.json` 与 `._tmp_live_mail_kill_smoke\codex-kill-20260318_133818-b4d2a5\result.json`
+- 问题识别只支持显式 `question capsule` 协议，不支持从任意自由文本里猜测“这是一条问题”；多题回答也不支持从自由文本散文里猜答案
+- `[SYNC]` 目前只是“先拿项目目录清单”的只读入口；它不会自动把目录选择回填成后续 `[OC]` / `[CX]` 首封任务模板
 
-## 阶段边界说明
+## 验证现状
 
-- Phase 1 已锁定为“本地单任务串行执行 + 文件状态落盘”主链，不为未来邮件智能逻辑提前扩大实现范围。
-- Phase 3 已按最小实现完成 reply 线程恢复、quote 提取、state capsule 回复恢复、规则版自然语言动作解析，以及 `STATUS` / `RERUN` / `KILL`。
-- 当前代码只做必要的可扩展准备：状态值集中定义、`runner` / `dispatcher` 接口保持薄、数据结构保留后续增字段空间。
-- 当前阶段仍明确不做自动问答回合、任务挂起/恢复、OpenCode -> Codex 自动升级、复杂线程恢复、多任务并发和对话式邮件协作。
-- `profile` 当前已从“字段预留”升级为“按后端配置映射到真实 model 参数”，但仍不接受 raw model id 直接出现在邮件协议里。
-- Phase 4 只做真实 CLI 薄封装和演示模式，不做真实模型结果理解、问答挂起状态机或 profile 驱动模型路由。
-- Phase 5 只做稳定性补强、摘要/错误信息收口、README/troubleshooting 完善，以及真实邮箱入口 + 真实 backend 联调；不实现 `[QUESTION]` 或 `awaiting_user_input` 行为。
-- Phase 6 只实现显式问题协议、`awaiting_user_input`、回答后继续执行，以及 profile 映射；不实现 native CLI session resume、通用 paused 命令或多任务会话编排。
+- `2026-03-18` 本地自动化验证：`.\.venv\Scripts\python.exe -m pytest` -> `231 passed`
+- 自动化测试已经覆盖新任务 happy path、首封 `[SYNC]` 目录同步、reply resume、失败后 fresh recovery run、`/new` fresh session、`/sessions` 列表、`/pause -> /resume -> /end`、ended thread reactivation、`QUESTION -> ANSWER -> DONE`、线程健康判定、workspace 串行、跨 workspace 并发、runner 重启恢复，以及 CLI resume 命令构造
+- 真实邮箱 / 真实 backend 的联调记录仍保留在 `state.md`，其中 `[OC]`、`[CX]`、`STATUS_QUERY`、`RERUN`、真实 `[QUESTION] -> ANSWER -> DONE` 和正常 mailbox loop 下的真实 backend `KILL` 都已有落盘工件
 
 ## Troubleshooting
 
@@ -246,22 +483,21 @@ Use the lighter profile first, then summarize the risks.
 - Windows PowerShell 可能因执行策略阻止 `opencode.ps1` / `codex.ps1`；当前实现会优先发现并调用 `opencode.cmd` / `codex.cmd`。
 - OpenCode 如果报 `attempt to write a readonly database`，通常不是项目逻辑问题，而是 CLI 自己的本地状态目录不可写；需要在可写环境下运行。
 - Codex 运行中如果先出现 websocket 连接失败、随后回退到 HTTPS，但最终退出码是 `0`，这通常仍可视为成功执行。
-- 同账号给自己发 reply 是否重新进入 `INBOX` 取决于邮箱服务商；如果 reply 联调不稳定，优先使用真实 IMAP inbox injection 做确定性验证。
+- 如果 reply 联调不稳定，先确认 runner 用的是 bot mailbox、发件端用的是 user mailbox；单邮箱 self-reply 仍受服务商路由影响，不再是推荐部署方式。
 - `summary.md` 第一行和状态邮件里的 `Summary:` 来自启发式提取；如果某个 CLI 版本改了输出格式，优先查看 `stdout.log` / `stderr.log` 原始内容。
 - 如果后端进入等待态，stdout 里必须输出完整的 `question capsule`；自由文本问题不会被识别为 `[QUESTION]`。
+- 如果 `[QUESTION]` 邮件里有多题，优先按状态邮件给出的 `Answers:` 模板回复；只写一段自由文本通常不会继续执行，而是收到新的 `[QUESTION]` 提示。
+- 如果普通 reply 或 `/resume` 收到“没有可恢复 native context”的状态邮件，通常说明当前 thread 既没有可恢复的 native session，又不处于支持自动 recovery 的失败态；这时应使用 `/new` 或 `/rerun`。
 - 如果邮件或 snapshot 里指定了 `profile`，但 `config.yaml` 对应后端没有配置映射，本轮会失败并在错误信息里明确指出缺失的 profile 名称。
-- 如果网页邮箱发出的新任务邮件只有 HTML 正文、没有有效 `text/plain`，当前版本也会自动回退解析；如果仍然看起来“没响应”，先去 `INBOX` 搜索 `[ACCEPTED]` / `[DONE]`，再检查 [loop.stderr.log](E:/projects/mail_based_task_manager/_tmp_live_mail_runner/loop.stderr.log)。
+- 如果网页邮箱发出的新任务邮件只有 HTML 正文、没有有效 `text/plain`，当前版本也会自动回退解析；如果仍然看起来“没响应”，先去 `INBOX` 搜索 `[ACCEPTED]` / `[DONE]`，再检查 [_tmp_live_mail_runner/loop.stderr.log](_tmp_live_mail_runner/loop.stderr.log)。
 
-## 下一阶段
+## 后续事项
 
-下一阶段是 `Phase 7`，预计包括：
+- 评估是否要让非 reply 新邮件在 `workspace + title` 明确命中时复用已有 session
+- 如需继续推进会话面，优先做显式 session targeting UX，而不是隐式按标题猜测
+- 如果继续推进调度重构，则优先补“新邮件按 workspace + 标题复用已有 session”以及更明确的 session 定位能力
+- 多媒体邮件输入输出功能的后续开发以 [docs/current/multimedia_mail_protocol.md](docs/current/multimedia_mail_protocol.md) 为唯一事实来源
 
-- native CLI session resume / continue 的可行性验证
-- `paused` 的真正用户协议和恢复语义
-- 真实邮箱入口 + 真实 backend 下 `[QUESTION] -> ANSWER -> DONE` 的固定验收路径
-- 真实 backend 邮件链路里的 `KILL` 固定验收路径
-
-如果后续优先执行会话调度重构，则会先按 `docs/session_scheduler_plan.md` 中定义的 3 个阶段推进，再回到上述更深层的运行时增强项。
 ## Transcript Export
 
 可以使用仓库内脚本把某个线程的多轮对话按时间顺序导出并拼接成 transcript。
@@ -295,5 +531,6 @@ Use the lighter profile first, then summarize the risks.
 - `OpenCode` 动态权限配置里会显式允许 `websearch` / `webfetch`
 
 当前项目里的本地运行配置已经打开：
-- [mail_config.local.yaml](E:/projects/mail_based_task_manager/mail_config.local.yaml)
-- [_tmp_live_mail_runner/mail_config.loop_30s.yaml](E:/projects/mail_based_task_manager/_tmp_live_mail_runner/mail_config.loop_30s.yaml)
+- [mail_config.local.yaml](mail_config.local.yaml)
+- [mail_config.bot.local.yaml](mail_config.bot.local.yaml)
+- [_tmp_live_mail_runner/mail_config.loop_30s.yaml](_tmp_live_mail_runner/mail_config.loop_30s.yaml)

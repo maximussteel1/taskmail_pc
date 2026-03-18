@@ -1,0 +1,18 @@
+{
+  "name": "mail-runner-codex-sdk-sidecar",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Thin TypeScript sidecar for Codex SDK turns.",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@openai/codex": "^0.115.0",
+    "@openai/codex-sdk": "^0.115.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^5.9.2"
+  }
+}

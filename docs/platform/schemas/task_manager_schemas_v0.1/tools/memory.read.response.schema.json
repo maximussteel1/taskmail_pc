@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/task-manager/schemas/v0.1/tools/memory.read.response.schema.json",
+  "title": "memory.read Response",
+  "description": "响应包络：返回指定片段内容或错误。",
+  "$defs": {
+    "successData": {
+      "type": "object",
+      "required": [
+        "doc_id",
+        "title",
+        "content_type",
+        "content",
+        "locator"
+      ],
+      "properties": {
+        "doc_id": {
+          "$ref": "../common/base.schema.json#/$defs/nonEmptyString"
+        },
+        "chunk_id": {
+          "oneOf": [
+            {
+              "$ref": "../common/base.schema.json#/$defs/nonEmptyString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "$ref": "../common/base.schema.json#/$defs/nonEmptyString"
+        },
+        "content_type": {
+          "$ref": "../common/base.schema.json#/$defs/nonEmptyString"
+        },
+        "content": {
+          "type": "string"
+        },
+        "locator": {
+          "$ref": "../common/base.schema.json#/$defs/locator"
+        },
+        "attributes": {
+          "$ref": "../common/base.schema.json#/$defs/resultAttributes"
+        }
+      },
+      "additionalProperties": false
+    },
+    "successEnvelope": {
+      "allOf": [
+        {
+          "$ref": "../common/base.schema.json#/$defs/responseEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "const": "memory.read"
+            },
+            "status": {
+              "const": "ok"
+            },
+            "data": {
+              "$ref": "#/$defs/successData"
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    },
+    "errorEnvelope": {
+      "allOf": [
+        {
+          "$ref": "../common/base.schema.json#/$defs/responseEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "const": "memory.read"
+            },
+            "status": {
+              "const": "error"
+            },
+            "data": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "../common/base.schema.json#/$defs/errorObject"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/successEnvelope"
+    },
+    {
+      "$ref": "#/$defs/errorEnvelope"
+    }
+  ],
+  "examples": [
+    {
+      "schema_version": "1.0",
+      "request_id": "req-101",
+      "tool": "memory.read",
+      "status": "ok",
+      "data": {
+        "doc_id": "DOC-017",
+        "chunk_id": "c-12",
+        "title": "项目 A 技术报告",
+        "content_type": "text/plain",
+        "content": "完整片段内容",
+        "locator": {
+          "path": "/docs/projectA/report.pdf",
+          "page": 14,
+          "section": "3.2"
+        },
+        "attributes": {
+          "doc_type": "report",
+          "project": "projectA"
+        }
+      },
+      "error": null,
+      "meta": {
+        "duration_ms": 24,
+        "warnings": []
+      }
+    }
+  ]
+}

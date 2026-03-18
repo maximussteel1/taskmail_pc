@@ -7,9 +7,11 @@ from mail_runner.state_capsule import (
     END_MARKER,
     QUESTION_BEGIN_MARKER,
     QUESTION_END_MARKER,
+    parse_question_capsules,
     parse_question_capsule,
     parse_state_capsule,
     render_question_capsule,
+    render_question_capsules,
     render_state_capsule,
 )
 
@@ -73,3 +75,35 @@ def test_render_and_parse_question_capsule() -> None:
     assert parsed is not None
     assert parsed["question_id"] == "question_task_001"
     assert parsed["choices"] == ["yes", "no"]
+
+
+def test_parse_question_capsules_collects_multiple_blocks() -> None:
+    rendered = render_question_capsules(
+        [
+            {
+                "question_set_id": "phase2",
+                "question_id": "q_001",
+                "question_type": "single_choice",
+                "required": "true",
+                "question_text": "Choose placement",
+                "choices": ["top", "below"],
+                "choice_labels": {"top": "Top", "below": "Below"},
+            },
+            {
+                "question_set_id": "phase2",
+                "question_id": "q_002",
+                "question_type": "single_choice",
+                "required": "true",
+                "question_text": "Choose icon owner",
+                "choices": ["provide", "reuse"],
+                "choice_labels": {"provide": "You provide", "reuse": "Reuse existing"},
+            },
+        ]
+    )
+
+    parsed = parse_question_capsules(rendered)
+
+    assert len(parsed) == 2
+    assert parsed[0]["question_set_id"] == "phase2"
+    assert parsed[0]["choice_labels"]["below"] == "Below"
+    assert parse_question_capsule(rendered)["question_id"] == "q_002"

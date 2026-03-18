@@ -11,6 +11,7 @@ from mail_runner.status import BACKEND_CODEX, BACKEND_OPENCODE
 def test_parse_subject_recognizes_supported_prefixes() -> None:
     parsed_oc = parse_subject("[OC] Refactor task")
     parsed_cx = parse_subject("[CX] Analyze task")
+    parsed_sync = parse_subject("[SYNC] Project folders")
 
     assert parsed_oc["is_new_task"] is True
     assert parsed_oc["backend"] == BACKEND_OPENCODE
@@ -19,6 +20,10 @@ def test_parse_subject_recognizes_supported_prefixes() -> None:
 
     assert parsed_cx["is_new_task"] is True
     assert parsed_cx["backend"] == BACKEND_CODEX
+    assert parsed_sync["is_new_task"] is False
+    assert parsed_sync["backend"] is None
+    assert parsed_sync["action"] == "SYNC_PROJECT_FOLDERS"
+    assert parsed_sync["subject_norm"] == "project folders"
 
 
 def test_parse_subject_handles_unknown_and_kill_prefixes() -> None:
@@ -40,6 +45,7 @@ def test_normalize_subject_strips_reply_and_status_prefixes() -> None:
     assert normalize_subject("回复: [DONE] Demo task") == "demo task"
     assert normalize_subject("答复：[DONE] Demo task") == "demo task"
     assert normalize_subject("答复: [DONE] Demo task") == "demo task"
+    assert normalize_subject("Re: [SYNC] Project Folder List") == "project folder list"
     assert extract_session_tag("Re: [DONE][S:thread_001] Demo task") == "thread_001"
 
 
@@ -83,6 +89,22 @@ def test_parse_initial_task_reads_optional_profile() -> None:
     parsed = parse_initial_task(body)
 
     assert parsed["profile"] == "strong"
+
+
+def test_parse_initial_task_reads_optional_permission() -> None:
+    body = "\n".join(
+        [
+            "Repo: D:\\repo",
+            "Permission: highest",
+            "",
+            "Task:",
+            "Analyze the issue.",
+        ]
+    )
+
+    parsed = parse_initial_task(body)
+
+    assert parsed["permission"] == "highest"
 
 
 def test_parse_initial_task_requires_repo_and_task() -> None:

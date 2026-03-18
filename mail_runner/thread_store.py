@@ -11,14 +11,16 @@ from pathlib import Path
 from typing import Any
 
 from .config import AppConfig
-from .models import MailEnvelope, SessionState, ThreadState, WorkspaceState
+from .models import MailAttachment, MailEnvelope, QuestionAnswer, QuestionItem, SessionState, ThreadState, WorkspaceState
 from .parser import extract_session_tag, normalize_subject
 from .status import (
+    BACKEND_TRANSPORT_CLI,
     THREAD_STATUS_ACCEPTED,
     THREAD_STATUS_AWAITING_USER_INPUT,
     THREAD_STATUS_DONE,
     THREAD_STATUS_FAILED,
     THREAD_STATUS_KILLED,
+    THREAD_STATUS_PAUSED,
     THREAD_STATUS_RUNNING,
 )
 from .workspace import WorkspaceManager
@@ -30,6 +32,7 @@ THREAD_TO_SESSION_STATUS = {
     THREAD_STATUS_ACCEPTED: "queued",
     THREAD_STATUS_RUNNING: "running",
     THREAD_STATUS_AWAITING_USER_INPUT: "waiting_user",
+    THREAD_STATUS_PAUSED: "paused",
     THREAD_STATUS_DONE: "done",
     THREAD_STATUS_FAILED: "failed",
     THREAD_STATUS_KILLED: "killed",
@@ -91,6 +94,14 @@ def _iter_thread_ids(task_root: str | Path | None = None) -> list[str]:
     )
 
 
+def list_all_thread_states(task_root: str | Path | None = None) -> list[ThreadState]:
+    workspace = _workspace(task_root)
+    if not workspace.task_root.exists():
+        return []
+    states = [load_thread_state(thread_id, workspace.task_root) for thread_id in _iter_thread_ids(workspace.task_root)]
+    return sorted(states, key=lambda item: item.updated_at, reverse=True)
+
+
 def _next_thread_id(task_root: str | Path | None = None) -> str:
     numbers: list[int] = []
     for thread_id in _iter_thread_ids(task_root):
@@ -102,7 +113,33 @@ def _next_thread_id(task_root: str | Path | None = None) -> str:
 
 def _payload_to_dict(payload: MailEnvelope | dict[str, Any]) -> dict[str, Any]:
     if isinstance(payload, MailEnvelope):
-        return _json_safe(asdict(payload))
+        envelope = payload
+        return _json_safe(
+            {
+                "message_id": envelope.message_id,
+                "subject": envelope.subject,
+                "from_addr": envelope.from_addr,
+                "to_addr": envelope.to_addr,
+                "date": envelope.date,
+                "in_reply_to": envelope.in_reply_to,
+                "references": list(envelope.references),
+                "body_text": envelope.body_text,
+                "attachments": [
+                    {
+                        "filename": item.filename,
+                        "content_type": item.content_type,
+                        "size_bytes": item.size_bytes,
+                        "saved_path": item.saved_path,
+                        "raw_saved_path": item.raw_saved_path,
+                        "content_id": item.content_id,
+                        "is_inline": item.is_inline,
+                        "sha256": item.sha256,
+                    }
+                    for item in envelope.attachments
+                ],
+                "raw_headers": dict(envelope.raw_headers),
+            }
+        )
     return _json_safe(dict(payload))
 
 
@@ -134,11 +171,13 @@ def _build_workspace_state_from_thread(state: ThreadState, existing: WorkspaceSt
     active_session_id = existing.active_session_id if existing is not None else None
     queued_session_ids = list(existing.queued_session_ids) if existing is not None else []
     queued_session_ids = [item for item in queued_session_ids if item != session_id]
-    if state.status == THREAD_STATUS_RUNNING:
+    if state.lifecycle == "active" and state.status == THREAD_STATUS_RUNNING:
         active_session_id = session_id
     elif active_session_id == session_id:
         active_session_id = None
-    if state.status == THREAD_STATUS_ACCEPTED or (state.queued_task_id and state.status != THREAD_STATUS_RUNNING):
+    if state.lifecycle == "active" and (
+        state.status == THREAD_STATUS_ACCEPTED or (state.queued_task_id and state.status != THREAD_STATUS_RUNNING)
+    ):
         queued_session_ids.append(session_id)
     return WorkspaceState(
         workspace_id=state.workspace_id or build_workspace_id(state.repo_path, state.workdir),
@@ -166,6 +205,7 @@ def _build_session_state_from_thread(state: ThreadState) -> SessionState:
         session_norm=state.session_norm or state.subject_norm,
         backend=state.backend,
         profile=state.profile,
+        permission=state.permission,
         repo_path=state.repo_path,
         workdir=state.workdir,
         status=derived_status,
@@ -176,8 +216,12 @@ def _build_session_state_from_thread(state: ThreadState) -> SessionState:
         pending_task_count=pending_task_count,
         history_files=list(state.history_files),
         last_summary=state.last_summary,
+        lifecycle=state.lifecycle,
+        last_active_at=state.last_active_at,
+        last_progress_at=state.last_progress_at,
         backend_session_id=state.backend_session_id,
         backend_session_resumable=state.backend_session_resumable,
+        backend_transport=state.backend_transport,
         created_at=state.created_at,
         updated_at=state.updated_at,
     )
@@ -326,14 +370,22 @@ def create_thread(
     status: str = THREAD_STATUS_ACCEPTED,
     history_files: list[str] | None = None,
     last_summary: str | None = None,
+    lifecycle: str = "active",
+    last_active_at: str | None = None,
+    last_progress_at: str | None = None,
     thread_id: str | None = None,
     created_at: str | None = None,
     updated_at: str | None = None,
     profile: str | None = None,
+    permission: str | None = None,
     pending_question_id: str | None = None,
     pending_question_text: str | None = None,
     pending_choices: list[str] | None = None,
+    pending_question_set_id: str | None = None,
+    pending_questions: list[QuestionItem] | None = None,
+    collected_answers: list[QuestionAnswer] | None = None,
     awaiting_since: str | None = None,
+    paused_from_status: str | None = None,
     workspace_id: str | None = None,
     workspace_norm: str | None = None,
     session_id: str | None = None,
@@ -343,6 +395,7 @@ def create_thread(
     queued_snapshot_file: str | None = None,
     backend_session_id: str | None = None,
     backend_session_resumable: bool = False,
+    backend_transport: str = BACKEND_TRANSPORT_CLI,
 ) -> ThreadState:
     workspace = _workspace(task_root)
     workspace.ensure_layout()
@@ -364,6 +417,7 @@ def create_thread(
         subject_norm=subject_norm,
         backend=backend,
         profile=profile,
+        permission=permission,
         repo_path=repo_path,
         workdir=workdir,
         current_task_id=current_task_id,
@@ -371,10 +425,17 @@ def create_thread(
         status=status,
         history_files=list(history_files or []),
         last_summary=last_summary,
+        lifecycle=lifecycle,
+        last_active_at=last_active_at or updated_at or created_at or now,
+        last_progress_at=last_progress_at or updated_at or created_at or now,
         pending_question_id=pending_question_id,
         pending_question_text=pending_question_text,
         pending_choices=list(pending_choices or []),
+        pending_question_set_id=pending_question_set_id,
+        pending_questions=list(pending_questions or []),
+        collected_answers=list(collected_answers or []),
         awaiting_since=awaiting_since,
+        paused_from_status=paused_from_status,
         workspace_id=resolved_workspace_id,
         workspace_norm=resolved_workspace_norm,
         session_id=resolved_session_id,
@@ -382,6 +443,7 @@ def create_thread(
         session_norm=resolved_session_norm,
         backend_session_id=backend_session_id,
         backend_session_resumable=backend_session_resumable,
+        backend_transport=backend_transport,
         queued_task_id=queued_task_id,
         queued_snapshot_file=queued_snapshot_file,
         created_at=created_at or now,
@@ -417,4 +479,26 @@ def save_raw_mail(
         if match:
             next_index = max(next_index, int(match.group(1)) + 1)
     target = workspace.mail_dir(thread_id) / f"raw_{next_index:03d}.json"
+    if isinstance(payload, MailEnvelope) and payload.attachments:
+        attachment_dir = workspace.mail_dir(thread_id) / f"raw_{next_index:03d}_attachments"
+        attachment_dir.mkdir(parents=True, exist_ok=True)
+        archived: list[MailAttachment] = []
+        for index, attachment in enumerate(payload.attachments, start=1):
+            safe_name = re.sub(r"[\\/]+", "_", attachment.filename)
+            file_path = attachment_dir / f"{index:03d}_{safe_name}"
+            file_path.write_bytes(attachment.content_bytes)
+            archived.append(
+                MailAttachment(
+                    filename=attachment.filename,
+                    content_type=attachment.content_type,
+                    size_bytes=attachment.size_bytes,
+                    saved_path=attachment.saved_path,
+                    raw_saved_path=str(file_path),
+                    content_id=attachment.content_id,
+                    is_inline=attachment.is_inline,
+                    sha256=attachment.sha256,
+                    content_bytes=attachment.content_bytes,
+                )
+            )
+        payload.attachments = archived
     return workspace.save_json(target, _payload_to_dict(payload))

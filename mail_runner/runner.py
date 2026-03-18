@@ -14,19 +14,25 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .adapters.codex_adapter import CodexAdapter
+from .adapters.codex_routing_adapter import CodexRoutingAdapter
+from .adapters.codex_sdk_adapter import CodexSdkAdapter
 from .adapters.opencode_adapter import OpenCodeAdapter
 from .config import AppConfig, load_config
 from .dispatcher import Dispatcher
 from .models import RunResult, TaskSnapshot, ThreadState
+from .monitor_windows import MonitorWindowManager
 from .status import (
+    BACKEND_TRANSPORT_CLI,
     FINAL_THREAD_STATUS_BY_RUN_STATUS,
     RUN_STATUS_AWAITING_USER_INPUT,
     RUN_STATUS_FAILED,
     RUN_STATUS_KILLED,
+    RUN_STATUS_PAUSED,
     RUN_STATUS_SUCCESS,
     THREAD_STATUS_ACCEPTED,
     THREAD_STATUS_AWAITING_USER_INPUT,
     THREAD_STATUS_FAILED,
+    THREAD_STATUS_PAUSED,
     THREAD_STATUS_RUNNING,
 )
 from .thread_store import build_workspace_id, build_workspace_norm, create_thread, load_thread_state, save_thread_state
@@ -35,6 +41,7 @@ from .workspace import WorkspaceManager
 LOGGER = logging.getLogger(__name__)
 StateCallback = Callable[[ThreadState], None]
 FinishedCallback = Callable[[ThreadState, RunResult], None]
+RecoveryCallbackFactory = Callable[[ThreadState, TaskSnapshot], tuple[StateCallback | None, FinishedCallback | None]]
 
 
 def configure_logging(level: int = logging.INFO) -> None:
@@ -112,10 +119,21 @@ class _QueuedRun:
 class SerialTaskRunner:
     """Coordinates one local task at a time."""
 
-    def __init__(self, task_root: str | Path, dispatcher: Dispatcher, max_concurrent_runs: int = 2) -> None:
+    def __init__(
+        self,
+        task_root: str | Path,
+        dispatcher: Dispatcher,
+        max_concurrent_runs: int = 2,
+        codex_transport_default: str = "sdk",
+        recovery_callback_factory: RecoveryCallbackFactory | None = None,
+        monitor_window_manager: MonitorWindowManager | None = None,
+    ) -> None:
         self.workspace = WorkspaceManager(task_root)
         self.dispatcher = dispatcher
         self.max_concurrent_runs = max(1, int(max_concurrent_runs))
+        self.codex_transport_default = codex_transport_default
+        self._recovery_callback_factory = recovery_callback_factory
+        self._monitor_window_manager = monitor_window_manager
         self._lock = threading.Lock()
         self._active_runs: dict[str, _ActiveRun] = {}
         self._queued_runs: list[_QueuedRun] = []
@@ -145,6 +163,7 @@ class SerialTaskRunner:
             thread_id=thread_id,
             backend=str(snapshot_seed["backend"]),
             profile=_empty_to_none(snapshot_seed.get("profile")),
+            permission=_empty_to_none(snapshot_seed.get("permission")),
             repo_path=str(snapshot_seed["repo_path"]),
             workdir=_empty_to_none(snapshot_seed.get("workdir")),
             task_text=str(snapshot_seed["task_text"]),
@@ -157,6 +176,10 @@ class SerialTaskRunner:
             run_mode=_empty_to_none(snapshot_seed.get("run_mode")) or "new",
             backend_session_id=_empty_to_none(snapshot_seed.get("backend_session_id")),
             turn_text=_empty_to_none(snapshot_seed.get("turn_text")),
+            backend_transport=(
+                _empty_to_none(snapshot_seed.get("backend_transport"))
+                or self._default_transport_for_backend(str(snapshot_seed["backend"]))
+            ),
         )
         return self.run_task_snapshot(snapshot)
 
@@ -263,6 +286,7 @@ class SerialTaskRunner:
                 final_state = self._drop_queued_for_thread(active.snapshot.thread_id, clear_state=True) or final_state
             if active.on_finished is not None:
                 active.on_finished(final_state, active.result)
+            self._notify_monitor_run_finished(final_state, active.result)
             finalized.append((final_state, active.result))
         self.dispatch_ready()
         return finalized
@@ -374,6 +398,11 @@ class SerialTaskRunner:
                     existing.append(int(suffix))
         return f"thread_{max(existing, default=0) + 1:03d}"
 
+    def _default_transport_for_backend(self, backend: str) -> str:
+        if backend == "codex":
+            return self.codex_transport_default
+        return BACKEND_TRANSPORT_CLI
+
     def _prepare_thread_state(
         self,
         snapshot: TaskSnapshot,
@@ -390,8 +419,13 @@ class SerialTaskRunner:
             state = load_thread_state(snapshot.thread_id, self.workspace.task_root)
             state.backend = snapshot.backend
             state.profile = snapshot.profile
+            state.permission = snapshot.permission
             state.repo_path = snapshot.repo_path
             state.workdir = snapshot.workdir
+            state.lifecycle = "active"
+            state.last_active_at = snapshot.updated_at
+            state.last_progress_at = snapshot.updated_at
+            state.backend_transport = snapshot.backend_transport
             state.workspace_id = state.workspace_id or build_workspace_id(snapshot.repo_path, snapshot.workdir)
             state.workspace_norm = state.workspace_norm or build_workspace_norm(snapshot.repo_path, snapshot.workdir)
             state.session_id = state.session_id or snapshot.thread_id
@@ -408,7 +442,11 @@ class SerialTaskRunner:
                 state.pending_question_id = None
                 state.pending_question_text = None
                 state.pending_choices = []
+                state.pending_question_set_id = None
+                state.pending_questions = []
+                state.collected_answers = []
                 state.awaiting_since = None
+                state.paused_from_status = None
                 state.queued_task_id = None
                 state.queued_snapshot_file = None
                 if snapshot.run_mode == "new":
@@ -426,6 +464,7 @@ class SerialTaskRunner:
             session_name=session_name or subject_norm or f"local-demo:{snapshot.thread_id}",
             backend=snapshot.backend,
             profile=snapshot.profile,
+            permission=snapshot.permission,
             repo_path=snapshot.repo_path,
             workdir=snapshot.workdir,
             current_task_id=snapshot.task_id,
@@ -434,16 +473,24 @@ class SerialTaskRunner:
             status=THREAD_STATUS_ACCEPTED,
             history_files=[],
             last_summary=None,
+            lifecycle="active",
+            last_active_at=snapshot.updated_at,
             pending_question_id=None,
             pending_question_text=None,
             pending_choices=[],
+            pending_question_set_id=None,
+            pending_questions=[],
+            collected_answers=[],
             awaiting_since=None,
+            paused_from_status=None,
             backend_session_id=None,
             backend_session_resumable=False,
+            backend_transport=snapshot.backend_transport,
             queued_task_id=None,
             queued_snapshot_file=None,
             created_at=snapshot.created_at,
             updated_at=snapshot.updated_at,
+            last_progress_at=snapshot.updated_at,
         )
 
     def _upsert_queued_run(self, queued: _QueuedRun) -> None:
@@ -478,13 +525,19 @@ class SerialTaskRunner:
         with self._lock:
             self._active_runs[queued.snapshot.task_id] = active
         active.thread.start()
+        self._notify_monitor_run_started(state, queued.snapshot)
 
     def _activate_thread_state(self, snapshot: TaskSnapshot, snapshot_rel: str) -> ThreadState:
         state = load_thread_state(snapshot.thread_id, self.workspace.task_root)
         state.backend = snapshot.backend
         state.profile = snapshot.profile
+        state.permission = snapshot.permission
         state.repo_path = snapshot.repo_path
         state.workdir = snapshot.workdir
+        state.lifecycle = "active"
+        state.last_active_at = _timestamp()
+        state.last_progress_at = state.last_active_at
+        state.backend_transport = snapshot.backend_transport
         if state.queued_task_id == snapshot.task_id:
             state.current_task_id = snapshot.task_id
             state.last_task_snapshot_file = state.queued_snapshot_file or snapshot_rel
@@ -494,6 +547,7 @@ class SerialTaskRunner:
             state.current_task_id = snapshot.task_id
             state.last_task_snapshot_file = snapshot_rel
         state.status = THREAD_STATUS_RUNNING
+        state.paused_from_status = None
         state.updated_at = _timestamp()
         save_thread_state(state, self.workspace.task_root)
         return state
@@ -543,8 +597,13 @@ class SerialTaskRunner:
         state.pending_question_id = None
         state.pending_question_text = None
         state.pending_choices = []
+        state.pending_question_set_id = None
+        state.pending_questions = []
+        state.collected_answers = []
         state.awaiting_since = None
+        state.paused_from_status = None
         state.updated_at = _timestamp()
+        state.last_progress_at = state.updated_at
         save_thread_state(state, self.workspace.task_root)
 
     def _promote_queued_snapshot(self, state: ThreadState, *, note_prefix: str) -> None:
@@ -561,8 +620,13 @@ class SerialTaskRunner:
         state.pending_question_id = None
         state.pending_question_text = None
         state.pending_choices = []
+        state.pending_question_set_id = None
+        state.pending_questions = []
+        state.collected_answers = []
         state.awaiting_since = None
+        state.paused_from_status = None
         state.updated_at = _timestamp()
+        state.last_progress_at = state.updated_at
         save_thread_state(state, self.workspace.task_root)
         self._recover_snapshot_for_state(state, state.current_task_id, state.last_task_snapshot_file)
 
@@ -572,6 +636,10 @@ class SerialTaskRunner:
         except FileNotFoundError:
             LOGGER.warning("Unable to recover queued snapshot for %s: missing %s", state.thread_id, snapshot_rel)
             return
+        on_running = None
+        on_finished = None
+        if self._recovery_callback_factory is not None:
+            on_running, on_finished = self._recovery_callback_factory(state, snapshot)
         self._upsert_queued_run(
             _QueuedRun(
                 snapshot=snapshot,
@@ -580,8 +648,8 @@ class SerialTaskRunner:
                 latest_message_id=state.latest_message_id,
                 subject_norm=state.subject_norm,
                 session_name=state.session_name,
-                on_running=None,
-                on_finished=None,
+                on_running=on_running,
+                on_finished=on_finished,
             )
         )
 
@@ -610,6 +678,7 @@ class SerialTaskRunner:
             changed_files=[],
             tests_passed=None,
             error_message=error_text,
+            backend_transport=snapshot.backend_transport,
         )
 
     def _finalize_thread_state(self, state: ThreadState, result: RunResult, result_path: Path) -> ThreadState:
@@ -617,8 +686,13 @@ class SerialTaskRunner:
         state.history_files.append(self.workspace.to_thread_relative(state.thread_id, result_path))
         state.last_summary = _extract_summary(self.workspace.thread_dir(state.thread_id), result)
         state.status = FINAL_THREAD_STATUS_BY_RUN_STATUS[result.status]
+        state.lifecycle = "active"
+        state.last_active_at = result.finished_at or _timestamp()
+        state.last_progress_at = state.last_active_at
+        state.backend_transport = result.backend_transport
         state.backend_session_id = result.backend_session_id or state.backend_session_id
         state.backend_session_resumable = bool(state.backend_session_id) and bool(result.backend_session_resumable)
+        state.paused_from_status = THREAD_STATUS_RUNNING if result.status == RUN_STATUS_PAUSED else None
         if result.status == RUN_STATUS_KILLED and state.backend_session_id:
             # A killed run may still have a usable native session id. We keep it resumable
             # and let the mail layer mark the next continuation as a risk recovery.
@@ -627,22 +701,47 @@ class SerialTaskRunner:
             state.pending_question_id = result.question_id or _generate_question_id(result.task_id)
             state.pending_question_text = result.question_text
             state.pending_choices = list(result.pending_choices)
+            state.pending_question_set_id = result.question_set_id or state.pending_question_id
+            state.pending_questions = list(result.pending_questions)
+            state.collected_answers = []
             state.awaiting_since = result.finished_at or _timestamp()
         else:
             state.pending_question_id = None
             state.pending_question_text = None
             state.pending_choices = []
+            state.pending_question_set_id = None
+            state.pending_questions = []
+            state.collected_answers = []
             state.awaiting_since = None
         state.updated_at = _timestamp()
         save_thread_state(state, self.workspace.task_root)
         return state
+
+    def _notify_monitor_run_started(self, state: ThreadState, snapshot: TaskSnapshot) -> None:
+        if self._monitor_window_manager is None:
+            return
+        try:
+            self._monitor_window_manager.on_run_started(state, snapshot)
+        except Exception:
+            LOGGER.exception("Monitor window startup hook failed for thread %s", state.thread_id)
+
+    def _notify_monitor_run_finished(self, state: ThreadState, result: RunResult) -> None:
+        if self._monitor_window_manager is None:
+            return
+        try:
+            self._monitor_window_manager.on_run_finished(state, result)
+        except Exception:
+            LOGGER.exception("Monitor window cleanup hook failed for thread %s", state.thread_id)
 
 
 def _build_dispatcher(config: AppConfig | None = None) -> Dispatcher:
     effective_config = config or AppConfig()
     return Dispatcher(
         opencode_adapter=OpenCodeAdapter(effective_config),
-        codex_adapter=CodexAdapter(effective_config),
+        codex_adapter=CodexRoutingAdapter(
+            cli_adapter=CodexAdapter(effective_config),
+            sdk_adapter=CodexSdkAdapter(effective_config),
+        ),
     )
 
 
@@ -657,7 +756,12 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config(args.config)
     config_base_dir = Path(args.config).resolve().parent if args.config else None
     task_root = Path(args.task_root) if args.task_root else config.resolve_task_root(config_base_dir)
-    runner = SerialTaskRunner(task_root, _build_dispatcher(config), max_concurrent_runs=config.max_concurrent_runs)
+    runner = SerialTaskRunner(
+        task_root,
+        _build_dispatcher(config),
+        max_concurrent_runs=config.max_concurrent_runs,
+        codex_transport_default=config.codex_transport_default,
+    )
     try:
         result = runner.start(args.snapshot)
     except Exception:

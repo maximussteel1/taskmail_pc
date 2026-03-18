@@ -1,0 +1,272 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/task-manager/schemas/v0.1/common/base.schema.json",
+  "title": "Task Manager Common Definitions v1.0",
+  "description": "共享定义，用于所有 Task Manager 工具契约。",
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "nullableNonEmptyString": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "schemaVersion": {
+      "const": "1.0"
+    },
+    "date": {
+      "type": "string",
+      "format": "date"
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "taskIdOrNull": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "stringArray": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/nonEmptyString"
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "requestEnvelope": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "request_id",
+        "trace_id",
+        "task_id",
+        "caller",
+        "input"
+      ],
+      "properties": {
+        "schema_version": {
+          "$ref": "#/$defs/schemaVersion"
+        },
+        "request_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "trace_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "task_id": {
+          "$ref": "#/$defs/taskIdOrNull"
+        },
+        "caller": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "input": {}
+      },
+      "additionalProperties": false
+    },
+    "meta": {
+      "type": "object",
+      "required": [
+        "duration_ms",
+        "warnings"
+      ],
+      "properties": {
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "errorObject": {
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "details"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "message": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "responseEnvelope": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "request_id",
+        "tool",
+        "status",
+        "data",
+        "error",
+        "meta"
+      ],
+      "properties": {
+        "schema_version": {
+          "$ref": "#/$defs/schemaVersion"
+        },
+        "request_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "tool": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "error"
+          ]
+        },
+        "data": {},
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/errorObject"
+            }
+          ]
+        },
+        "meta": {
+          "$ref": "#/$defs/meta"
+        }
+      },
+      "additionalProperties": false
+    },
+    "locator": {
+      "type": "object",
+      "description": "原文定位信息。首期至少应返回 path；若可用，建议补充 page/section/paragraph。",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "section": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "paragraph": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "chunk_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "anchor": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      },
+      "additionalProperties": false
+    },
+    "resultAttributes": {
+      "type": "object",
+      "default": {},
+      "additionalProperties": true
+    },
+    "taskStatus": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "running",
+        "waiting_input",
+        "succeeded",
+        "failed",
+        "canceled"
+      ]
+    },
+    "taskEvent": {
+      "type": "object",
+      "required": [
+        "type",
+        "at",
+        "summary"
+      ],
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "at": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "summary": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "artifact": {
+      "type": "object",
+      "required": [
+        "name",
+        "uri"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "uri": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "kind": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "mime_type": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "created_at": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -10,6 +10,7 @@ from mail_runner.dispatcher import Dispatcher
 from mail_runner.models import TaskSnapshot
 from mail_runner.runner import SerialTaskRunner, main
 from mail_runner.status import (
+    BACKEND_CODEX,
     BACKEND_OPENCODE,
     RUN_STATUS_KILLED,
     RUN_STATUS_SUCCESS,
@@ -20,6 +21,18 @@ from mail_runner.status import (
 )
 from mail_runner.thread_store import build_workspace_id, create_thread, load_thread_state, load_workspace_state
 from mail_runner.workspace import WorkspaceManager
+
+
+class RecordingMonitorWindowManager:
+    def __init__(self) -> None:
+        self.started: list[tuple[str, str]] = []
+        self.finished: list[tuple[str, str, str]] = []
+
+    def on_run_started(self, state, snapshot) -> None:
+        self.started.append((state.thread_id, snapshot.task_id))
+
+    def on_run_finished(self, state, result) -> None:
+        self.finished.append((state.thread_id, result.task_id, result.status))
 
 
 def _seed_payload() -> dict:
@@ -246,6 +259,20 @@ def test_serial_task_runner_runs_different_workspaces_concurrently(tmp_path) -> 
     assert load_thread_state("thread_002", task_root).status == THREAD_STATUS_DONE
 
 
+def test_serial_task_runner_notifies_monitor_window_manager(tmp_path) -> None:
+    task_root = tmp_path / "tasks"
+    dispatcher = Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0))
+    monitor = RecordingMonitorWindowManager()
+    runner = SerialTaskRunner(task_root, dispatcher, monitor_window_manager=monitor)
+    snapshot = _snapshot("task_001", "thread_001")
+
+    runner.start_background_task(snapshot)
+    runner.wait_until_idle()
+
+    assert monitor.started == [("thread_001", "task_001")]
+    assert monitor.finished == [("thread_001", "task_001", RUN_STATUS_SUCCESS)]
+
+
 def test_serial_task_runner_recovers_accepted_queue_on_restart(tmp_path) -> None:
     task_root = tmp_path / "tasks"
     snapshot = _snapshot("task_queued", "thread_001")
@@ -278,6 +305,57 @@ def test_serial_task_runner_recovers_accepted_queue_on_restart(tmp_path) -> None
     runner.wait_until_idle()
 
     assert load_thread_state("thread_001", task_root).status == THREAD_STATUS_DONE
+
+
+def test_serial_task_runner_recovery_uses_callback_factory(tmp_path) -> None:
+    task_root = tmp_path / "tasks"
+    snapshot = _snapshot("task_queued", "thread_001")
+    _persist_snapshot(task_root, snapshot)
+    create_thread(
+        thread_id="thread_001",
+        root_message_id="<root@example.com>",
+        latest_message_id="<accepted@example.com>",
+        subject_norm="demo task",
+        session_name="Demo task",
+        backend=BACKEND_OPENCODE,
+        profile=None,
+        repo_path=snapshot.repo_path,
+        workdir=snapshot.workdir,
+        current_task_id=snapshot.task_id,
+        last_task_snapshot_file=f"snapshots/{snapshot.task_id}.json",
+        task_root=task_root,
+        status=THREAD_STATUS_ACCEPTED,
+        history_files=[],
+        last_summary=None,
+        created_at="2026-03-12T12:00:00",
+        updated_at="2026-03-12T12:00:00",
+    )
+
+    callback_events: list[tuple[str, str]] = []
+
+    def build_callbacks(state, recovered_snapshot):
+        assert state.thread_id == "thread_001"
+        assert recovered_snapshot.task_id == "task_queued"
+
+        def on_running(running_state) -> None:
+            callback_events.append(("running", running_state.current_task_id))
+
+        def on_finished(final_state, result) -> None:
+            callback_events.append((final_state.status, result.status))
+
+        return on_running, on_finished
+
+    runner = SerialTaskRunner(
+        task_root,
+        Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0)),
+        max_concurrent_runs=2,
+        recovery_callback_factory=build_callbacks,
+    )
+
+    runner.dispatch_ready()
+    runner.wait_until_idle()
+
+    assert callback_events == [("running", "task_queued"), (THREAD_STATUS_DONE, RUN_STATUS_SUCCESS)]
 
 
 def test_serial_task_runner_marks_running_task_failed_on_restart(tmp_path) -> None:
@@ -364,6 +442,7 @@ def test_runner_main_supports_demo_config(tmp_path) -> None:
                 "task_root: tasks",
                 "opencode_command: demo",
                 "codex_command: demo",
+                "codex_transport_default: cli",
                 "mock_sleep_seconds: 0.0",
             ]
         )
@@ -402,3 +481,30 @@ def test_runner_main_can_auto_create_missing_workdir(tmp_path) -> None:
 
     assert exit_code == 0
     assert (repo_dir / "src").is_dir()
+
+
+def test_serial_task_runner_defaults_codex_seed_transport_to_sdk(tmp_path) -> None:
+    seed_path = tmp_path / "seed.json"
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    seed_path.write_text(
+        json.dumps(
+            {
+                "backend": "codex",
+                "repo_path": str(repo_dir),
+                "task_text": "Inspect the repo.",
+                "workdir": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    task_root = tmp_path / "tasks"
+    dispatcher = Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0))
+    runner = SerialTaskRunner(task_root, dispatcher, codex_transport_default="sdk")
+
+    result = runner.start(seed_path)
+    state = load_thread_state(result.thread_id, task_root)
+
+    assert result.backend == BACKEND_CODEX
+    assert result.backend_transport == "sdk"
+    assert state.backend_transport == "sdk"

@@ -165,7 +165,7 @@ def test_process_once_returns_status_for_rerun_while_waiting(tmp_path) -> None:
                 date="2026-03-12T12:05:00",
                 in_reply_to=state["latest_message_id"],
                 references=[state["root_message_id"], state["latest_message_id"]],
-                body_text="rerun",
+                body_text="/rerun",
                 raw_headers={"Subject": "Re: [QUESTION] Demo task"},
             )
         ]

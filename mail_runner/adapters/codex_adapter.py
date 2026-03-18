@@ -32,6 +32,11 @@ class CodexAdapter(BaseCliAdapter, WorkerAdapter):
     def _profile_model_map(self) -> dict[str, str]:
         return self._config.codex_profile_models
 
+    def _permission_flags(self, permission: str | None) -> list[str]:
+        if permission == "highest":
+            return ["--dangerously-bypass-approvals-and-sandbox"]
+        return ["--full-auto"]
+
     def _build_backend_command(
         self,
         *,
@@ -58,7 +63,7 @@ class CodexAdapter(BaseCliAdapter, WorkerAdapter):
                     "--skip-git-repo-check",
                 ]
             )
-            command.append("--full-auto")
+            command.extend(self._permission_flags(task.permission))
             if model_name:
                 command.extend(["-m", model_name])
             command.extend([task.backend_session_id, "-"])
@@ -67,7 +72,7 @@ class CodexAdapter(BaseCliAdapter, WorkerAdapter):
         command = [*resolved.prefix]
         if self._config.enable_web_search:
             command.append("--search")
-        command.extend(["exec", "--skip-git-repo-check", "--full-auto", "--cd", str(cwd)])
+        command.extend(["exec", "--skip-git-repo-check", *self._permission_flags(task.permission), "--cd", str(cwd)])
         if model_name:
             command.extend(["-m", model_name])
         command.append("-")

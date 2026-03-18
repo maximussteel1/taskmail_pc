@@ -1,0 +1,35 @@
+{
+  "name": "task-manager-schemas",
+  "version": "0.1.0",
+  "schema_version": "1.0",
+  "generated_at": "2026-03-14T09:32:03Z",
+  "description": "Task Manager 首期四个核心工具的 JSON Schema 包。",
+  "common": [
+    {
+      "name": "base",
+      "path": "common/base.schema.json"
+    }
+  ],
+  "tools": [
+    {
+      "tool": "memory.search",
+      "request_schema": "tools/memory.search.request.schema.json",
+      "response_schema": "tools/memory.search.response.schema.json"
+    },
+    {
+      "tool": "memory.read",
+      "request_schema": "tools/memory.read.request.schema.json",
+      "response_schema": "tools/memory.read.response.schema.json"
+    },
+    {
+      "tool": "task.get",
+      "request_schema": "tools/task.get.request.schema.json",
+      "response_schema": "tools/task.get.response.schema.json"
+    },
+    {
+      "tool": "task.patch",
+      "request_schema": "tools/task.patch.request.schema.json",
+      "response_schema": "tools/task.patch.response.schema.json"
+    }
+  ]
+}

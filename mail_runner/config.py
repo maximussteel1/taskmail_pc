@@ -9,6 +9,8 @@ from typing import Any
 
 import yaml
 
+from .status import BACKEND_CODEX, BACKEND_TRANSPORT_CLI, BACKEND_TRANSPORT_SDK
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 ENV_PREFIX = "MAIL_RUNNER_"
@@ -19,6 +21,9 @@ _INT_FIELDS = {
     "poll_seconds",
     "default_timeout_minutes",
     "max_concurrent_runs",
+    "monitor_window_refresh_seconds",
+    "external_delivery_threshold_mb",
+    "cos_presign_expire_seconds",
 }
 
 _FLOAT_FIELDS = {
@@ -28,12 +33,16 @@ _FLOAT_FIELDS = {
 _BOOL_FIELDS = {
     "auto_create_workdir",
     "enable_web_search",
-    "prune_old_status_mails",
+    "spawn_monitor_windows",
 }
 
 _MAP_FIELDS = {
     "opencode_profile_models",
     "codex_profile_models",
+}
+
+_LIST_FIELDS = {
+    "project_sync_roots",
 }
 
 
@@ -53,24 +62,45 @@ class AppConfig:
     max_concurrent_runs: int = 2
     auto_create_workdir: bool = False
     enable_web_search: bool = False
-    prune_old_status_mails: bool = False
+    spawn_monitor_windows: bool = False
+    monitor_window_refresh_seconds: int = 5
     opencode_command: str = ""
     codex_command: str = ""
+    codex_transport_default: str = BACKEND_TRANSPORT_SDK
+    codex_sdk_sidecar_command: str = ""
+    codex_sdk_sidecar_workdir: str = ""
     from_name: str = "Mail Runner"
     from_addr: str = ""
     mock_sleep_seconds: float = 1.0
     opencode_profile_models: dict[str, str] = field(default_factory=dict)
     codex_profile_models: dict[str, str] = field(default_factory=dict)
+    project_sync_roots: list[str] = field(default_factory=lambda: ["D:\\projects", "E:\\projects"])
+    cos_region: str = ""
+    cos_bucket: str = ""
+    cos_secret_id: str = ""
+    cos_secret_key: str = ""
+    cos_object_prefix: str = "mail-runner"
+    external_delivery_threshold_mb: int = 20
+    cos_presign_expire_seconds: int = 7 * 24 * 60 * 60
 
     def resolve_task_root(self, base_dir: str | Path | None = None) -> Path:
         root = Path(base_dir) if base_dir is not None else PROJECT_ROOT
         task_root = Path(self.task_root)
         return task_root if task_root.is_absolute() else (root / task_root)
 
+    def default_transport_for_backend(self, backend: str) -> str:
+        if backend == BACKEND_CODEX:
+            return self.codex_transport_default
+        return BACKEND_TRANSPORT_CLI
+
 
 def _coerce_value(field_name: str, value: Any) -> Any:
     if value is None:
-        return {} if field_name in _MAP_FIELDS else None
+        if field_name in _MAP_FIELDS:
+            return {}
+        if field_name in _LIST_FIELDS:
+            return []
+        return None
     if field_name in _MAP_FIELDS:
         if not isinstance(value, dict):
             raise ValueError(f"{field_name} must be a mapping of profile names to model ids")
@@ -78,6 +108,12 @@ def _coerce_value(field_name: str, value: Any) -> Any:
         for key, item in value.items():
             coerced[str(key).strip()] = str(item).strip()
         return coerced
+    if field_name in _LIST_FIELDS:
+        if isinstance(value, (list, tuple)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(";") if item.strip()]
+        raise ValueError(f"{field_name} must be a list of paths")
     if field_name in _BOOL_FIELDS:
         if isinstance(value, bool):
             return value
@@ -91,6 +127,11 @@ def _coerce_value(field_name: str, value: Any) -> Any:
         return int(value)
     if field_name in _FLOAT_FIELDS:
         return float(value)
+    if field_name == "codex_transport_default":
+        normalized = str(value).strip().lower()
+        if normalized not in {BACKEND_TRANSPORT_CLI, BACKEND_TRANSPORT_SDK}:
+            raise ValueError("codex_transport_default must be either 'cli' or 'sdk'")
+        return normalized
     return str(value)
 
 

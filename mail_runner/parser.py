@@ -7,14 +7,14 @@ from typing import Any
 
 from .status import BACKEND_CODEX, BACKEND_OPENCODE
 
-_SUBJECT_PREFIX_RE = re.compile(r"^\s*\[(OC|CX|KILL)\]\s*(.*)$", re.IGNORECASE)
+_SUBJECT_PREFIX_RE = re.compile(r"^\s*\[(OC|CX|KILL|SYNC)\]\s*(.*)$", re.IGNORECASE)
 _REPLY_PREFIX_RE = re.compile(r"^\s*((re|fw|fwd)\s*:\s*|(?:回复|答复)\s*[：:]\s*)+", re.IGNORECASE)
 _STATUS_PREFIX_RE = re.compile(
-    r"^\s*\[(OC|CX|KILL|ACCEPTED|RUNNING|DONE|FAILED|STATUS|KILLED|QUESTION|S:[^\]]+)\]\s*",
+    r"^\s*\[(OC|CX|KILL|SYNC|ACCEPTED|RUNNING|DONE|FAILED|STATUS|KILLED|QUESTION|S:[^\]]+)\]\s*",
     re.IGNORECASE,
 )
 _SESSION_TAG_RE = re.compile(r"\[S:([^\]]+)\]", re.IGNORECASE)
-_HEADER_RE = re.compile(r"^\s*(Repo|Workdir|Timeout|Mode|Profile|Task|Acceptance)\s*:\s*(.*)$", re.IGNORECASE)
+_HEADER_RE = re.compile(r"^\s*(Repo|Workdir|Timeout|Mode|Profile|Permission|Task|Acceptance)\s*:\s*(.*)$", re.IGNORECASE)
 _LIST_PREFIX_RE = re.compile(r"^\s*(?:[-*]|\d+[.)])\s*")
 
 
@@ -60,7 +60,12 @@ def parse_subject(subject: str) -> dict[str, Any]:
         "OC": BACKEND_OPENCODE,
         "CX": BACKEND_CODEX,
     }.get(prefix)
-    action = "KILL" if prefix == "KILL" else "NEW_TASK"
+    if prefix == "KILL":
+        action = "KILL"
+    elif prefix == "SYNC":
+        action = "SYNC_PROJECT_FOLDERS"
+    else:
+        action = "NEW_TASK"
     return {
         "is_new_task": backend is not None,
         "backend": backend,
@@ -83,7 +88,7 @@ def parse_initial_task(body_text: str, default_timeout_minutes: int = 60) -> dic
         if match:
             label = match.group(1).lower()
             remainder = match.group(2).strip()
-            if label in {"repo", "workdir", "timeout", "mode", "profile"}:
+            if label in {"repo", "workdir", "timeout", "mode", "profile", "permission"}:
                 scalar_values[label] = remainder
                 current_section = None
             elif label == "task":
@@ -119,6 +124,7 @@ def parse_initial_task(body_text: str, default_timeout_minutes: int = 60) -> dic
     mode = scalar_values.get("mode", "").strip().lower() or "modify"
     workdir = scalar_values.get("workdir", "").strip() or None
     profile = scalar_values.get("profile", "").strip().lower() or None
+    permission = scalar_values.get("permission", "").strip().lower() or None
 
     return {
         "repo_path": repo_path,
@@ -126,6 +132,7 @@ def parse_initial_task(body_text: str, default_timeout_minutes: int = 60) -> dic
         "timeout_minutes": timeout_minutes,
         "mode": mode,
         "profile": profile,
+        "permission": permission,
         "task_text": task_text,
         "acceptance": acceptance,
     }

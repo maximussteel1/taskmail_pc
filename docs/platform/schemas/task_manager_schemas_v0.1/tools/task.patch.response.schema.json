@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/task-manager/schemas/v0.1/tools/task.patch.response.schema.json",
+  "title": "task.patch Response",
+  "description": "响应包络：返回任务状态更新结果或错误。",
+  "$defs": {
+    "successData": {
+      "type": "object",
+      "required": [
+        "task_id",
+        "updated",
+        "updated_at"
+      ],
+      "properties": {
+        "task_id": {
+          "$ref": "../common/base.schema.json#/$defs/nonEmptyString"
+        },
+        "updated": {
+          "type": "boolean"
+        },
+        "updated_at": {
+          "$ref": "../common/base.schema.json#/$defs/dateTime"
+        }
+      },
+      "additionalProperties": false
+    },
+    "successEnvelope": {
+      "allOf": [
+        {
+          "$ref": "../common/base.schema.json#/$defs/responseEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "const": "task.patch"
+            },
+            "status": {
+              "const": "ok"
+            },
+            "data": {
+              "$ref": "#/$defs/successData"
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    },
+    "errorEnvelope": {
+      "allOf": [
+        {
+          "$ref": "../common/base.schema.json#/$defs/responseEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "const": "task.patch"
+            },
+            "status": {
+              "const": "error"
+            },
+            "data": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "../common/base.schema.json#/$defs/errorObject"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/successEnvelope"
+    },
+    {
+      "$ref": "#/$defs/errorEnvelope"
+    }
+  ],
+  "examples": [
+    {
+      "schema_version": "1.0",
+      "request_id": "req-201",
+      "tool": "task.patch",
+      "status": "ok",
+      "data": {
+        "task_id": "task-200",
+        "updated": true,
+        "updated_at": "2026-03-14T08:01:00Z"
+      },
+      "error": null,
+      "meta": {
+        "duration_ms": 14,
+        "warnings": []
+      }
+    }
+  ]
+}

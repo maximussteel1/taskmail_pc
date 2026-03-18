@@ -2,12 +2,15 @@
 
 ## Current Snapshot
 
-- Updated At: 2026-03-12
-- Current Phase: Phase 6
-- Status: Completed
-- Bootstrap Entry: `.\.venv\Scripts\python.exe -m mail_runner.app --once --config <mail_config.local.yaml>`
+- Updated At: 2026-03-18
+- Current Phase: Phase 7 (current delivery slices landed in code)
+- Status: Active
+- Bootstrap Entry: `.\.venv\Scripts\python.exe -m mail_runner.app --once --config <mail_config.bot.local.yaml>`
+- Hosted Loop Entry: `.\.venv\Scripts\python.exe -m mail_runner.host --config <mail_config.bot.local.yaml> --runtime-dir <_tmp_live_mail_runner>`
+- Observability Entry: `.\.venv\Scripts\python.exe -m mail_runner.observe --config <_tmp_live_mail_runner\mail_config.loop_30s.yaml> status`
 - Test Command: `.\.venv\Scripts\python.exe -m pytest`
-- Notes: Phase 6 explicit question protocol, `awaiting_user_input` state handling, answer-driven resume flow, and backend-specific `profile -> model` mappings are now implemented. Local tests are green, and repo hygiene rules for local secrets, runtime state, and `_tmp_*` validation directories remain recorded in `.gitignore`.
+- Latest Validation: `.\.venv\Scripts\python.exe -m pytest` -> `231 passed`
+- Notes: The codebase now combines thread-based run artifacts with workspace/session scheduler metadata, supports native backend session resume for reply continuation and question-answer recovery, falls back to fresh recovery runs for failed threads without resumable native context, defaults new Codex threads to the SDK transport while keeping legacy CLI records compatible, persists `backend_transport` plus a lightweight `lifecycle=active|ended`, `last_active_at`, and `last_progress_at` on thread/session state, supports explicit `/end` to remove a non-running thread/session from the active working set without rewriting its last run result, derives `normal|stale|suspected_stuck|orphaned` health signals in `mail_runner.observe` using a first-round `300s` threshold, caps the active working set at `4` by auto-ending the least recently active non-running session when necessary, now keeps live mailbox status mails under split retention semantics where only older progress mails (`[ACCEPTED]`, `[RUNNING]`, `[STATUS]`) are replaceable while action-required (`[QUESTION]`, `[PAUSED]`) and receipt (`[DONE]`, `[FAILED]`, `[KILLED]`) mails are retained, keeps Markdown-first status rendering with artifact projection, persists explicit `Permission:` control across snapshot/thread/session with backend-specific highest-permission projection, exposes a first-mail `[SYNC]` project-folder discovery action for `D:\projects` / `E:\projects` or configured roots, recommends a dual-mailbox deployment (`user mailbox` -> `bot mailbox`), consumes inbox mail by IMAP UID increment plus local `UID/Message-ID` dedupe instead of relying on `UNSEEN` alone, hosts the long-running loop via `mail_runner.host` with a runtime single-instance lock plus `host_state.json`, now makes `manage_mail_runner.ps1` detect and stop same-config legacy `mail_runner.app --loop` leftovers to avoid duplicate mailbox consumption, preserves automatic status-mail callbacks when restart recovery requeues persisted `accepted` or queued work, externalizes oversized outgoing artifacts to COS presigned links when configured, rewrites COS-delivered APK/IPA object names to `.bin` to avoid default-domain distribution blocking, exposes a minimal read-only `mail_runner.observe` CLI for host/thread/queue inspection, persists local `stream.events.jsonl` logs for active `codex + sdk` turns, can now auto-open one focused monitor window per running thread on Windows when `spawn_monitor_windows` is enabled, with that window staying open while the session remains active/resumable, and now parses structured run-result capsules so `changed_files`, `tests_passed`, `error_type`, and `error_message` can flow into `RunResult` and status mails without leaking the machine-readable block into user-visible replies.
 
 ## Completed Phases
 
@@ -18,45 +21,77 @@
 - Phase 4 completed on 2026-03-12.
 - Phase 5 completed on 2026-03-12.
 - Phase 6 completed on 2026-03-12.
+- Phase 7 first-round delivery aligned on 2026-03-14.
+
+## Confirmed Current Facts
+
+- Runtime artifacts still live under `tasks/thread_xxx/`, and `thread_state.json` remains the primary per-thread state file.
+- Scheduler metadata now also lives under `tasks/_scheduler/workspaces/<workspace_id>/`, including `workspace_state.json` and `sessions/<session_id>.json`.
+- New non-reply task mail still creates a fresh `thread/session` even when `repo_path`, `workdir`, and subject title match an existing session.
+- A first-mail `[SYNC]` request now returns the configured project-root folder inventory without creating a task, runnable thread, or session.
+- Reply mail can continue an existing native backend context when `backend_session_id` is available; this is used by plain replies, `/resume`, and answers to `[QUESTION]`.
+- New Codex threads now default to the SDK transport for continuous sessions, while legacy records without `backend_transport` still resolve to `cli`.
+- `backend_transport` is now persisted on snapshot/thread/session/run records, and the SDK bridge runs through `scripts/codex_sdk_sidecar/dist/index.js`.
+- Active `codex + sdk` runs now persist `runs/<task_id>/stream.events.jsonl`, and `mail_runner.observe show-thread-live <thread_id>` merges that live stream with archived transcript turns for PC-side monitoring.
+- Thread/session state now also persists `lifecycle=active|ended` plus `last_active_at` and `last_progress_at`, with legacy records falling back to `updated_at`.
+- The active working set is capped at `4`; starting a new task or reactivating an ended thread auto-ends the least recently active non-running session when the cap would otherwise be exceeded.
+- `/end` now marks a non-running thread/session as `ended` without rewriting its last run status, and `/resume` or waiting-state continuation can reactivate the same thread back to `active`.
+- `mail_runner.observe` now derives `normal`, `stale`, `suspected_stuck`, and `orphaned` using a fixed `300s` threshold; `codex + sdk` live stream timestamps count as progress when newer than persisted state.
+- live mailbox retention now only auto-prunes older progress mails; `[QUESTION]`, `[PAUSED]`, `[DONE]`, `[FAILED]`, and `[KILLED]` remain visible as durable action-required or receipt mail.
+- `/pause` now moves a non-running thread/session into `paused`; plain replies no longer resume it implicitly, and `/resume` is required to unpause.
+- If a paused thread still has a pending question set, `/resume` without an answer restores `[QUESTION]`, while `/resume` with answers continues through the normal answer flow.
+- A reply to a `failed` thread without resumable native context now falls back to a fresh recovery run built from the latest saved snapshot, instead of returning a status-only rejection.
+- Background scheduling is queue-aware: the same workspace stays serial, different workspaces can run concurrently, and follow-up work for a running session is queued on that session.
+- Runner restart recovery is implemented for persisted `accepted` and queued work, and recovered runs keep automatic `[RUNNING]` / terminal status mails on the existing reply chain; a leftover persisted `running` task is marked failed unless a queued follow-up can be promoted.
+- When `spawn_monitor_windows` is enabled on Windows, the background loop auto-opens one focused monitor window per running thread, shows transcript plus live streamed assistant output when available, and keeps that window open while the session remains active/resumable.
+- `Permission:` is now a persisted task/session property: a new task without it uses backend defaults, replies without it inherit current state, and `highest` projects to `Codex` dangerous bypass mode or an `OpenCode` run-scoped permission overlay.
+- Real mailbox smoke on 2026-03-16 verified the `Permission:` control path end to end for both backends by email, including status-mail display, thread-state persistence, inherit-on-omit behavior, and explicit reset to `default`.
+- Real mailbox smoke on 2026-03-16 also verified the first-mail `[SYNC]` path by email: one request produced one `[SYNC] Project Folder List` reply with configured root listings, no task state capsule, and no runnable thread/session creation.
+- Real mailbox smoke on 2026-03-18 fixed `[QUESTION] -> ANSWER -> DONE` as a repeatable acceptance path via `scripts/live_smoke_mail_question_answer.py`, with successful evidence in `E:\projects\mail_based_task_manager\_tmp_live_mail_question_smoke\opencode-question-20260318_133540-07ef74`.
+- Real mailbox smoke on 2026-03-18 also fixed real-backend `KILL` in the normal mailbox loop via `scripts/live_smoke_mail_kill.py`, with successful evidence in `E:\projects\mail_based_task_manager\_tmp_live_mail_kill_smoke\codex-kill-20260318_133818-b4d2a5`.
+- Real CLI / SDK runs on 2026-03-18 now parse structured run-result capsules into `RunResult.changed_files`, `tests_passed`, `error_type`, and `error_message`, with regression coverage in `tests/test_run_result_capsule.py`, `tests/test_cli_adapters.py`, `tests/test_codex_sdk_adapter.py`, and `tests/test_reporter.py`.
+- Real mailbox smoke on 2026-03-18 also verified a live OpenCode path can project explicit `changed_files` and `tests_passed` into persisted `result.json` while stripping the machine-readable capsule from the user-visible `[DONE]` mail, with successful evidence in `E:\projects\mail_based_task_manager\_tmp_live_mail_structured_result_smoke\p7b-structured-20260318_141408-44bfca`.
+- Mail ingress now scans `INBOX` by IMAP UID and persists a local processed-mail index under `task_root/_mailbox/processed_messages.json`; reading mail in the user mailbox no longer affects bot mailbox consumption.
+- When COS delivery is configured, oversized outgoing artifacts stay in the `Artifacts` view but are no longer sent as MIME attachments; the status mail adds a separate `External Deliveries` section with presigned COS links instead.
 
 ## Open Issues
 
-- Real mailbox + real backend happy path is now validated for `[OC]`, `[CX]`, `STATUS_QUERY`, and `RERUN`, but `KILL` is still not part of the fixed real-backend mailbox acceptance path.
-- `awaiting_user_input` and backend-specific profile mapping are now implemented, but `paused` still remains a reserved state without a user-facing protocol.
-- Same-account SMTP self-replies may not reliably re-enter `INBOX` on all providers; deterministic reply validation used real IMAP inbox injection to avoid provider-specific routing behavior.
+- Non-reply mail still does not auto-route into an existing session by `workspace + title`; that remains a possible future refactor target.
+- `/sessions` lists sessions in the current workspace, but it does not yet provide direct session switching or targeted routing.
+- Single-mailbox self-replies remain provider-dependent and are no longer the recommended topology; current deployment guidance assumes separate user and bot mailboxes.
 - Success/error summary extraction is heuristic and may need adjustment if future CLI output formats change substantially.
-- Real mailbox + real backend `[QUESTION] -> ANSWER -> DONE` has not yet been added to the fixed acceptance path.
 
-## Locked Notes
+## Phase 7 Summary
 
-- The new requirements raised during Phase 1 are recorded for future phases and do not change the completed Phase 0 deliverable.
-- Phase 1 intentionally stays focused on local state, workspace persistence, `thread_store` local skeleton, `state_capsule` base implementation, `MockAdapter`, `dispatcher`, and a local single-task happy path.
-- Future Phase 2 / Phase 3 work may add reply-thread parsing, quote extraction, state-capsule recovery from replies, natural-language action parsing, and question/answer wait states such as `awaiting_user_input`.
-- Phase 1 explicitly does not implement reply understanding, automatic Q&A turns, task suspend/resume, backend auto-upgrade, complex thread recovery, multi-task parallelism, or conversational mail collaboration.
-- Status values are being centralized to reduce future refactoring, and `runner` / `dispatcher` are intentionally kept thin so later adapters can extend behavior without rewriting the Phase 1 core flow.
-- `thread_store` currently remains a local persistence skeleton; message-id mapping and richer reply recovery are deferred to later phases.
-- Phase 3 keeps reply handling minimal: header matching first, state capsule second, subject fallback last; no queueing or multi-worker scheduling is introduced.
-- `profile` is now persisted in `TaskSnapshot`, `ThreadState`, and `ParsedMailAction`, and real adapters map it through backend-specific config tables. Raw model ids still do not belong in mail protocol fields.
-- Phase 4 keeps real adapter integration thin: command discovery, prompt/log/result capture, and runtime kill are in scope; profile-driven model routing and structured CLI output parsing remain deferred.
-- Phase 5 intentionally does not implement `[QUESTION]`, `awaiting_user_input`, or paused/resume behavior; it only stabilizes summaries, errors, docs, and the current real-mailbox happy path.
-- Phase 6 implements explicit `question capsule` handling and `awaiting_user_input`, but recovery is still application-level snapshot regeneration, not native CLI session continuation.
-- Local-only files and runtime artifacts are now explicitly isolated by `.gitignore`: `config.yaml`, `mail_config.local.yaml`, `tasks/*` except `.gitkeep`, and `_tmp_*/`.
-
-## Next Phase
-
-- Phase 7: native CLI session continuation experiments, `paused` protocol, and fixed real-mailbox acceptance for `[QUESTION]` and real-backend `KILL`.
-
-## Planned Refactor Track
-
-- Updated At: 2026-03-12
-- Baseline is now frozen in git before the next architectural change.
-- The next implementation track will pivot from a `thread`-centric model to a `workspace + session` scheduler model.
-- The planned rollout is split into 3 gated phases:
-  - Phase 1: workspace/session models and routing
-  - Phase 2: queue-aware scheduler with workspace-level exclusivity
-  - Phase 3: configurable multi-running sessions across different workspaces
-- Each phase requires new tests plus a full regression pass before continuing.
-- Detailed planning is recorded in `docs/session_scheduler_plan.md`.
+- Deliverables:
+  - Native backend session id persistence plus resume paths for `codex exec resume` and `opencode run --session`
+  - Failed-thread recovery fallback that replays replies as fresh runs when native resume is unavailable
+  - Workspace/session indexes synced from `ThreadState`
+  - Queue-aware background scheduler with workspace-level exclusivity and configurable cross-workspace concurrency
+  - Follow-up queuing for a running session, plus restart recovery for queued and accepted work
+  - Reply command surface including `/pause`, `/resume`, `/end`, `/new`, `/sessions`, `/status`, `/rerun`, and `/kill`
+  - Persisted `Permission:` control with reply-time inheritance and backend-specific highest-permission projection
+  - First-mail `[SYNC]` project-folder sync for configured project roots, with one-level directory listing and unavailable-root reporting
+- Validation:
+  - `tests/test_app_phase2.py` covers first-mail `[SYNC]`, queued same-workspace sessions, and concurrent different-workspace sessions
+  - `tests/test_app_phase3.py` covers reply resume, failed-thread recovery fallback, `/new`, `/kill`, `/end`, and risk-resume after kill
+  - `tests/test_app_phase3.py` also covers auto-ending the oldest active session when a fifth active session is created or an ended thread is reactivated
+  - `tests/test_app_phase6.py` covers `QUESTION -> ANSWER -> DONE` and waiting-state rerun rejection
+  - `tests/test_app_phase7_pause.py` covers paused entry, paused plain-reply rejection, paused `/resume`, paused question restoration, and ended paused-thread reactivation
+  - `tests/test_observe.py` covers active/ended lifecycle visibility plus health output in `status`, `list-running`, and `show-thread`
+  - `tests/test_health_semantics.py` covers `normal`, `stale`, `suspected_stuck`, `orphaned`, and SDK stream-based progress updates
+  - `tests/test_thread_store.py` covers persisted `lifecycle` / `last_active_at` / `last_progress_at` defaults and workspace thread enumeration
+  - `tests/test_parser.py`, `tests/test_config.py`, `tests/test_intent_parser.py`, `tests/test_task_compiler.py`, and `tests/test_cli_adapters.py` cover `[SYNC]` subject parsing, project-root config loading, `Permission:` parsing, inheritance, and backend projection
+  - `tests/test_task_compiler.py` covers native resume compilation plus failed-thread fallback compilation paths
+  - `tests/test_runner.py` covers scheduler restart recovery, recovered callback replay, queued follow-ups, kill behavior, and `auto_create_workdir`
+  - `tests/test_app_phase3.py` covers recovered accepted-task status-mail replay after restart
+  - `tests/test_cli_adapters.py` covers native resume command generation and backend session id capture
+  - `scripts/live_smoke_mail_permission.py` verified real-mailbox `Permission:` propagation for `Codex` and `OpenCode` in `_tmp_live_mail_permission_smoke\codex-permission-20260316_005939-b22854` and `_tmp_live_mail_permission_smoke\opencode-permission-20260316_011028-77bf33`
+  - `scripts/live_smoke_mail_sync.py` verified the dual-mailbox real-mailbox first-mail `[SYNC]` roundtrip plus real inbox fetch path in `_tmp_live_mail_sync_smoke\sync-20260316_230059-cdf157`
+  - `scripts/live_smoke_mail_question_answer.py` verified fixed real-mailbox `[QUESTION] -> ANSWER -> DONE` against a real backend in `_tmp_live_mail_question_smoke\opencode-question-20260318_133540-07ef74`
+  - `scripts/live_smoke_mail_kill.py` verified fixed real-mailbox real-backend `KILL` in the normal mailbox loop in `_tmp_live_mail_kill_smoke\codex-kill-20260318_133818-b4d2a5`
+  - `_tmp_live_mail_structured_result_smoke\p7b-structured-20260318_141408-44bfca` verified a live mailbox OpenCode run can emit a structured run-result capsule that lands as `changed_files=["docs/current/mail_protocol.md","README.md"]` and `tests_passed=false` while the outbound `[DONE]` mail still shows only the human-readable reply
+  - `tests/test_run_result_capsule.py`, `tests/test_cli_adapters.py`, `tests/test_codex_sdk_adapter.py`, and `tests/test_reporter.py` verify structured run-result capsule parsing, field projection, and user-visible stripping
 
 ## History
 
@@ -73,7 +108,6 @@
 - Result: Completed
 - Deliverables: workspace persistence, thread state store skeleton, state capsule base implementation, mock adapter, dispatcher, local runner, and Phase 1 tests.
 - Validation: `.\.venv\Scripts\python.exe -m pytest` -> 21 passed; `.\.venv\Scripts\python.exe -m mail_runner.runner --snapshot <temp-seed> --task-root <temp-dir>` -> demo run completed successfully.
-- Manual Verification: verified generated `thread_state.json`, snapshot JSON, `result.json`, and `summary.md` in a temporary task root; final thread status was `done`.
 
 ### Phase 2
 
@@ -87,31 +121,25 @@
 
 - Date: 2026-03-12
 - Result: Completed
-- Deliverables: reply quote extraction, context assembly, rule-based intent parsing, task snapshot compilation, reply-thread matching, background single-worker mock kill, and Phase 3 local integration tests.
+- Deliverables: reply quote extraction, context assembly, rule-based intent parsing, task snapshot compilation, reply-thread matching, background mock kill, and reply-driven session continuation primitives.
 - Validation: `.\.venv\Scripts\python.exe -m pytest` -> 45 passed.
 - Real Mailbox Validation: verified `NEW_TASK -> STATUS_QUERY -> KILL` against the real mailbox, with final `thread_state.status == "killed"` and `result.json.status == "killed"` in `E:\projects\mail_based_task_manager\_tmp_phase3_real_kill_ascii\tasks\thread_001`.
-- Notes: `profile` is now persisted in `thread_state.json` and snapshot JSON as a reserved backend capability tier, but the current dispatcher and adapters still ignore it.
 
 ### Phase 4
 
 - Date: 2026-03-12
 - Result: Completed
-- Deliverables: real `OpenCodeAdapter` / `CodexAdapter` thin wrappers, shared subprocess helper, prompt/log/result capture, runtime kill, default dispatcher switch to real adapters, and local demo-mode validation.
+- Deliverables: real `OpenCodeAdapter` / `CodexAdapter` thin wrappers, shared subprocess helper, prompt/log/result capture, runtime kill, and demo-mode validation.
 - Validation: `.\.venv\Scripts\python.exe -m pytest` -> 50 passed.
-- Manual Verification: `.\.venv\Scripts\python.exe -m mail_runner.runner --snapshot <seed> --config <demo-config>` succeeded for both demo `opencode` and demo `codex`, producing `prompt.txt`, `stdout.log`, `stderr.log`, `summary.md`, and `result.json` under `_tmp_phase4_demo_op` and `_tmp_phase4_demo_cx`.
-- Real CLI Verification: `.\.venv\Scripts\python.exe -m mail_runner.runner --snapshot <seed> --config <config>` succeeded for real `opencode` in `E:\projects\mail_based_task_manager\_tmp_phase4_real_op` and real `codex` in `E:\projects\mail_based_task_manager\_tmp_phase4_real_cx`, both with `result.json.status == "success"` and no file content changes in the temporary repos.
-- Environment Check: verified Windows command discovery resolves `opencode.cmd` and `codex.cmd` from `C:\Users\Administrator\AppData\Roaming\npm`.
+- Real CLI Verification: verified real `opencode` in `E:\projects\mail_based_task_manager\_tmp_phase4_real_op` and real `codex` in `E:\projects\mail_based_task_manager\_tmp_phase4_real_cx`, both with `result.json.status == "success"`.
 
 ### Phase 5
 
 - Date: 2026-03-12
 - Result: Completed
-- Deliverables: success/error summary extraction for real adapters, status mail content improvements, troubleshooting and usage docs, and real mailbox + real backend end-to-end validation.
+- Deliverables: success/error summary extraction for real adapters, improved status mail content, troubleshooting docs, and real mailbox + real backend end-to-end validation.
 - Validation: `.\.venv\Scripts\python.exe -m pytest` -> 51 passed.
-- Real Runner Validation: verified real `opencode` in `E:\projects\mail_based_task_manager\_tmp_phase5_real_op` and real `codex` in `E:\projects\mail_based_task_manager\_tmp_phase5_real_cx`, with `thread_state.last_summary` sourced from real backend output.
-- Real Mailbox Validation: verified `_tmp_phase5_mail\tasks\thread_001` for `[OC]` new task, `STATUS_QUERY`, and `RERUN`, and `_tmp_phase5_mail\tasks\thread_002` for `[CX]` new task; all completed with `result.json.status == "success"` and outgoing state mails recorded under each thread `mail/` directory.
-- Live Mailbox Re-Validation: verified `_tmp_phase5_mail_live_ok\tasks\thread_001` for a fresh live `[OC]` new task plus `STATUS_QUERY`, and `_tmp_phase5_mail_live_cx\tasks\thread_001` for a fresh live `[CX]` new task; both completed with `result.json.status == "success"` and real backend summaries written into `thread_state.last_summary`.
-- Repo Hygiene: added `.gitignore` to keep local secrets, runtime task state, virtualenv files, pytest cache, and `_tmp_*` validation outputs out of version control by default.
+- Real Mailbox Validation: verified `_tmp_phase5_mail\tasks\thread_001` for `[OC]` new task, `STATUS_QUERY`, and `RERUN`, and `_tmp_phase5_mail\tasks\thread_002` for `[CX]` new task.
 
 ### Phase 6
 
@@ -120,4 +148,15 @@
 - Deliverables: explicit `question capsule` protocol, `awaiting_user_input` thread/run states, answer-driven snapshot regeneration, `[QUESTION]` mail rendering, optional `Profile:` parsing for new tasks and replies, and backend-specific `profile -> model` mapping from config.
 - Validation: `.\.venv\Scripts\python.exe -m pytest` -> 67 passed.
 - Local Integration Validation: verified automated `QUESTION -> ANSWER -> DONE` flow and waiting-state `RERUN` rejection in `tests/test_app_phase6.py`.
-- Notes: Phase 6 intentionally keeps recovery at the application layer; it does not yet use native `codex resume` / `opencode --continue` session continuation.
+
+### Phase 7
+
+- Date: 2026-03-14
+- Result: First-round delivery aligned in code and docs
+- Deliverables: workspace/session scheduler metadata, queue-aware background execution, cross-workspace concurrency, runner restart recovery, `/sessions`, native backend resume, and updated current-state documentation.
+- Validation: `.\.venv\Scripts\python.exe -m pytest` -> 132 passed.
+
+## Next Focus
+
+- Decide whether non-reply mail should eventually reuse an existing session by `workspace + title`.
+- Decide whether `/sessions` should remain read-only or evolve into an explicit session targeting workflow without changing Android's current reply contract.

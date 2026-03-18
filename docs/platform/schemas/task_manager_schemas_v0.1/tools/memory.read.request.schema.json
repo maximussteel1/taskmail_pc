@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/task-manager/schemas/v0.1/tools/memory.read.request.schema.json",
+  "title": "memory.read Request",
+  "description": "请求包络：读取指定文档或文档片段。",
+  "allOf": [
+    {
+      "$ref": "../common/base.schema.json#/$defs/requestEnvelope"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "input": {
+          "type": "object",
+          "required": [
+            "doc_id"
+          ],
+          "properties": {
+            "doc_id": {
+              "$ref": "../common/base.schema.json#/$defs/nonEmptyString"
+            },
+            "chunk_id": {
+              "oneOf": [
+                {
+                  "$ref": "../common/base.schema.json#/$defs/nonEmptyString"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "examples": [
+    {
+      "schema_version": "1.0",
+      "request_id": "req-101",
+      "trace_id": "trace-100",
+      "task_id": "task-100",
+      "caller": "task_manager",
+      "input": {
+        "doc_id": "DOC-017",
+        "chunk_id": "c-12"
+      }
+    }
+  ]
+}

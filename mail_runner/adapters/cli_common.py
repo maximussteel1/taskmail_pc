@@ -15,8 +15,10 @@ from pathlib import Path
 from threading import Lock
 
 from ..config import AppConfig
-from ..models import RunResult, TaskSnapshot
-from ..state_capsule import parse_question_capsule
+from ..models import QuestionItem, RunResult, TaskSnapshot
+from ..run_result_capsule import parse_run_result_capsule, strip_run_result_capsules
+from ..state_capsule import parse_question_capsules
+from ..status import BACKEND_TRANSPORT_CLI
 from ..status import RUN_STATUS_AWAITING_USER_INPUT, RUN_STATUS_FAILED, RUN_STATUS_KILLED, RUN_STATUS_PAUSED, RUN_STATUS_SUCCESS
 
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
@@ -38,6 +40,11 @@ DEMO_SCRIPT = (
     "question_choices=os.environ.get('MAIL_RUNNER_DEMO_QUESTION_CHOICES','').strip()\n"
     "question_id=os.environ.get('MAIL_RUNNER_DEMO_QUESTION_ID','').strip()\n"
     "session_id=os.environ.get('MAIL_RUNNER_DEMO_SESSION_ID','').strip()\n"
+    "result_changed_files=os.environ.get('MAIL_RUNNER_DEMO_CHANGED_FILES','').strip()\n"
+    "result_tests_passed=os.environ.get('MAIL_RUNNER_DEMO_TESTS_PASSED','').strip()\n"
+    "result_error_type=os.environ.get('MAIL_RUNNER_DEMO_ERROR_TYPE','').strip()\n"
+    "result_error_message=os.environ.get('MAIL_RUNNER_DEMO_ERROR_MESSAGE','').strip()\n"
+    "exit_code=int(os.environ.get('MAIL_RUNNER_DEMO_EXIT_CODE','0') or '0')\n"
     "stdin_text=sys.stdin.read() if not sys.stdin.closed else ''\n"
     "print(f'Demo backend {backend} starting')\n"
     "if prompt_path:\n"
@@ -56,6 +63,14 @@ DEMO_SCRIPT = (
     "    print('---TASK-QUESTION-END---')\n"
     "    sys.exit(0)\n"
     "print(f'Demo backend {backend} finished')\n"
+    "if any((result_changed_files, result_tests_passed, result_error_type, result_error_message)):\n"
+    "    print('---TASK-RUN-RESULT-BEGIN---')\n"
+    "    print(f'changed_files: {result_changed_files}')\n"
+    "    print(f'tests_passed: {result_tests_passed}')\n"
+    "    print(f'error_type: {result_error_type}')\n"
+    "    print(f'error_message: {result_error_message}')\n"
+    "    print('---TASK-RUN-RESULT-END---')\n"
+    "sys.exit(exit_code)\n"
 )
 _NOISE_PREFIXES = (
     "OpenAI Codex",
@@ -123,6 +138,12 @@ def _format_acceptance(items: list[str]) -> str:
     return "\n".join(f"- {item}" for item in items)
 
 
+def _format_attachments(items: list[str]) -> str:
+    if not items:
+        return "- None"
+    return "\n".join(f"- {item}" for item in items)
+
+
 def _render_prompt(task: TaskSnapshot, backend: str) -> str:
     template_path = TEMPLATES_DIR / f"{backend}_prompt.txt"
     template = template_path.read_text(encoding="utf-8")
@@ -130,13 +151,48 @@ def _render_prompt(task: TaskSnapshot, backend: str) -> str:
         task_id=task.task_id,
         thread_id=task.thread_id,
         profile=task.profile or "",
+        permission=task.permission or "default",
         repo_path=task.repo_path,
         workdir=task.workdir or "",
         mode=task.mode,
         timeout_minutes=task.timeout_minutes,
         task_text=task.task_text,
         acceptance=_format_acceptance(task.acceptance),
+        attachments=_format_attachments(task.attachments),
     )
+
+
+def _incoming_attachment_payload(task: TaskSnapshot) -> list[dict[str, str]]:
+    payload: list[dict[str, str]] = []
+    for item in task.attachments:
+        path = Path(str(item))
+        payload.append({"path": str(path), "name": path.name})
+    return payload
+
+
+def _runtime_prompt_hint(
+    *,
+    task: TaskSnapshot,
+    cwd: Path,
+    run_path: Path,
+    artifacts_dir: Path,
+    incoming_attachments_json: Path,
+) -> str:
+    lines = [
+        "Runtime Mail Paths:",
+        f"- MAIL_RUNNER_WORKDIR: {cwd}",
+        f"- MAIL_RUNNER_RUN_DIR: {run_path}",
+        f"- MAIL_RUNNER_ARTIFACTS_DIR: {artifacts_dir}",
+        f"- MAIL_RUNNER_INCOMING_ATTACHMENTS_JSON: {incoming_attachments_json}",
+        "",
+        "If you want files or images sent back to the user, create them under MAIL_RUNNER_ARTIFACTS_DIR.",
+        "If you need to send files outside that directory, write MAIL_RUNNER_ARTIFACTS_DIR/manifest.json and use absolute paths explicitly.",
+        "Only describe image contents if you actually inspected the file contents.",
+    ]
+    if task.attachments:
+        lines.extend(["", "Incoming attachment paths already materialized in the workdir:"])
+        lines.extend(f"- {item}" for item in task.attachments)
+    return "\n".join(lines).strip()
 
 
 def render_task_input(task: TaskSnapshot, backend: str) -> str:
@@ -383,12 +439,18 @@ def build_run_result(
     stdout_path: Path,
     stderr_path: Path,
     summary_path: Path,
+    changed_files: list[str] | None,
+    tests_passed: bool | None,
+    error_type: str | None,
     error_message: str | None,
     question_id: str | None = None,
     question_text: str | None = None,
     pending_choices: list[str] | None = None,
+    question_set_id: str | None = None,
+    pending_questions: list[QuestionItem] | None = None,
     backend_session_id: str | None = None,
     backend_session_resumable: bool = False,
+    backend_transport: str = BACKEND_TRANSPORT_CLI,
 ) -> RunResult:
     return RunResult(
         task_id=task.task_id,
@@ -401,15 +463,19 @@ def build_run_result(
         stdout_file=stdout_path.relative_to(thread_dir).as_posix(),
         stderr_file=stderr_path.relative_to(thread_dir).as_posix(),
         summary_file=summary_path.relative_to(thread_dir).as_posix(),
-        artifacts_dir=None,
-        changed_files=[],
-        tests_passed=None,
+        artifacts_dir=f"runs/{task.task_id}/artifacts",
+        changed_files=list(changed_files or []),
+        tests_passed=tests_passed,
+        error_type=error_type,
         error_message=error_message,
         question_id=question_id,
         question_text=question_text,
         pending_choices=list(pending_choices or []),
+        question_set_id=question_set_id,
+        pending_questions=list(pending_questions or []),
         backend_session_id=backend_session_id,
         backend_session_resumable=backend_session_resumable,
+        backend_transport=backend_transport,
     )
 
 
@@ -529,13 +595,22 @@ class BaseCliAdapter:
         task: TaskSnapshot,
         resolved: _ResolvedCommand,
         cwd: Path,
+        run_path: Path | None = None,
+        artifacts_dir: Path | None = None,
+        incoming_attachments_json: Path | None = None,
         prompt_path: Path | None = None,
+        allow_permission_override: bool = True,
     ) -> dict[str, str] | None:
         env_overrides = self._build_environment_overrides(task=task, resolved=resolved, cwd=cwd)
-        if not env_overrides and not resolved.is_demo:
-            return None
+        resolved_run_path = run_path or cwd
+        resolved_artifacts_dir = artifacts_dir or (resolved_run_path / "artifacts")
+        resolved_incoming_json = incoming_attachments_json or (resolved_run_path / "incoming_attachments.json")
         env = os.environ.copy()
         env.update(env_overrides)
+        env["MAIL_RUNNER_WORKDIR"] = str(cwd)
+        env["MAIL_RUNNER_RUN_DIR"] = str(resolved_run_path)
+        env["MAIL_RUNNER_ARTIFACTS_DIR"] = str(resolved_artifacts_dir)
+        env["MAIL_RUNNER_INCOMING_ATTACHMENTS_JSON"] = str(resolved_incoming_json)
         if resolved.is_demo:
             env["MAIL_RUNNER_DEMO_BACKEND"] = self.backend
             env["MAIL_RUNNER_DEMO_SLEEP"] = str(self._config.mock_sleep_seconds)
@@ -550,21 +625,44 @@ class BaseCliAdapter:
         run_path.mkdir(parents=True, exist_ok=True)
         thread_dir = run_path.parent.parent
         prompt_path = run_path / "prompt.txt"
+        artifacts_dir = run_path / "artifacts"
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        incoming_attachments_json = run_path / "incoming_attachments.json"
         stdout_path = run_path / "stdout.log"
         stderr_path = run_path / "stderr.log"
         summary_path = run_path / "summary.md"
-        prompt_path.write_text(render_task_input(task, self.backend), encoding="utf-8")
 
         try:
             resolved = resolve_command_prefix(self._configured_command(), self._default_executable())
             cwd = prepare_task_cwd(task, auto_create_workdir=self._config.auto_create_workdir)
+            incoming_attachments_json.write_text(
+                json.dumps(_incoming_attachment_payload(task), indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            prompt_text = render_task_input(task, self.backend)
+            runtime_hint = _runtime_prompt_hint(
+                task=task,
+                cwd=cwd,
+                run_path=run_path,
+                artifacts_dir=artifacts_dir,
+                incoming_attachments_json=incoming_attachments_json,
+            )
+            prompt_path.write_text(f"{prompt_text.rstrip()}\n\n{runtime_hint}\n", encoding="utf-8")
             command, stdin_text, display_command = self._build_backend_command(
                 task=task,
                 resolved=resolved,
                 prompt_path=prompt_path,
                 cwd=cwd,
             )
-            env = self._build_subprocess_env(task=task, resolved=resolved, cwd=cwd, prompt_path=prompt_path)
+            env = self._build_subprocess_env(
+                task=task,
+                resolved=resolved,
+                cwd=cwd,
+                run_path=run_path,
+                artifacts_dir=artifacts_dir,
+                incoming_attachments_json=incoming_attachments_json,
+                prompt_path=prompt_path,
+            )
 
             creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if WINDOWS else 0
             with stdout_path.open("w", encoding="utf-8", errors="replace") as stdout_handle:
@@ -596,8 +694,30 @@ class BaseCliAdapter:
             finished_at = _timestamp()
             stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace")
             stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
-            primary_output = extract_output_block(stdout_text)
-            question_block = parse_question_capsule(normalize_log_text(stdout_text))
+            structured_result = parse_run_result_capsule(stdout_text)
+            visible_stdout_text = strip_run_result_capsules(stdout_text)
+            if visible_stdout_text != stdout_text.strip():
+                stdout_path.write_text(f"{visible_stdout_text}\n" if visible_stdout_text else "", encoding="utf-8")
+            primary_output = extract_output_block(visible_stdout_text)
+            question_blocks = parse_question_capsules(normalize_log_text(stdout_text))
+            pending_questions = [
+                QuestionItem(
+                    question_set_id=str(
+                        block.get("question_set_id")
+                        or block.get("question_id")
+                        or f"question_{task.task_id}"
+                    ),
+                    question_id=str(block.get("question_id") or f"question_{index + 1}"),
+                    question_type=str(block.get("question_type") or ("single_choice" if block.get("choices") else "short_text")),
+                    question_text=str(block.get("question_text") or ""),
+                    required=bool(block.get("required", True)),
+                    choices=list(block.get("choices", [])),
+                    choice_labels=dict(block.get("choice_labels", {})),
+                )
+                for index, block in enumerate(question_blocks)
+                if str(block.get("question_text") or "").strip()
+            ]
+            question_block = question_blocks[-1] if question_blocks else None
             backend_session_id = self._extract_backend_session_id(
                 task=task,
                 resolved=resolved,
@@ -605,36 +725,50 @@ class BaseCliAdapter:
                 stdout_text=stdout_text,
                 stderr_text=stderr_text,
             )
+            changed_files = list(structured_result.changed_files) if structured_result else []
+            tests_passed = structured_result.tests_passed if structured_result else None
+            error_type = structured_result.error_type if structured_result else None
+            structured_error_message = structured_result.error_message if structured_result else None
             if killed:
                 status = RUN_STATUS_KILLED
                 exit_code = None
+                error_type = "killed"
                 error_message = f"{self.backend_label} task was killed."
                 summary_line = error_message
                 primary_output = None
                 question_id = None
                 question_text = None
                 pending_choices: list[str] = []
-            elif returncode == 0 and question_block and question_block.get("question_text"):
+                question_set_id = None
+                pending_questions = []
+            elif returncode == 0 and pending_questions:
                 status = RUN_STATUS_AWAITING_USER_INPUT
                 exit_code = 0
                 question_id = str(question_block.get("question_id") or "").strip() or None
                 question_text = str(question_block.get("question_text") or "").strip() or None
                 pending_choices = list(question_block.get("choices", []))
+                question_set_id = str(question_block.get("question_set_id") or "").strip() or pending_questions[0].question_set_id
+                changed_files = []
+                tests_passed = None
+                error_type = None
                 error_message = None
                 summary_line = question_text or f"{self.backend_label} is awaiting user input."
                 primary_output = None
             elif returncode == 0:
                 status = RUN_STATUS_SUCCESS
                 exit_code = 0
+                error_type = None
                 error_message = None
-                summary_line = extract_summary_line(stdout_text) or f"{self.backend_label} command completed successfully."
+                summary_line = extract_summary_line(visible_stdout_text) or f"{self.backend_label} command completed successfully."
                 question_id = None
                 question_text = None
                 pending_choices = []
+                question_set_id = None
+                pending_questions = []
             else:
                 status = RUN_STATUS_FAILED
                 exit_code = returncode
-                error_message = extract_error_excerpt(stderr_text, stdout_text) or (
+                error_message = structured_error_message or extract_error_excerpt(stderr_text, visible_stdout_text) or (
                     f"{self.backend_label} command exited with code {returncode}."
                 )
                 summary_line = error_message
@@ -642,6 +776,8 @@ class BaseCliAdapter:
                 question_id = None
                 question_text = None
                 pending_choices = []
+                question_set_id = None
+                pending_questions = []
             backend_session_resumable = bool(backend_session_id) and status != RUN_STATUS_KILLED
 
             write_summary(
@@ -668,12 +804,18 @@ class BaseCliAdapter:
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
                 summary_path=summary_path,
+                changed_files=changed_files,
+                tests_passed=tests_passed,
+                error_type=error_type,
                 error_message=error_message,
                 question_id=question_id,
                 question_text=question_text,
                 pending_choices=pending_choices,
+                question_set_id=question_set_id,
+                pending_questions=pending_questions,
                 backend_session_id=backend_session_id,
                 backend_session_resumable=backend_session_resumable,
+                backend_transport=task.backend_transport,
             )
         except Exception as exc:
             with self._lock:
@@ -708,12 +850,18 @@ class BaseCliAdapter:
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
                 summary_path=summary_path,
+                changed_files=[],
+                tests_passed=None,
+                error_type=type(exc).__name__,
                 error_message=error_message,
                 question_id=None,
                 question_text=None,
                 pending_choices=[],
+                question_set_id=None,
+                pending_questions=[],
                 backend_session_id=None,
                 backend_session_resumable=False,
+                backend_transport=task.backend_transport,
             )
 
     def kill(self, task_id: str) -> bool:

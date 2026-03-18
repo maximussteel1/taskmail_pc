@@ -21,7 +21,8 @@ from mail_runner.adapters.codex_adapter import CodexAdapter
 from mail_runner.adapters.opencode_adapter import OpenCodeAdapter
 from mail_runner.config import AppConfig
 from mail_runner.models import TaskSnapshot
-from mail_runner.status import BACKEND_CODEX, BACKEND_OPENCODE, RUN_STATUS_AWAITING_USER_INPUT, RUN_STATUS_KILLED, RUN_STATUS_SUCCESS
+from mail_runner.run_result_capsule import RUN_RESULT_BEGIN_MARKER
+from mail_runner.status import BACKEND_CODEX, BACKEND_OPENCODE, RUN_STATUS_AWAITING_USER_INPUT, RUN_STATUS_FAILED, RUN_STATUS_KILLED, RUN_STATUS_SUCCESS
 
 
 def _snapshot(tmp_path, backend: str, *, task_id: str = "task_001") -> TaskSnapshot:
@@ -137,6 +138,40 @@ def test_opencode_adapter_demo_run_writes_outputs(tmp_path) -> None:
     assert "demo (opencode)" in summary_text
 
 
+def test_opencode_adapter_demo_run_parses_structured_result_capsule(tmp_path, monkeypatch) -> None:
+    snapshot = _snapshot(tmp_path, BACKEND_OPENCODE)
+    run_dir = tmp_path / snapshot.thread_id / "runs" / snapshot.task_id
+    adapter = OpenCodeAdapter(AppConfig(opencode_command="demo", mock_sleep_seconds=0.0))
+    monkeypatch.setenv("MAIL_RUNNER_DEMO_CHANGED_FILES", "src/app.py | tests/test_app.py")
+    monkeypatch.setenv("MAIL_RUNNER_DEMO_TESTS_PASSED", "true")
+
+    result = adapter.run(snapshot, str(run_dir))
+    stdout_text = (run_dir / "stdout.log").read_text(encoding="utf-8")
+
+    assert result.changed_files == ["src/app.py", "tests/test_app.py"]
+    assert result.tests_passed is True
+    assert RUN_RESULT_BEGIN_MARKER not in stdout_text
+
+
+def test_codex_adapter_demo_failure_prefers_structured_error_fields(tmp_path, monkeypatch) -> None:
+    snapshot = _snapshot(tmp_path, BACKEND_CODEX)
+    run_dir = tmp_path / snapshot.thread_id / "runs" / snapshot.task_id
+    adapter = CodexAdapter(AppConfig(codex_command="demo", mock_sleep_seconds=0.0))
+    monkeypatch.setenv("MAIL_RUNNER_DEMO_ERROR_TYPE", "validation_error")
+    monkeypatch.setenv("MAIL_RUNNER_DEMO_ERROR_MESSAGE", "Validation failed.")
+    monkeypatch.setenv("MAIL_RUNNER_DEMO_TESTS_PASSED", "false")
+    monkeypatch.setenv("MAIL_RUNNER_DEMO_EXIT_CODE", "1")
+
+    result = adapter.run(snapshot, str(run_dir))
+    stdout_text = (run_dir / "stdout.log").read_text(encoding="utf-8")
+
+    assert result.status == RUN_STATUS_FAILED
+    assert result.error_type == "validation_error"
+    assert result.error_message == "Validation failed."
+    assert result.tests_passed is False
+    assert RUN_RESULT_BEGIN_MARKER not in stdout_text
+
+
 def test_prepare_task_cwd_auto_creates_missing_relative_workdir(tmp_path) -> None:
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
@@ -239,19 +274,60 @@ def test_opencode_adapter_enables_exa_search_env_for_real_cli(tmp_path) -> None:
 
     assert env is not None
     assert env["OPENCODE_ENABLE_EXA"] == "1"
-    assert "OPENCODE_CONFIG" in env
-    config_path = Path(env["OPENCODE_CONFIG"])
-    assert config_path.exists()
-    payload = json.loads(config_path.read_text(encoding="utf-8"))
-    assert payload["$schema"] == "https://opencode.ai/config.json"
-    assert payload["permission"]["external_directory"]["C:/Program Files/**"] == "deny"
-    assert payload["permission"]["external_directory"]["E:/**"] == "allow"
-    assert payload["permission"]["question"] == "deny"
-    assert payload["permission"]["websearch"] == "allow"
+    assert "OPENCODE_CONFIG" not in env
+
+
+def test_opencode_adapter_writes_permission_overlay_config_for_highest_permission(tmp_path, monkeypatch) -> None:
+    snapshot = _snapshot(tmp_path, BACKEND_OPENCODE)
+    snapshot.permission = "highest"
+    adapter = OpenCodeAdapter(AppConfig(opencode_command="opencode", enable_web_search=True))
+    resolved = resolve_command_prefix("opencode", "opencode")
+    monkeypatch.setattr(
+        adapter,
+        "_load_effective_config",
+        lambda **_: {
+            "$schema": "https://opencode.ai/config.json",
+            "provider": {"demo": {"models": {}}},
+            "permission": {"webfetch": "ask"},
+        },
+    )
+
+    env = adapter._build_subprocess_env(  # type: ignore[attr-defined]
+        task=snapshot,
+        resolved=resolved,
+        cwd=tmp_path,
+        run_path=tmp_path / "run",
+    )
+
+    assert env is not None
+    overlay_path = Path(env["OPENCODE_CONFIG"])
+    assert overlay_path.exists()
+    payload = json.loads(overlay_path.read_text(encoding="utf-8"))
+    assert payload["permission"]["edit"] == "allow"
+    assert payload["permission"]["bash"] == "allow"
     assert payload["permission"]["webfetch"] == "allow"
-    cwd_glob = f"{tmp_path.resolve().as_posix()}/**"
-    assert payload["permission"]["edit"]["*"] == "deny"
-    assert payload["permission"]["edit"][cwd_glob] == "allow"
+    assert payload["permission"]["doom_loop"] == "allow"
+    assert payload["permission"]["external_directory"] == "allow"
+    assert payload["permission"]["websearch"] == "allow"
+
+
+def test_opencode_adapter_resume_env_does_not_inject_backend_config(tmp_path, monkeypatch) -> None:
+    snapshot = _snapshot(tmp_path, BACKEND_OPENCODE)
+    snapshot.run_mode = "resume"
+    snapshot.backend_session_id = "session-456"
+    snapshot.turn_text = "Please continue."
+    adapter = OpenCodeAdapter(AppConfig(opencode_command="opencode", enable_web_search=True))
+    resolved = resolve_command_prefix("opencode", "opencode")
+    monkeypatch.setenv("OPENCODE_CONFIG", "C:\\temp\\forced.json")
+
+    env = adapter._build_subprocess_env(  # type: ignore[attr-defined]
+        task=snapshot,
+        resolved=resolved,
+        cwd=tmp_path,
+    )
+
+    assert env is not None
+    assert "OPENCODE_CONFIG" not in env
 
 
 def test_codex_adapter_demo_run_uses_stdin_prompt(tmp_path) -> None:
@@ -332,6 +408,86 @@ def test_codex_adapter_builds_resume_command(tmp_path) -> None:
     assert stdin_text == "Please continue."
 
 
+def test_codex_adapter_uses_dangerous_bypass_for_highest_permission(tmp_path) -> None:
+    snapshot = _snapshot(tmp_path, BACKEND_CODEX)
+    snapshot.permission = "highest"
+    adapter = CodexAdapter(AppConfig(codex_command="codex"))
+    resolved = resolve_command_prefix("codex", "codex")
+    prompt_path = tmp_path / "prompt.txt"
+    prompt_path.write_text("prompt", encoding="utf-8")
+
+    command, _, _ = adapter._build_backend_command(  # type: ignore[attr-defined]
+        task=snapshot,
+        resolved=resolved,
+        prompt_path=prompt_path,
+        cwd=tmp_path,
+    )
+
+    assert "--dangerously-bypass-approvals-and-sandbox" in command
+    assert "--full-auto" not in command
+
+
+def test_codex_adapter_resume_uses_dangerous_bypass_for_highest_permission(tmp_path) -> None:
+    snapshot = _snapshot(tmp_path, BACKEND_CODEX)
+    snapshot.run_mode = "resume"
+    snapshot.backend_session_id = "session-123"
+    snapshot.turn_text = "Please continue."
+    snapshot.permission = "highest"
+    adapter = CodexAdapter(AppConfig(codex_command="codex"))
+    resolved = resolve_command_prefix("codex", "codex")
+    prompt_path = tmp_path / "prompt.txt"
+    prompt_path.write_text("Please continue.", encoding="utf-8")
+
+    command, _, _ = adapter._build_backend_command(  # type: ignore[attr-defined]
+        task=snapshot,
+        resolved=resolved,
+        prompt_path=prompt_path,
+        cwd=tmp_path,
+    )
+
+    assert "--dangerously-bypass-approvals-and-sandbox" in command
+    assert "--full-auto" not in command
+
+
+def test_codex_adapter_demo_resume_keeps_existing_session_id(tmp_path) -> None:
+    snapshot = _snapshot(tmp_path, BACKEND_CODEX)
+    snapshot.run_mode = "resume"
+    snapshot.backend_session_id = "session-123"
+    snapshot.turn_text = "Please continue."
+    run_dir = tmp_path / snapshot.thread_id / "runs" / snapshot.task_id
+    adapter = CodexAdapter(AppConfig(codex_command="demo", mock_sleep_seconds=0.0))
+
+    result = adapter.run(snapshot, str(run_dir))
+
+    stdout_text = (run_dir / "stdout.log").read_text(encoding="utf-8")
+
+    assert result.status == RUN_STATUS_SUCCESS
+    assert result.backend_session_id == "session-123"
+    assert "session id: session-123" in stdout_text
+
+
+def test_codex_adapter_resume_env_has_runtime_mail_paths_without_backend_config(tmp_path) -> None:
+    snapshot = _snapshot(tmp_path, BACKEND_CODEX)
+    snapshot.run_mode = "resume"
+    snapshot.backend_session_id = "session-123"
+    snapshot.turn_text = "Please continue."
+    adapter = CodexAdapter(AppConfig(codex_command="codex"))
+    resolved = resolve_command_prefix("codex", "codex")
+
+    env = adapter._build_subprocess_env(  # type: ignore[attr-defined]
+        task=snapshot,
+        resolved=resolved,
+        cwd=tmp_path,
+    )
+
+    assert env is not None
+    assert env["MAIL_RUNNER_WORKDIR"] == str(tmp_path)
+    assert env["MAIL_RUNNER_RUN_DIR"] == str(tmp_path)
+    assert env["MAIL_RUNNER_ARTIFACTS_DIR"] == str(tmp_path / "artifacts")
+    assert env["MAIL_RUNNER_INCOMING_ATTACHMENTS_JSON"] == str(tmp_path / "incoming_attachments.json")
+    assert "OPENCODE_CONFIG" not in env
+
+
 def test_codex_adapter_enables_search_flag_when_configured(tmp_path) -> None:
     snapshot = _snapshot(tmp_path, BACKEND_CODEX)
     adapter = CodexAdapter(AppConfig(codex_command="codex", enable_web_search=True))
@@ -373,20 +529,24 @@ def test_opencode_adapter_builds_resume_command(tmp_path) -> None:
     snapshot = _snapshot(tmp_path, BACKEND_OPENCODE)
     snapshot.run_mode = "resume"
     snapshot.backend_session_id = "session-456"
-    snapshot.turn_text = "Please continue."
+    snapshot.turn_text = "Please continue.\nRemember the previous token."
     adapter = OpenCodeAdapter(AppConfig(opencode_command="opencode"))
     resolved = resolve_command_prefix("opencode", "opencode")
+    prompt_path = tmp_path / "prompt.txt"
+    prompt_path.write_text(snapshot.turn_text, encoding="utf-8")
 
     command, stdin_text, _ = adapter._build_backend_command(  # type: ignore[attr-defined]
         task=snapshot,
         resolved=resolved,
-        prompt_path=tmp_path / "prompt.txt",
+        prompt_path=prompt_path,
         cwd=tmp_path,
     )
 
-    assert command[:3] == ["opencode", "run", "Please continue."]
+    assert command[:3] == ["opencode", "run", "Execute the attached prompt.txt exactly."]
     assert "--session" in command
     assert command[command.index("--session") + 1] == "session-456"
+    assert "--file" in command
+    assert command[command.index("--file") + 1] == str(prompt_path)
     assert stdin_text is None
 
 

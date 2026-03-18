@@ -8,6 +8,9 @@ __pycache__/
 
 config.yaml
 mail_config.local.yaml
+mail_config.*.local.yaml
+mail_config.cos.local.yaml
+QQ邮箱登录.txt
 
 tasks/*
 !tasks/.gitkeep
@@ -15,4 +18,6 @@ tasks/*
 _tmp_*/
 nul
 scripts/test_fetch_*.json
+scripts/codex_sdk_sidecar/node_modules/
+scripts/codex_sdk_sidecar/package-lock.json
 scriptsTEST_FILES_README.txt

@@ -26,6 +26,12 @@ def _format_acceptance(items: list[str]) -> str:
     return "\n".join(f"- {item}" for item in items)
 
 
+def _format_attachments(items: list[str]) -> str:
+    if not items:
+        return "- None"
+    return "\n".join(f"- {item}" for item in items)
+
+
 class MockAdapter(WorkerAdapter):
     """Local adapter that writes deterministic run outputs."""
 
@@ -38,6 +44,7 @@ class MockAdapter(WorkerAdapter):
         started_at = _timestamp()
         run_path = Path(run_dir)
         run_path.mkdir(parents=True, exist_ok=True)
+        (run_path / "artifacts").mkdir(parents=True, exist_ok=True)
         stop_event = Event()
         with self._lock:
             self._active_stops[task.task_id] = stop_event
@@ -50,12 +57,14 @@ class MockAdapter(WorkerAdapter):
                 task_id=task.task_id,
                 thread_id=task.thread_id,
                 profile=task.profile or "",
+                permission=task.permission or "default",
                 repo_path=task.repo_path,
                 workdir=task.workdir or "",
                 mode=task.mode,
                 timeout_minutes=task.timeout_minutes,
                 task_text=task.task_text,
                 acceptance=_format_acceptance(task.acceptance),
+                attachments=_format_attachments(task.attachments),
             )
         (run_path / "prompt.txt").write_text(prompt_text, encoding="utf-8")
         backend_session_id = task.backend_session_id or f"mock-session-{task.backend}-{task.thread_id}"
@@ -128,12 +137,13 @@ class MockAdapter(WorkerAdapter):
                 stdout_file=stdout_path.relative_to(thread_dir).as_posix(),
                 stderr_file=stderr_path.relative_to(thread_dir).as_posix(),
                 summary_file=summary_path.relative_to(thread_dir).as_posix(),
-                artifacts_dir=None,
+                artifacts_dir=f"runs/{task.task_id}/artifacts",
                 changed_files=[],
                 tests_passed=None,
                 error_message=error_message,
                 backend_session_id=backend_session_id,
                 backend_session_resumable=not stop_event.is_set(),
+                backend_transport=task.backend_transport,
             )
         finally:
             with self._lock:

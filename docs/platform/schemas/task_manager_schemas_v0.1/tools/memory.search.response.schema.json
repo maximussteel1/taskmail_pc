@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/task-manager/schemas/v0.1/tools/memory.search.response.schema.json",
+  "title": "memory.search Response",
+  "description": "响应包络：返回候选文档片段或错误。",
+  "$defs": {
+    "resultItem": {
+      "type": "object",
+      "required": [
+        "doc_id",
+        "chunk_id",
+        "title",
+        "score",
+        "snippet",
+        "locator"
+      ],
+      "properties": {
+        "doc_id": {
+          "$ref": "../common/base.schema.json#/$defs/nonEmptyString"
+        },
+        "chunk_id": {
+          "$ref": "../common/base.schema.json#/$defs/nonEmptyString"
+        },
+        "title": {
+          "$ref": "../common/base.schema.json#/$defs/nonEmptyString"
+        },
+        "doc_type": {
+          "$ref": "../common/base.schema.json#/$defs/nonEmptyString"
+        },
+        "project": {
+          "$ref": "../common/base.schema.json#/$defs/nonEmptyString"
+        },
+        "date": {
+          "$ref": "../common/base.schema.json#/$defs/date"
+        },
+        "score": {
+          "type": "number",
+          "minimum": 0
+        },
+        "snippet": {
+          "$ref": "../common/base.schema.json#/$defs/nonEmptyString"
+        },
+        "locator": {
+          "$ref": "../common/base.schema.json#/$defs/locator"
+        },
+        "attributes": {
+          "$ref": "../common/base.schema.json#/$defs/resultAttributes"
+        }
+      },
+      "additionalProperties": false
+    },
+    "successData": {
+      "type": "object",
+      "required": [
+        "results",
+        "total_returned"
+      ],
+      "properties": {
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/resultItem"
+          }
+        },
+        "total_returned": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "successEnvelope": {
+      "allOf": [
+        {
+          "$ref": "../common/base.schema.json#/$defs/responseEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "const": "memory.search"
+            },
+            "status": {
+              "const": "ok"
+            },
+            "data": {
+              "$ref": "#/$defs/successData"
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    },
+    "errorEnvelope": {
+      "allOf": [
+        {
+          "$ref": "../common/base.schema.json#/$defs/responseEnvelope"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "tool": {
+              "const": "memory.search"
+            },
+            "status": {
+              "const": "error"
+            },
+            "data": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "../common/base.schema.json#/$defs/errorObject"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/successEnvelope"
+    },
+    {
+      "$ref": "#/$defs/errorEnvelope"
+    }
+  ],
+  "examples": [
+    {
+      "schema_version": "1.0",
+      "request_id": "req-100",
+      "tool": "memory.search",
+      "status": "ok",
+      "data": {
+        "results": [
+          {
+            "doc_id": "DOC-017",
+            "chunk_id": "c-12",
+            "title": "项目 A 技术报告",
+            "doc_type": "report",
+            "project": "projectA",
+            "date": "2024-09-18",
+            "score": 0.87,
+            "snippet": "……",
+            "locator": {
+              "path": "/docs/projectA/report.pdf",
+              "page": 14,
+              "section": "3.2"
+            },
+            "attributes": {
+              "tags": [
+                "calibration"
+              ]
+            }
+          }
+        ],
+        "total_returned": 1
+      },
+      "error": null,
+      "meta": {
+        "duration_ms": 130,
+        "warnings": []
+      }
+    }
+  ]
+}

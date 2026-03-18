@@ -10,6 +10,10 @@ py scripts/fetch_mails.py -c mail_config.local.yaml -o <输出文件> [选项]
 
 # 从外部项目调用（使用绝对路径）
 py E:\projects\mail_based_task_manager\scripts\fetch_mails.py -o <输出文件> [选项]
+
+# 双邮箱快捷脚本
+scripts\fetch_bot_mails.cmd
+scripts\fetch_user_mails.cmd
 ```
 
 ## 参数说明
@@ -33,6 +37,12 @@ py scripts/fetch_mails.py -c mail_config.local.yaml -o output.json -n 10 --unsee
 
 # 从外部项目调用
 py E:\projects\mail_based_task_manager\scripts\fetch_mails.py -o D:\my_project\emails.json -n 50 --all
+
+# 直接抓 bot mailbox（默认输出到 _tmp_live_mail_runner\recent_bot_100_mails.json）
+scripts\fetch_bot_mails.cmd
+
+# 直接抓 user mailbox（默认输出到 _tmp_live_mail_runner\recent_user_100_mails.json）
+scripts\fetch_user_mails.cmd
 ```
 
 ## 输出格式

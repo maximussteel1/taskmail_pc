@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import json
-import string
 import subprocess
-import tempfile
 from pathlib import Path
 
 from ..config import AppConfig
@@ -36,42 +35,6 @@ class OpenCodeAdapter(BaseCliAdapter, WorkerAdapter):
     def _profile_model_map(self) -> dict[str, str]:
         return self._config.opencode_profile_models
 
-    def _dynamic_config_path(self, task) -> Path:
-        root = Path(tempfile.gettempdir()) / "mail_runner_opencode" / task.thread_id / task.task_id
-        root.mkdir(parents=True, exist_ok=True)
-        return root / "opencode.json"
-
-    def _normalize_path_glob(self, path: Path) -> str:
-        return path.resolve(strict=False).as_posix()
-
-    def _build_permission_config(self, cwd: Path) -> dict[str, object]:
-        external_directory_rules: dict[str, str] = {}
-        for drive_letter in string.ascii_uppercase:
-            external_directory_rules[f"{drive_letter}:/**"] = "allow"
-        external_directory_rules["C:/Program Files/**"] = "deny"
-        external_directory_rules["C:/Program Files (x86)/**"] = "deny"
-
-        cwd_glob = f"{self._normalize_path_glob(cwd)}/**"
-        return {
-            "$schema": "https://opencode.ai/config.json",
-            "permission": {
-                "external_directory": external_directory_rules,
-                "edit": {
-                    "*": "deny",
-                    cwd_glob: "allow",
-                },
-                "question": "deny",
-                "websearch": "allow" if self._config.enable_web_search else "deny",
-                "webfetch": "allow" if self._config.enable_web_search else "deny",
-            },
-        }
-
-    def _write_dynamic_config(self, task, cwd: Path) -> Path:
-        config_path = self._dynamic_config_path(task)
-        payload = self._build_permission_config(cwd)
-        config_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        return config_path
-
     def _build_environment_overrides(
         self,
         *,
@@ -82,8 +45,102 @@ class OpenCodeAdapter(BaseCliAdapter, WorkerAdapter):
         env: dict[str, str] = {}
         if self._config.enable_web_search:
             env["OPENCODE_ENABLE_EXA"] = "1"
+        return env
+
+    def _highest_permission_overrides(self) -> dict[str, object]:
+        permission: dict[str, object] = {
+            "edit": "allow",
+            "bash": "allow",
+            "webfetch": "allow",
+            "doom_loop": "allow",
+            "external_directory": "allow",
+        }
+        if self._config.enable_web_search:
+            permission["websearch"] = "allow"
+        return {"permission": permission}
+
+    def _load_effective_config(
+        self,
+        *,
+        resolved: _ResolvedCommand,
+        cwd: Path,
+        env: dict[str, str],
+    ) -> dict[str, object]:
+        command = [*resolved.prefix, "debug", "config"]
+        completed = subprocess.run(
+            command,
+            cwd=str(cwd),
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+        )
+        if completed.returncode != 0 or not completed.stdout.strip():
+            raise RuntimeError("OpenCode debug config failed while preparing permission overlay.")
+        payload = json.loads(completed.stdout)
+        if not isinstance(payload, dict):
+            raise RuntimeError("OpenCode debug config returned a non-object payload.")
+        return payload
+
+    def _merge_permission_config(self, base_config: dict[str, object]) -> dict[str, object]:
+        merged = copy.deepcopy(base_config)
+        existing_permission = merged.get("permission")
+        merged_permission = dict(existing_permission) if isinstance(existing_permission, dict) else {}
+        merged_permission.update(self._highest_permission_overrides()["permission"])  # type: ignore[arg-type]
+        merged["permission"] = merged_permission
+        return merged
+
+    def _write_permission_overlay_config(
+        self,
+        *,
+        resolved: _ResolvedCommand,
+        cwd: Path,
+        run_path: Path,
+        env: dict[str, str],
+    ) -> Path:
+        run_path.mkdir(parents=True, exist_ok=True)
+        base_config = self._load_effective_config(resolved=resolved, cwd=cwd, env=env)
+        merged_config = self._merge_permission_config(base_config)
+        config_path = run_path / "opencode_permission_overlay.json"
+        config_path.write_text(json.dumps(merged_config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        return config_path
+
+    def _build_subprocess_env(
+        self,
+        *,
+        task,
+        resolved,
+        cwd: Path,
+        run_path: Path | None = None,
+        artifacts_dir: Path | None = None,
+        incoming_attachments_json: Path | None = None,
+        prompt_path: Path | None = None,
+        allow_permission_override: bool = True,
+    ) -> dict[str, str] | None:
+        env = super()._build_subprocess_env(
+            task=task,
+            resolved=resolved,
+            cwd=cwd,
+            run_path=run_path,
+            artifacts_dir=artifacts_dir,
+            incoming_attachments_json=incoming_attachments_json,
+            prompt_path=prompt_path,
+            allow_permission_override=allow_permission_override,
+        )
+        if env is None:
+            return None
         if resolved.prefix != [DEMO_COMMAND]:
-            env["OPENCODE_CONFIG"] = str(self._write_dynamic_config(task, cwd))
+            env.pop("OPENCODE_CONFIG", None)
+            if allow_permission_override and task.permission == "highest":
+                overlay_path = self._write_permission_overlay_config(
+                    resolved=resolved,
+                    cwd=cwd,
+                    run_path=run_path or cwd,
+                    env=env,
+                )
+                env["OPENCODE_CONFIG"] = str(overlay_path)
         return env
 
     def _session_title(self, task) -> str:
@@ -101,7 +158,15 @@ class OpenCodeAdapter(BaseCliAdapter, WorkerAdapter):
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=self._build_subprocess_env(task=task, resolved=resolved, cwd=cwd),
+            env=self._build_subprocess_env(
+                task=task,
+                resolved=resolved,
+                cwd=cwd,
+                run_path=cwd,
+                artifacts_dir=cwd / "artifacts",
+                incoming_attachments_json=cwd / "incoming_attachments.json",
+                allow_permission_override=False,
+            ),
         )
         if completed.returncode != 0 or not completed.stdout.strip():
             return None
@@ -138,8 +203,17 @@ class OpenCodeAdapter(BaseCliAdapter, WorkerAdapter):
         if task.run_mode == "resume":
             if not task.backend_session_id:
                 raise ValueError("OpenCode resume requires backend_session_id.")
-            turn_text = task.turn_text or "Continue the previous task."
-            command = [*resolved.prefix, "run", turn_text, "--session", task.backend_session_id, "--dir", str(cwd)]
+            command = [
+                *resolved.prefix,
+                "run",
+                "Execute the attached prompt.txt exactly.",
+                "--session",
+                task.backend_session_id,
+                "--dir",
+                str(cwd),
+                "--file",
+                str(prompt_path),
+            ]
             if model_name:
                 command.extend(["-m", model_name])
             return command, None, " ".join(command)

@@ -1,0 +1,38 @@
+{
+  "validated_at": "2026-03-14T09:32:03Z",
+  "validation_ok": true,
+  "report": [
+    {
+      "name": "memory.search.request",
+      "status": "ok"
+    },
+    {
+      "name": "memory.search.response",
+      "status": "ok"
+    },
+    {
+      "name": "memory.read.request",
+      "status": "ok"
+    },
+    {
+      "name": "memory.read.response",
+      "status": "ok"
+    },
+    {
+      "name": "task.get.request",
+      "status": "ok"
+    },
+    {
+      "name": "task.get.response",
+      "status": "ok"
+    },
+    {
+      "name": "task.patch.request",
+      "status": "ok"
+    },
+    {
+      "name": "task.patch.response",
+      "status": "ok"
+    }
+  ]
+}

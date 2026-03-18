@@ -1,5 +1,8 @@
 # Task Mail Phase 0 Research
 
+> Archived legacy source file.
+> Current canonical doc: `docs/research/taskmail_phase0_research.md`
+
 ## 1. Goal Restatement
 
 Target feature: add a dedicated Task Mail view layer on top of a Thunderbird for Android fork, without replacing normal mail flows.

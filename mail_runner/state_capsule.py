@@ -26,9 +26,13 @@ CAPSULE_FIELDS = (
     "last_summary",
 )
 QUESTION_FIELDS = (
+    "question_set_id",
     "question_id",
+    "question_type",
+    "required",
     "question_text",
     "choices",
+    "choice_labels",
 )
 _CAPSULE_RE = re.compile(
     rf"{re.escape(BEGIN_MARKER)}\s*(.*?){re.escape(END_MARKER)}",
@@ -75,9 +79,15 @@ def render_question_capsule(question: dict[str, Any]) -> str:
     question_dict = dict(question)
     lines = [QUESTION_BEGIN_MARKER]
     for field_name in QUESTION_FIELDS:
-        if field_name == "choices":
+        if field_name in {"choices", "choice_labels"}:
             raw_choices = question_dict.get(field_name, [])
-            if isinstance(raw_choices, list):
+            if isinstance(raw_choices, dict):
+                rendered = " | ".join(
+                    f"{_single_line(key)}={_single_line(value)}"
+                    for key, value in raw_choices.items()
+                    if _single_line(key) and _single_line(value)
+                )
+            elif isinstance(raw_choices, list):
                 rendered = " | ".join(_single_line(item) for item in raw_choices if _single_line(item))
             else:
                 rendered = _single_line(raw_choices)
@@ -88,13 +98,13 @@ def render_question_capsule(question: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def parse_question_capsule(text: str) -> dict[str, Any] | None:
-    matches = _QUESTION_RE.findall(text)
-    if not matches:
-        return None
+def render_question_capsules(questions: list[dict[str, Any]]) -> str:
+    return "\n".join(render_question_capsule(question) for question in questions)
 
+
+def _parse_question_block(block_text: str) -> dict[str, Any] | None:
     parsed: dict[str, Any] = {}
-    for raw_line in matches[-1].splitlines():
+    for raw_line in block_text.splitlines():
         line = raw_line.strip()
         if not line:
             continue
@@ -105,6 +115,45 @@ def parse_question_capsule(text: str) -> dict[str, Any] | None:
         normalized_value = value.lstrip()
         if normalized_key == "choices":
             parsed[normalized_key] = [item.strip() for item in normalized_value.split("|") if item.strip()]
+        elif normalized_key == "choice_labels":
+            labels: dict[str, str] = {}
+            for raw_item in normalized_value.split("|"):
+                item = raw_item.strip()
+                if not item:
+                    continue
+                key_part, separator_part, value_part = item.partition("=")
+                if separator_part:
+                    labels[key_part.strip()] = value_part.strip()
+            parsed[normalized_key] = labels
+        elif normalized_key == "required":
+            parsed[normalized_key] = normalized_value.lower() in {"1", "true", "yes"}
         else:
             parsed[normalized_key] = normalized_value
     return parsed
+
+
+def parse_question_capsules(text: str) -> list[dict[str, Any]]:
+    matches = _QUESTION_RE.findall(text)
+    if not matches:
+        return []
+
+    parsed_blocks: list[dict[str, Any]] = []
+    question_set_ids: set[str] = set()
+    for block in matches:
+        parsed = _parse_question_block(block)
+        if parsed is None:
+            return []
+        parsed_blocks.append(parsed)
+        question_set_id = str(parsed.get("question_set_id") or "").strip()
+        if question_set_id:
+            question_set_ids.add(question_set_id)
+    if len(question_set_ids) > 1:
+        return []
+    return parsed_blocks
+
+
+def parse_question_capsule(text: str) -> dict[str, Any] | None:
+    parsed_blocks = parse_question_capsules(text)
+    if not parsed_blocks:
+        return None
+    return parsed_blocks[-1]

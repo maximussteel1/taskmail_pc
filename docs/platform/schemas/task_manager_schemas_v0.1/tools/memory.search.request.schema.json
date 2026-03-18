@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/task-manager/schemas/v0.1/tools/memory.search.request.schema.json",
+  "title": "memory.search Request",
+  "description": "请求包络：检索候选文档片段。",
+  "allOf": [
+    {
+      "$ref": "../common/base.schema.json#/$defs/requestEnvelope"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "input": {
+          "type": "object",
+          "required": [
+            "query"
+          ],
+          "properties": {
+            "query": {
+              "$ref": "../common/base.schema.json#/$defs/nonEmptyString"
+            },
+            "filters": {
+              "type": "object",
+              "properties": {
+                "doc_type": {
+                  "$ref": "../common/base.schema.json#/$defs/stringArray"
+                },
+                "project": {
+                  "$ref": "../common/base.schema.json#/$defs/stringArray"
+                },
+                "date_from": {
+                  "$ref": "../common/base.schema.json#/$defs/date"
+                },
+                "date_to": {
+                  "$ref": "../common/base.schema.json#/$defs/date"
+                },
+                "tags": {
+                  "$ref": "../common/base.schema.json#/$defs/stringArray"
+                },
+                "author": {
+                  "$ref": "../common/base.schema.json#/$defs/stringArray"
+                },
+                "version": {
+                  "$ref": "../common/base.schema.json#/$defs/stringArray"
+                },
+                "status": {
+                  "$ref": "../common/base.schema.json#/$defs/stringArray"
+                },
+                "source_path": {
+                  "$ref": "../common/base.schema.json#/$defs/stringArray"
+                }
+              },
+              "additionalProperties": false,
+              "default": {}
+            },
+            "top_k": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 10
+            },
+            "retrieval_mode": {
+              "type": "string",
+              "enum": [
+                "keyword",
+                "semantic",
+                "hybrid"
+              ],
+              "default": "hybrid"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "examples": [
+    {
+      "schema_version": "1.0",
+      "request_id": "req-100",
+      "trace_id": "trace-100",
+      "task_id": "task-100",
+      "caller": "task_manager",
+      "input": {
+        "query": "设备 X 校准条件",
+        "filters": {
+          "doc_type": [
+            "report",
+            "meeting_note"
+          ],
+          "project": [
+            "projectA"
+          ],
+          "date_from": "2023-01-01",
+          "date_to": "2025-12-31",
+          "tags": [
+            "calibration"
+          ]
+        },
+        "top_k": 8,
+        "retrieval_mode": "hybrid"
+      }
+    }
+  ]
+}
