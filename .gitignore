@@ -11,6 +11,9 @@ mail_config.local.yaml
 mail_config.*.local.yaml
 mail_config.cos.local.yaml
 QQ邮箱登录.txt
+work_bot.pem
+vps.txt
+_mailin_*
 
 tasks/*
 !tasks/.gitkeep

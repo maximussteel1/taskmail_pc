@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import SessionState, ThreadState
@@ -16,6 +16,7 @@ from .status import (
 )
 
 HEALTH_STALE_AFTER_SECONDS = 300
+_LOCAL_TZ = datetime.now().astimezone().tzinfo or timezone.utc
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,11 +179,14 @@ def _parse_timestamp(value: str | datetime | None) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value
+        return value if value.tzinfo is not None else value.replace(tzinfo=_LOCAL_TZ)
     text = str(value).strip()
     if not text:
         return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
     try:
-        return datetime.fromisoformat(text)
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=_LOCAL_TZ)

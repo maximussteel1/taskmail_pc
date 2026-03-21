@@ -197,6 +197,7 @@ Current default policy:
 - threshold: `20 MB`
 - presigned URL lifetime: `7 days`
 - object key shape: `mail-runner/<thread_id>/<task_id>/<filename>`
+- COS upload uses a direct HTTPS client session and does not inherit ambient `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` environment variables
 - small files still remain normal mail attachments
 - for `apk` / `ipa` payloads on the COS default domain, the runtime rewrites the
   uploaded object name to `<original_name>.bin` and emits a user-facing notice,
@@ -215,6 +216,9 @@ If COS upload fails for an oversized file:
 - the original image remains a normal attachment
 - preview and attachment may reference the same source file in MVP
 - future optimization may generate compressed preview images, but that is not required for MVP
+- static attached `image/svg+xml` follows the same inline-preview path as other previewable attached images
+- consumer-side body-image matching is based on `cid:` to attachment `content_id`, not filename/order heuristics
+- if a client cannot safely render an inline image or inline SVG, it may degrade to normal attachment display and plain-text fallback without violating the current protocol
 
 Current scope note:
 

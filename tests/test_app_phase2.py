@@ -465,10 +465,19 @@ def test_background_batch_queues_second_session_instead_of_sending_busy_status(t
     )
     client = FakeMailClient([first, second])
     dispatcher = Dispatcher(MockAdapter(sleep_seconds=0.5), MockAdapter(sleep_seconds=0.5))
-    config = AppConfig(from_addr="user@example.com", from_name="Mail Runner", task_root="tasks")
+    config = AppConfig(
+        from_addr="user@example.com",
+        from_name="Mail Runner",
+        task_root="tasks",
+        max_active_sessions_per_workspace=1,
+    )
     details = bootstrap(config, tmp_path)
     task_root = Path(details["task_root"])
-    runner = SerialTaskRunner(task_root, dispatcher)
+    runner = SerialTaskRunner(
+        task_root,
+        dispatcher,
+        max_active_sessions_per_workspace=config.max_active_sessions_per_workspace,
+    )
 
     stats = _process_batch(config, task_root, client, runner, background=True)
 
@@ -476,6 +485,7 @@ def test_background_batch_queues_second_session_instead_of_sending_busy_status(t
     second_state = load_thread_state("thread_002", task_root)
 
     assert stats == {"fetched": 2, "processed": 2, "skipped": 0, "failed": 0}
+    assert workspace_state.active_session_ids == ["thread_001"]
     assert workspace_state.active_session_id == "thread_001"
     assert workspace_state.queued_session_ids == ["thread_002"]
     assert second_state.status == "accepted"
@@ -488,6 +498,7 @@ def test_background_batch_queues_second_session_instead_of_sending_busy_status(t
     runner.wait_until_idle()
 
     final_workspace_state = load_workspace_state(build_workspace_id("D:\\repo", "src"), task_root)
+    assert final_workspace_state.active_session_ids == []
     assert final_workspace_state.active_session_id is None
     assert final_workspace_state.queued_session_ids == []
     assert [item["subject"] for item in client.sent_messages] == [
@@ -521,10 +532,10 @@ def test_background_batch_runs_different_workspaces_concurrently(tmp_path) -> No
     )
     client = FakeMailClient([first, second])
     dispatcher = Dispatcher(MockAdapter(sleep_seconds=0.5), MockAdapter(sleep_seconds=0.5))
-    config = AppConfig(from_addr="user@example.com", from_name="Mail Runner", task_root="tasks", max_concurrent_runs=2)
+    config = AppConfig(from_addr="user@example.com", from_name="Mail Runner", task_root="tasks", max_active_sessions=2)
     details = bootstrap(config, tmp_path)
     task_root = Path(details["task_root"])
-    runner = SerialTaskRunner(task_root, dispatcher, max_concurrent_runs=config.max_concurrent_runs)
+    runner = SerialTaskRunner(task_root, dispatcher, max_active_sessions=config.max_active_sessions)
 
     stats = _process_batch(config, task_root, client, runner, background=True)
     time.sleep(0.05)

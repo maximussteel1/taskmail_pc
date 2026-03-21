@@ -129,3 +129,36 @@ def test_sdk_stream_progress_prevents_false_stuck(tmp_path) -> None:
     assert health.status == "normal"
     assert health.last_progress_at == "2026-03-18T10:04:30"
     assert health.idle_seconds == 31
+
+
+def test_sdk_stream_progress_with_z_timestamp_does_not_crash(tmp_path) -> None:
+    thread = _thread_state(
+        status="running",
+        updated_at="2026-03-18T10:00:00",
+        last_progress_at="2026-03-18T10:00:00",
+        backend_transport="sdk",
+        current_task_id="task_run",
+    )
+    stream_path = tmp_path / "thread_001" / "runs" / "task_run" / "stream.events.jsonl"
+    stream_path.parent.mkdir(parents=True, exist_ok=True)
+    stream_path.write_text(
+        json.dumps(
+            {
+                "ts": "2026-03-18T10:04:30Z",
+                "seq": 1,
+                "thread_id": "thread_001",
+                "task_id": "task_run",
+                "backend": "codex",
+                "backend_transport": "sdk",
+                "kind": "assistant.delta",
+                "delta": "still working",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    health = derive_thread_health(thread, host_alive=True, task_root=tmp_path, now="2026-03-18T10:05:01")
+
+    assert health.status == "normal"
+    assert health.last_progress_at == "2026-03-18T10:04:30Z"

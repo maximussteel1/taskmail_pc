@@ -19,11 +19,16 @@ _INT_FIELDS = {
     "imap_port",
     "smtp_port",
     "poll_seconds",
+    "imap_idle_renew_seconds",
     "default_timeout_minutes",
-    "max_concurrent_runs",
+    "max_active_sessions",
+    "max_active_sessions_per_workspace",
     "monitor_window_refresh_seconds",
+    "monitor_window_buffer_lines",
+    "monitor_window_history_limit",
     "external_delivery_threshold_mb",
     "cos_presign_expire_seconds",
+    "relay_timeout_seconds",
 }
 
 _FLOAT_FIELDS = {
@@ -34,6 +39,8 @@ _BOOL_FIELDS = {
     "auto_create_workdir",
     "enable_web_search",
     "spawn_monitor_windows",
+    "relay_verify_tls",
+    "relay_auto_fallback_email",
 }
 
 _MAP_FIELDS = {
@@ -52,6 +59,8 @@ class AppConfig:
     imap_port: int = 993
     imap_user: str = ""
     imap_password: str = ""
+    imap_receive_mode: str = "auto"
+    imap_idle_renew_seconds: int = 25 * 60
     smtp_host: str = ""
     smtp_port: int = 465
     smtp_user: str = ""
@@ -59,16 +68,28 @@ class AppConfig:
     poll_seconds: int = 30
     task_root: str = "tasks"
     default_timeout_minutes: int = 60
-    max_concurrent_runs: int = 2
+    max_active_sessions: int = 4
+    max_active_sessions_per_workspace: int = 2
     auto_create_workdir: bool = False
     enable_web_search: bool = False
     spawn_monitor_windows: bool = False
     monitor_window_refresh_seconds: int = 5
+    monitor_window_buffer_lines: int = 1000
+    monitor_window_history_limit: int = 12
     opencode_command: str = ""
     codex_command: str = ""
     codex_transport_default: str = BACKEND_TRANSPORT_SDK
     codex_sdk_sidecar_command: str = ""
     codex_sdk_sidecar_workdir: str = ""
+    outbound_transport: str = "email"
+    relay_url: str = ""
+    relay_transport_token: str = ""
+    relay_client_id: str = "pc-local"
+    relay_client_version: str = "0.1.0-dev"
+    relay_timeout_seconds: int = 15
+    relay_verify_tls: bool = True
+    relay_ca_file: str = ""
+    relay_auto_fallback_email: bool = False
     from_name: str = "Mail Runner"
     from_addr: str = ""
     mock_sleep_seconds: float = 1.0
@@ -132,6 +153,16 @@ def _coerce_value(field_name: str, value: Any) -> Any:
         if normalized not in {BACKEND_TRANSPORT_CLI, BACKEND_TRANSPORT_SDK}:
             raise ValueError("codex_transport_default must be either 'cli' or 'sdk'")
         return normalized
+    if field_name == "imap_receive_mode":
+        normalized = str(value).strip().lower()
+        if normalized not in {"auto", "poll", "idle"}:
+            raise ValueError("imap_receive_mode must be one of 'auto', 'poll', or 'idle'")
+        return normalized
+    if field_name == "outbound_transport":
+        normalized = str(value).strip().lower()
+        if normalized not in {"email", "relay"}:
+            raise ValueError("outbound_transport must be either 'email' or 'relay'")
+        return normalized
     return str(value)
 
 
@@ -155,13 +186,19 @@ def load_config(path: str | None = None) -> AppConfig:
     for field_info in fields(AppConfig):
         field_name = field_info.name
         default_value = getattr(defaults, field_name)
+        legacy_field_name = "max_concurrent_runs" if field_name == "max_active_sessions" else None
         if field_name in data:
             values[field_name] = _coerce_value(field_name, data[field_name])
+        elif legacy_field_name and legacy_field_name in data:
+            values[field_name] = _coerce_value(field_name, data[legacy_field_name])
         else:
             values[field_name] = default_value
 
         env_name = f"{ENV_PREFIX}{field_name.upper()}"
+        legacy_env_name = f"{ENV_PREFIX}{legacy_field_name.upper()}" if legacy_field_name else None
         if field_name not in _MAP_FIELDS and env_name in os.environ:
             values[field_name] = _coerce_value(field_name, os.environ[env_name])
+        elif field_name not in _MAP_FIELDS and legacy_env_name and legacy_env_name in os.environ:
+            values[field_name] = _coerce_value(field_name, os.environ[legacy_env_name])
 
     return AppConfig(**values)

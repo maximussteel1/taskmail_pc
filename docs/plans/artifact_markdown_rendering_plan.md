@@ -1,4 +1,8 @@
 # Artifact Markdown Rendering Plan
+ 
+> Note: this document is retained as a renderer-layering reference.
+> The canonical scoped definition of Phase 9 now lives in `docs/plans/p9_html_mail_projection_plan.md`.
+> Current P9 scope is intentionally narrower: improve outbound mail HTML projection for Thunderbird/mobile reading while keeping Markdown and `text/plain` as the truth layers.
 
 > 文档层级：Layer 2（当前仓库改造计划）
 >

@@ -2,7 +2,7 @@
 
 ## Status
 
-- Date: 2026-03-18
+- Date: 2026-03-20
 - Scope: current `mail_based_task_manager` mail control plane
 - Role: canonical current protocol document for task mail ingress, reply routing, and user-visible mail actions
 
@@ -30,6 +30,21 @@ Mail 是当前唯一正式控制面，用于：
 - 系统始终从 `bot mailbox` 回复原发件人
 
 当前收件端不再把 `UNSEEN` 当成唯一消费条件；runner 会按 `INBOX` 的 IMAP UID 增量扫描，并在本地按 `UID` + `Message-ID` 去重。
+For the bot mailbox receive path, the host now also supports best-effort IMAP `IDLE` on servers that advertise it. `IDLE` is only used as a wake-up signal; the canonical fetch/dedupe path remains UID-based scanning. `IDLE` reads are bounded so a stalled long-lived socket cannot block the host loop indefinitely, and the host also forces a periodic full mailbox sync plus `IDLE` rebuild every 5 minutes; unsupported or unstable servers automatically fall back to polling.
+
+### 1.2 Outbound Transport Modes
+
+Current outbound delivery now supports two transport modes:
+
+- `email`: the PC sends the user-facing status mail directly, which remains the default behavior
+- `relay`: the PC sends one outbound packet to the VPS relay, the VPS persists relay/session continuity for restart recovery, and the VPS sends the user-facing status mail via its own SMTP path
+
+Current relay boundary:
+
+- relay continuity is durable on the VPS (`packet` history, delivery attempts, and session continuity survive relay restart)
+- task execution truth still remains on the PC side
+- the Android-facing mail contract does not change when relay is enabled
+- when relay delivery fails and `relay_auto_fallback_email` is enabled, the PC may automatically fall back to direct `email` delivery in the same outbound flow
 
 ## 2. Authority
 
@@ -156,8 +171,10 @@ Mail 是当前唯一正式控制面，用于：
 
 - 普通 reply：继续当前 session
 - `/pause`
+- `/continue <session_id>`
 - `/resume`
 - `/end`
+- `/restart-runner`
 - `/new`
 - `/sessions`
 - `/status`
@@ -175,8 +192,8 @@ reply 正文中的结构化覆盖字段当前包括：
 
 当前边界：
 
-- `/sessions` 仅为只读信息入口
-- 当前没有显式 session switch 协议
+- `/sessions` 仍是当前 workspace 的发现入口，并会提供可复制的 targeted command 提示
+- 当前支持显式 same-workspace session targeting，但不支持 cross-workspace switching
 - `/pause` 只暂停邮件控制面的后续 continuation，不暂停已经在跑的底层 CLI 进程；对 `accepted/running` 线程应提示用户等待或使用 `/kill`
 - `/end` 只对非运行中的 thread/session 生效；它只把当前 thread/session 的 lifecycle 改成 `ended`，不改写上一轮 `done` / `failed` / `killed` / `paused` 结果；对 `accepted/running` 线程应提示用户等待或先 `/kill`
 - thread 进入 `paused` 后，普通 reply 不会隐式恢复；需要显式 `/resume`
@@ -185,6 +202,16 @@ reply 正文中的结构化覆盖字段当前包括：
   - `/resume` 带答案：按正常 answer flow 继续解析；答不全则保持 `[QUESTION]`
 - 若 `paused` 线程没有 pending question set：
   - `/resume` 恢复为普通 continuation / native resume 语义
+
+Current targeted routing update:
+
+- same-workspace explicit session targeting is now supported for `/status <session_id>`, `/last <session_id>`, `/continue <session_id>`, `/pause <session_id>`, `/resume <session_id>`, `/end <session_id>`, and `/kill <session_id>`
+- `/sessions` remains the discovery entrypoint for the current workspace, but now also includes copyable targeted command hints
+- targeted command results continue on the target session's own mail chain instead of the invoking thread
+- cross-workspace switching and hidden title-based guessing remain unsupported
+- `/status` is a current-state query only: if the session is `running`, it reports `Summary: Running.` and uses `Reply:` to show the latest local assistant-visible output from the current live session; if no assistant output is available yet, it replies with `Reply: No assistant output yet.`; if the session is not `running`, it explicitly says so and reports the current local thread state instead of replaying the previous run result
+- `/last` is a local last-result query only: it returns the latest persisted result for the session without starting a new backend run
+- `/restart-runner` is a local hosted-loop control command: it does not call the backend, it queues a local runner restart request, and the current Windows host schedules that restart through an external detached launcher so the control mail itself does not kill the host inline
 
 ## 6. Waiting-State Protocol
 
@@ -278,7 +305,7 @@ reply 正文中的结构化覆盖字段当前包括：
 当前与代码实现一致的主要缺口：
 
 - 非 reply 新邮件仍不会按 `workspace + title` 自动复用已有 session
-- `/sessions` 仍是只读列表，不提供显式 session targeting / switching
+- 显式 session targeting 目前只支持 same-workspace command routing；cross-workspace switching 和非 reply reuse 仍未实现
 
 当前已经固定下来的真实邮箱 acceptance：
 

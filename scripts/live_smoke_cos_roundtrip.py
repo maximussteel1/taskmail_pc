@@ -13,9 +13,12 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from qcloud_cos import CosConfig, CosS3Client
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from mail_runner.external_delivery import _build_cos_client
 
 
 def _timestamp_slug() -> str:
@@ -132,14 +135,7 @@ def main() -> int:
         "cleanup_deleted": False,
     }
 
-    client = CosS3Client(
-        CosConfig(
-            Region=cos_config["region"],
-            SecretId=cos_config["secret_id"],
-            SecretKey=cos_config["secret_key"],
-            Scheme="https",
-        )
-    )
+    client = _build_cos_client(cos_config)
 
     source_sha256 = _sha256(source_path)
     summary["source_sha256"] = source_sha256
@@ -164,7 +160,8 @@ def main() -> int:
         )
         summary["download_url"] = download_url
 
-        with urllib.request.urlopen(download_url) as response:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(download_url) as response:
             payload = response.read()
             downloaded_path.write_bytes(payload)
             summary["download_http_status"] = getattr(response, "status", None)

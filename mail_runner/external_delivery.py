@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+import requests
 import yaml
 
 from .config import AppConfig, PROJECT_ROOT
@@ -54,13 +55,22 @@ def _resolve_cos_settings(config: AppConfig) -> dict[str, str] | None:
 def _build_cos_client(settings: dict[str, str]) -> Any:
     from qcloud_cos import CosConfig, CosS3Client
 
+    # COS external delivery should use direct network access and not inherit
+    # ambient HTTP(S) proxy settings from the host environment.
+    session = requests.session()
+    session.trust_env = False
+    session.mount("http://", requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10))
+    session.mount("https://", requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10))
+
     return CosS3Client(
         CosConfig(
             Region=settings["region"],
             SecretId=settings["secret_id"],
             SecretKey=settings["secret_key"],
             Scheme="https",
-        )
+            Proxies={},
+        ),
+        session=session,
     )
 
 

@@ -3,22 +3,25 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 
 from ..config import AppConfig, PROJECT_ROOT
-from ..models import RunResult, TaskSnapshot
+from ..models import QuestionItem, RunResult, TaskSnapshot
 from ..run_result_capsule import parse_run_result_capsule, strip_run_result_capsules
+from ..state_capsule import parse_question_capsules
 from ..status import (
+    RUN_STATUS_AWAITING_USER_INPUT,
     RUN_STATUS_FAILED,
     RUN_STATUS_KILLED,
     RUN_STATUS_SUCCESS,
 )
-from ..stream_events import STREAM_EVENTS_FILENAME
+from ..stream_events import STREAM_EVENTS_FILENAME, load_stream_events
 from .base import WorkerAdapter
 from .cli_common import (
     WINDOWS,
@@ -27,6 +30,7 @@ from .cli_common import (
     extract_error_excerpt,
     extract_output_block,
     extract_summary_line,
+    normalize_log_text,
     prepare_task_cwd,
     render_task_input,
     split_command_text,
@@ -39,6 +43,9 @@ _DEFAULT_PROXY_ENV = {
     "ALL_PROXY": "http://127.0.0.1:10809",
     "NO_PROXY": "localhost,127.0.0.1,::1",
 }
+_COMMUNICATE_POLL_SECONDS = 5.0
+_TERMINAL_CLEANUP_GRACE_SECONDS = 15.0
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -47,8 +54,106 @@ class _ActiveSidecarProcess:
     kill_requested: bool = False
 
 
+@dataclass(slots=True)
+class _TerminalStreamSnapshot:
+    kind: str
+    event_ts: str
+    sdk_thread_id: str | None
+    final_response: str
+    failure_message: str | None
+    usage: object | None
+    item_count: int
+
+
 def _timestamp() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
+
+
+def _parse_event_timestamp(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _terminal_snapshot_is_stale(snapshot: _TerminalStreamSnapshot, grace_seconds: float) -> bool:
+    event_time = _parse_event_timestamp(snapshot.event_ts)
+    if event_time is None:
+        return False
+    return (datetime.now(timezone.utc) - event_time).total_seconds() >= grace_seconds
+
+
+def _last_nonempty_assistant_text(events: list[object]) -> str:
+    for event in reversed(events):
+        if getattr(event, "kind", None) not in {"assistant.completed", "assistant.delta"}:
+            continue
+        text = str(getattr(event, "text", "") or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _pending_questions_from_text(text: str, *, task_id: str) -> tuple[list[QuestionItem], dict[str, object] | None]:
+    question_blocks = parse_question_capsules(normalize_log_text(text))
+    pending_questions = [
+        QuestionItem(
+            question_set_id=str(
+                block.get("question_set_id")
+                or block.get("question_id")
+                or f"question_{task_id}"
+            ),
+            question_id=str(block.get("question_id") or f"question_{index + 1}"),
+            question_type=str(block.get("question_type") or ("single_choice" if block.get("choices") else "short_text")),
+            question_text=str(block.get("question_text") or ""),
+            required=bool(block.get("required", True)),
+            choices=list(block.get("choices", [])),
+            choice_labels=dict(block.get("choice_labels", {})),
+        )
+        for index, block in enumerate(question_blocks)
+        if str(block.get("question_text") or "").strip()
+    ]
+    return pending_questions, (question_blocks[-1] if question_blocks else None)
+
+
+def _load_terminal_snapshot(path: Path) -> _TerminalStreamSnapshot | None:
+    try:
+        events = load_stream_events(path)
+    except Exception:
+        return None
+    if not events:
+        return None
+
+    terminal_event = next((event for event in reversed(events) if event.kind in {"turn.completed", "turn.failed"}), None)
+    if terminal_event is None:
+        return None
+
+    final_response = _last_nonempty_assistant_text(events)
+    sdk_thread_id = str(terminal_event.payload.get("sdk_thread_id") or "").strip() or None
+    if sdk_thread_id is None:
+        for event in reversed(events):
+            candidate = str(event.payload.get("sdk_thread_id") or "").strip()
+            if candidate:
+                sdk_thread_id = candidate
+                break
+    usage = terminal_event.payload.get("usage") if terminal_event.kind == "turn.completed" else None
+    failure_message = (terminal_event.text or "").strip() or None
+    item_count = sum(1 for event in events if event.status == "completed")
+    return _TerminalStreamSnapshot(
+        kind=terminal_event.kind,
+        event_ts=terminal_event.ts,
+        sdk_thread_id=sdk_thread_id,
+        final_response=final_response,
+        failure_message=failure_message,
+        usage=usage,
+        item_count=item_count,
+    )
 
 
 class CodexSdkAdapter(WorkerAdapter):
@@ -137,9 +242,55 @@ class CodexSdkAdapter(WorkerAdapter):
             )
             with self._lock:
                 self._active_processes[task.task_id] = _ActiveSidecarProcess(process=process)
-            raw_stdout, raw_stderr = process.communicate(
-                json.dumps(request, ensure_ascii=False) + "\n",
-            )
+            communicate_input: str | None = json.dumps(request, ensure_ascii=False) + "\n"
+            raw_stdout = ""
+            raw_stderr = ""
+            recovered_payload: dict[str, object] | None = None
+            recovered_failure_message: str | None = None
+            while True:
+                try:
+                    raw_stdout, raw_stderr = process.communicate(
+                        communicate_input,
+                        timeout=_COMMUNICATE_POLL_SECONDS,
+                    )
+                    break
+                except subprocess.TimeoutExpired as exc:
+                    communicate_input = None
+                    raw_stdout = str(exc.stdout or raw_stdout or "")
+                    raw_stderr = str(exc.stderr or raw_stderr or "")
+                    terminal_snapshot = _load_terminal_snapshot(stream_events_path)
+                    if terminal_snapshot is None:
+                        continue
+                    if not _terminal_snapshot_is_stale(terminal_snapshot, _TERMINAL_CLEANUP_GRACE_SECONDS):
+                        continue
+                    LOGGER.warning(
+                        "Codex SDK sidecar cleanup timed out after terminal event. "
+                        "task_id=%s pid=%s event=%s event_ts=%s",
+                        task.task_id,
+                        process.pid,
+                        terminal_snapshot.kind,
+                        terminal_snapshot.event_ts,
+                    )
+                    self._terminate_process_tree(process)
+                    timeout_note = (
+                        "Codex SDK sidecar did not exit after terminal event "
+                        f"{terminal_snapshot.kind} at {terminal_snapshot.event_ts}; "
+                        f"task_id={task.task_id}; pid={process.pid}; forced shutdown.\n"
+                    )
+                    raw_stderr = timeout_note + raw_stderr
+                    if terminal_snapshot.kind == "turn.completed":
+                        recovered_payload = {
+                            "thread_id": terminal_snapshot.sdk_thread_id,
+                            "final_response": terminal_snapshot.final_response,
+                            "usage": terminal_snapshot.usage,
+                            "item_count": terminal_snapshot.item_count,
+                            "recovered_from_terminal_stream": True,
+                        }
+                    else:
+                        recovered_failure_message = (
+                            terminal_snapshot.failure_message or "Codex SDK turn failed before sidecar shutdown."
+                        )
+                    break
             with self._lock:
                 active = self._active_processes.pop(task.task_id, None)
             killed = bool(active and active.kill_requested)
@@ -182,7 +333,45 @@ class CodexSdkAdapter(WorkerAdapter):
                     backend_transport=task.backend_transport,
                 )
 
-            if process.returncode != 0:
+            if recovered_failure_message is not None:
+                stdout_path.write_text("", encoding="utf-8")
+                stderr_path.write_text(raw_stderr or (recovered_failure_message + "\n"), encoding="utf-8")
+                error_message = recovered_failure_message
+                write_summary(
+                    path=summary_path,
+                    summary_line=error_message,
+                    backend_label="Codex SDK",
+                    command_text=" ".join(command),
+                    cwd=cwd,
+                    exit_code=1,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    stdout_path=stdout_path,
+                    stderr_path=stderr_path,
+                    error_message=error_message,
+                )
+                return RunResult(
+                    task_id=task.task_id,
+                    thread_id=task.thread_id,
+                    backend=task.backend,
+                    status=RUN_STATUS_FAILED,
+                    exit_code=1,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    stdout_file=stdout_path.relative_to(thread_dir).as_posix(),
+                    stderr_file=stderr_path.relative_to(thread_dir).as_posix(),
+                    summary_file=summary_path.relative_to(thread_dir).as_posix(),
+                    artifacts_dir=f"runs/{task.task_id}/artifacts",
+                    changed_files=[],
+                    tests_passed=None,
+                    error_type="terminal_cleanup_timeout",
+                    error_message=error_message,
+                    backend_session_id=task.backend_session_id,
+                    backend_session_resumable=bool(task.backend_session_id),
+                    backend_transport=task.backend_transport,
+                )
+
+            if recovered_payload is None and process.returncode != 0:
                 stdout_path.write_text("", encoding="utf-8")
                 stderr_path.write_text(raw_stderr, encoding="utf-8")
                 error_message = extract_error_excerpt(raw_stderr, raw_stdout) or (
@@ -222,7 +411,7 @@ class CodexSdkAdapter(WorkerAdapter):
                     backend_transport=task.backend_transport,
                 )
 
-            payload = json.loads(raw_stdout or "{}")
+            payload = recovered_payload if recovered_payload is not None else json.loads(raw_stdout or "{}")
             if not isinstance(payload, dict):
                 raise ValueError("Codex SDK sidecar returned a non-object payload")
             sidecar_response_path.write_text(
@@ -232,9 +421,32 @@ class CodexSdkAdapter(WorkerAdapter):
             final_response = str(payload.get("final_response") or "").strip()
             structured_result = parse_run_result_capsule(final_response)
             visible_response = strip_run_result_capsules(final_response)
+            pending_questions, question_block = _pending_questions_from_text(final_response, task_id=task.task_id)
             stdout_path.write_text((visible_response + "\n") if visible_response else "", encoding="utf-8")
             stderr_path.write_text(raw_stderr, encoding="utf-8")
-            summary_line = extract_summary_line(visible_response) or "Codex SDK turn completed successfully."
+            if pending_questions:
+                status = RUN_STATUS_AWAITING_USER_INPUT
+                question_id = str(question_block.get("question_id") or "").strip() or None
+                question_text = str(question_block.get("question_text") or "").strip() or None
+                pending_choices = list(question_block.get("choices", []))
+                question_set_id = (
+                    str(question_block.get("question_set_id") or "").strip()
+                    or pending_questions[0].question_set_id
+                )
+                changed_files: list[str] = []
+                tests_passed = None
+                summary_line = question_text or "Codex SDK is awaiting user input."
+                primary_output = None
+            else:
+                status = RUN_STATUS_SUCCESS
+                question_id = None
+                question_text = None
+                pending_choices = []
+                question_set_id = None
+                changed_files = list(structured_result.changed_files) if structured_result else []
+                tests_passed = structured_result.tests_passed if structured_result else None
+                summary_line = extract_summary_line(visible_response) or "Codex SDK turn completed successfully."
+                primary_output = extract_output_block(visible_response)
             write_summary(
                 path=summary_path,
                 summary_line=summary_line,
@@ -247,14 +459,14 @@ class CodexSdkAdapter(WorkerAdapter):
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
                 error_message=None,
-                primary_output=extract_output_block(visible_response),
+                primary_output=primary_output,
             )
             thread_id = str(payload.get("thread_id") or task.backend_session_id or "").strip() or None
             return RunResult(
                 task_id=task.task_id,
                 thread_id=task.thread_id,
                 backend=task.backend,
-                status=RUN_STATUS_SUCCESS,
+                status=status,
                 exit_code=0,
                 started_at=started_at,
                 finished_at=finished_at,
@@ -262,10 +474,15 @@ class CodexSdkAdapter(WorkerAdapter):
                 stderr_file=stderr_path.relative_to(thread_dir).as_posix(),
                 summary_file=summary_path.relative_to(thread_dir).as_posix(),
                 artifacts_dir=f"runs/{task.task_id}/artifacts",
-                changed_files=list(structured_result.changed_files) if structured_result else [],
-                tests_passed=structured_result.tests_passed if structured_result else None,
+                changed_files=changed_files,
+                tests_passed=tests_passed,
                 error_type=None,
                 error_message=None,
+                question_id=question_id,
+                question_text=question_text,
+                pending_choices=pending_choices,
+                question_set_id=question_set_id,
+                pending_questions=pending_questions,
                 backend_session_id=thread_id,
                 backend_session_resumable=bool(thread_id),
                 backend_transport=task.backend_transport,
@@ -379,3 +596,23 @@ class CodexSdkAdapter(WorkerAdapter):
             if not env.get(name, "").strip():
                 env[name] = value
         return env
+
+    def _terminate_process_tree(self, process: subprocess.Popen[str]) -> None:
+        if process.poll() is not None:
+            return
+        if WINDOWS:
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        else:
+            try:
+                process.kill()
+            except Exception:
+                pass
+        try:
+            process.wait(timeout=5)
+        except Exception:
+            pass

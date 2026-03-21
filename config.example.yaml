@@ -11,11 +11,14 @@ smtp_password: your_smtp_password
 poll_seconds: 30
 task_root: tasks
 default_timeout_minutes: 60
-max_concurrent_runs: 2
+max_active_sessions: 4
+max_active_sessions_per_workspace: 2
 auto_create_workdir: false
 enable_web_search: false
 spawn_monitor_windows: false
 monitor_window_refresh_seconds: 5
+monitor_window_buffer_lines: 1000
+monitor_window_history_limit: 12
 mock_sleep_seconds: 1.0
 project_sync_roots:
   - D:\projects
@@ -34,6 +37,18 @@ opencode_profile_models:
 codex_profile_models:
   fast: gpt-5-mini
   strong: gpt-5-codex
+# Outbound delivery transport.
+# `email` keeps the current direct-PC behavior.
+# `relay` pushes one outbound packet to the VPS relay and lets the VPS send the user-facing mail.
+outbound_transport: email
+relay_url: ""
+relay_transport_token: ""
+relay_client_id: pc-local
+relay_client_version: 0.1.0-dev
+relay_timeout_seconds: 15
+relay_verify_tls: true
+relay_ca_file: ""
+relay_auto_fallback_email: false
 from_name: Mail Runner
 from_addr: runner@example.com
 # Optional COS delivery for oversized artifacts.

@@ -2,9 +2,9 @@
 
 ## Status
 
-- Date: 2026-03-18
+- Date: 2026-03-19
 - Scope: canonical next-phase development plan for `mail_based_task_manager`
-- Source of truth: `docs/current/*`, `docs/plans/mail_adapter_refactor_plan.md`, `docs/plans/backend_permission_control_plan.md`, `state.md`
+- Source of truth: `docs/current/*`, `docs/plans/p9_html_mail_projection_plan.md`, `docs/plans/pc_outbound_layering_refactor_plan.md`, `docs/plans/android_consumer_contract_alignment_plan.md`, `docs/plans/android_consumer_protocol_freeze_note.md`, `docs/plans/outbound_mail_baseline_delta_checklist.md`, `docs/plans/outbound_mail_contract_convergence_plan.md`, `state.md`
 - Implementation progress:
   - P1 (`Codex SDK` continuous sessions) is landed in code.
   - P2 (`active <= 4` with oldest-session auto-end) is landed in code.
@@ -12,7 +12,12 @@
   - P4 (thread lifecycle axis with explicit `/end`) is landed in code.
   - P5 (health status plus stale/stuck/orphaned visibility) is landed in code.
   - P6 (split live-mail retention for progress/action-required/receipt mail) is landed in code.
-  - `P7` is complete in code, tests, and fixed live acceptance evidence. The next coding step now requires a fresh prioritization decision around session targeting / routing UX.
+  - `P7` is complete in code, tests, and fixed live acceptance evidence.
+  - `P8` first-round same-workspace explicit session targeting / routing UX is landed in code; cross-workspace routing and non-reply reuse remain open. Detailed execution plan: `docs/plans/p8_session_targeting_plan.md`.
+  - `P9` repo-side HTML projection work is partially landed in code and tests. The remaining Android/client acceptance work, plus any further P9 HTML-scope expansion, is temporarily frozen. Detailed status lives in `docs/plans/p9_html_mail_projection_plan.md`.
+  - The Android/Thunderbird-facing outbound consumer contract remains frozen, but `P9` itself is not the current active implementation slice while that freeze is in effect.
+  - The current active repo-side next step for this area is `docs/plans/pc_outbound_layering_refactor_plan.md`: split the outbound path into render / packet / transport layers without changing the Android-facing contract.
+  - Broader renderer and outbound-model convergence remains staged later in `docs/plans/outbound_mail_contract_convergence_plan.md`.
 - Merged inputs:
   - `docs/archive/thread_management_user_rules_legacy.md`
   - `docs/archive/thread_management_state_model_plan_legacy.md`
@@ -21,22 +26,34 @@
 
 本文件取代旧的分散式 backlog 口径，作为当前仓库**唯一的下一阶段开发顺序**。
 
-当前优先级已经重新收口为：
+在现有 P1-P8 已落地后，当前关于 outbound/transport 这条线的口径调整为：
 
-1. 先把文档工程整理干净
-2. 再以 SDK 方式拉起 Codex，获得真正连续的线程会话
-3. 第一轮就加上 `active` 会话数上限 `4`
-4. 然后再继续线程生命周期、卡死判断和邮件保留语义收口
+1. 保留已经落地的 P9 仓库侧实现与回归测试。
+2. 将 P9 剩余工作明确标记为暂时冻结，不继续扩写 HTML 范围。
+3. 当前 active 实施线切到 `docs/plans/pc_outbound_layering_refactor_plan.md`，先做仓库内 render / packet / transport 分层。
+4. Android 与 PC 两个项目继续并行推进，但不修改当前通讯协议。
+5. 如需重启 P9，先补 Android/Thunderbird 验收与 closeout，再决定是否继续。
+6. neutral outbound model、summary-first plain text、subject-shape cutover 仍保持后置，不因 P9 冻结而自动提前启动。
+
+## Current Outbound Sequencing
+
+- Current consumer-facing authority lives in `docs/current/pc_mail_output_protocol.md` and `docs/current/multimedia_mail_protocol.md`.
+- `docs/plans/android_consumer_contract_alignment_plan.md` and `docs/plans/android_consumer_protocol_freeze_note.md` define the immediate sequencing and the contract details that should stay stable while Android lands its controlled rich-text reader.
+- `docs/plans/p9_html_mail_projection_plan.md` records the partially landed repo-side slice, but P9 is currently frozen and should not be treated as the active implementation queue.
+- `docs/plans/pc_outbound_layering_refactor_plan.md` is the active repository-side implementation plan while P9 remains frozen; it changes internal PC boundaries only and leaves the Android-facing contract untouched.
+- `docs/plans/outbound_mail_contract_convergence_plan.md` remains the post-P9 path for neutral outbound models, summary-first plain text, fragment-wrapper cleanup, and subject-shape compatibility work; it is not auto-promoted just because P9 is frozen.
+- Subject-shape cutover, internal `TaskRunPacket` / neutral-model shape, and other broader convergence items remain explicitly off the current path.
 
 ## Constraints
 
 后续开发必须遵守以下约束：
 
-1. 不影响当前正在使用的工作进程。
-2. 第一轮实现优先采用**并行新增**，而不是替换现有 CLI 路径。
-3. 当前 `CodexAdapter` CLI 路径保留为 fallback，不在第一轮强制移除。
-4. 不要求迁移已有 in-flight thread 才能开始第一轮工作。
-5. 这是自用系统，active 会话数超限时允许采用简单、确定性的策略。
+1. 不影响当前已经落地的工作进程、reply 语义和现有 mailbox loop。
+2. `text/plain` 继续作为 reply/parsing truth source，HTML 只做 reading projection。
+3. 不把 mail-specific 字段塞回 `artifact_index.json` 或其他 artifact truth layer。
+4. P9 当前处于冻结状态；如后续重启，必须继续按已冻结的 consumer-facing contract 实施，不把 broader convergence 抢到前面。
+5. subject-shape cutover、neutral outbound model、summary-first plain text 继续后置到 broader convergence。
+6. 当前分步实现只做仓库内重构，不改 Android 通讯协议；两个项目可以并行推进。
 
 ## Agreed Decisions
 
@@ -299,26 +316,62 @@ Detailed implementation plan: `docs/plans/p5_p6_health_and_mail_retention_plan.m
 - artifact index + Markdown 渲染进一步收口
 - 其余 adapter 通道的长期统一
 
+## P9: HTML Mail Projection For Thunderbird Reading
+
+Detailed execution plan: `docs/plans/p9_html_mail_projection_plan.md`.
+
+Related contract inputs:
+
+- `docs/current/pc_mail_output_protocol.md`
+- `docs/current/multimedia_mail_protocol.md`
+- `docs/plans/android_consumer_contract_alignment_plan.md`
+- `docs/plans/android_consumer_protocol_freeze_note.md`
+
+### Goal
+
+Keep Markdown as the canonical authored body and keep `text/plain` as the reply/parsing truth source, while improving outbound `text/html` so Thunderbird/mobile clients can use it as the primary reading surface.
+
+### Scope
+
+- Improve status-mail HTML readability for Thunderbird/mobile clients.
+- Continue sending `multipart/alternative` with both `text/plain` and `text/html`.
+- Reuse the existing Markdown-to-HTML projection plus CID inline image path.
+- Keep artifact truth and `artifact_index.json` unchanged.
+- Treat the already frozen Android/Thunderbird consumer contract as input, not as open redesign scope.
+
+### Explicitly Not In P9
+
+- Do not make `text/html` the only truth source.
+- Do not change Android reply parsing to depend on HTML.
+- Do not push mail-specific fields such as `cid:` into `artifact_index.json`.
+- Do not expand P9 into a larger cross-channel renderer rewrite.
+- Do not pull summary-first plain text or neutral outbound-model convergence into P9.
+
 ## Explicitly Deprioritized
 
-以下事项当前不应插队到 P1 之前：
+以下事项当前不应插队到 P9 之前：
 
-- 先做完整 thread lifecycle 控制面，再补连续会话
-- 先做按标题自动复用 session
-- 先做完整桌面 UI
-- 先做平台级 memory / tool registry 对接
-- 先做复杂 active-session 配额交互
+- 先做 neutral outbound model 或 `TaskRunPacket` 形状收敛
+- 先做 summary-first plain text 改写
+- 先做 subject-shape cutover
+- 先做完整桌面 UI 或平台级 memory / tool registry 对接
+- 先把 cross-workspace routing、non-reply reuse policy 等更宽的线程 UX 问题并入当前 outbound workstream
 
 ## Canonical Inputs Before Coding
 
 开始下一轮编码前，优先阅读：
 
 1. `docs/current/mail_protocol.md`
-2. `docs/current/session_scheduler_status.md`
-3. `docs/plans/coding_backlog.md`
-4. `docs/plans/mail_adapter_refactor_plan.md`
-5. `docs/plans/backend_permission_control_plan.md`
-6. `state.md`
+2. `docs/current/multimedia_mail_protocol.md`
+3. `docs/current/pc_mail_output_protocol.md`
+4. `docs/current/session_scheduler_status.md`
+5. `docs/plans/coding_backlog.md`
+6. `docs/plans/p9_html_mail_projection_plan.md`
+7. `docs/plans/android_consumer_contract_alignment_plan.md`
+8. `docs/plans/android_consumer_protocol_freeze_note.md`
+9. `docs/plans/outbound_mail_baseline_delta_checklist.md`
+10. `docs/plans/outbound_mail_contract_convergence_plan.md`
+11. `state.md`
 
 ## Coding Guardrails
 
@@ -336,5 +389,6 @@ Detailed implementation plan: `docs/plans/p5_p6_health_and_mail_retention_plan.m
 
 - 只剩一份 canonical next-phase plan：本文件
 - 文档索引与优先级口径一致
-- SDK-first、`active <= 4`、`[DONE]` 保留这三条核心方向已经被明确固定
+- outbound consumer contract freeze、P9 按当前仓库侧进度冻结、PC outbound layering refactor 作为 active 实施线 这三条当前核心顺序已经被明确固定
+- neutral outbound model、summary-first plain text、subject-shape cutover 已被明确后置到 broader convergence 计划
 - thread-management 临时草案已归档，不再与主计划并列

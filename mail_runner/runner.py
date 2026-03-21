@@ -117,20 +117,22 @@ class _QueuedRun:
 
 
 class SerialTaskRunner:
-    """Coordinates one local task at a time."""
+    """Coordinates local execution with per-workspace caps and a shared active-session cap."""
 
     def __init__(
         self,
         task_root: str | Path,
         dispatcher: Dispatcher,
-        max_concurrent_runs: int = 2,
+        max_active_sessions: int = 4,
+        max_active_sessions_per_workspace: int = 2,
         codex_transport_default: str = "sdk",
         recovery_callback_factory: RecoveryCallbackFactory | None = None,
         monitor_window_manager: MonitorWindowManager | None = None,
     ) -> None:
         self.workspace = WorkspaceManager(task_root)
         self.dispatcher = dispatcher
-        self.max_concurrent_runs = max(1, int(max_concurrent_runs))
+        self.max_active_sessions = max(1, int(max_active_sessions))
+        self.max_active_sessions_per_workspace = max(1, int(max_active_sessions_per_workspace))
         self.codex_transport_default = codex_transport_default
         self._recovery_callback_factory = recovery_callback_factory
         self._monitor_window_manager = monitor_window_manager
@@ -318,6 +320,21 @@ class SerialTaskRunner:
             return False
         return self.dispatcher.kill(active.snapshot.backend, task_id)
 
+    def kill_thread(self, thread_id: str, *, expected_task_id: str | None = None) -> bool:
+        with self._lock:
+            active = next(
+                (
+                    item
+                    for item in self._active_runs.values()
+                    if item.snapshot.thread_id == thread_id
+                    and (expected_task_id is None or item.snapshot.task_id == expected_task_id)
+                ),
+                None,
+            )
+        if active is None:
+            return False
+        return self.dispatcher.kill(active.snapshot.backend, active.snapshot.task_id)
+
     def is_busy(self) -> bool:
         with self._lock:
             return bool(self._active_runs) or bool(self._queued_runs)
@@ -349,16 +366,23 @@ class SerialTaskRunner:
         started = False
         while True:
             with self._lock:
-                if len(self._active_runs) >= self.max_concurrent_runs or not self._queued_runs:
+                if len(self._active_runs) >= self.max_active_sessions or not self._queued_runs:
                     return started
-                active_workspace_ids = {
-                    active.state.workspace_id or build_workspace_id(active.snapshot.repo_path, active.snapshot.workdir)
-                    for active in self._active_runs.values()
-                }
+                active_workspace_counts: dict[str, int] = {}
+                active_thread_ids: set[str] = set()
+                for active in self._active_runs.values():
+                    active_thread_ids.add(active.snapshot.thread_id)
+                    workspace_id = active.state.workspace_id or build_workspace_id(
+                        active.snapshot.repo_path,
+                        active.snapshot.workdir,
+                    )
+                    active_workspace_counts[workspace_id] = active_workspace_counts.get(workspace_id, 0) + 1
                 candidate_index = None
                 for index, queued in enumerate(self._queued_runs):
+                    if queued.snapshot.thread_id in active_thread_ids:
+                        continue
                     workspace_id = build_workspace_id(queued.snapshot.repo_path, queued.snapshot.workdir)
-                    if workspace_id not in active_workspace_ids:
+                    if active_workspace_counts.get(workspace_id, 0) < self.max_active_sessions_per_workspace:
                         candidate_index = index
                         break
                 if candidate_index is None:
@@ -759,7 +783,8 @@ def main(argv: list[str] | None = None) -> int:
     runner = SerialTaskRunner(
         task_root,
         _build_dispatcher(config),
-        max_concurrent_runs=config.max_concurrent_runs,
+        max_active_sessions=config.max_active_sessions,
+        max_active_sessions_per_workspace=config.max_active_sessions_per_workspace,
         codex_transport_default=config.codex_transport_default,
     )
     try:

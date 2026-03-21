@@ -10,6 +10,8 @@ from mail_runner.mail_io import (
     MailClient,
     SYSTEM_MESSAGE_HEADER,
     SYSTEM_MESSAGE_HEADER_VALUE,
+    _IdleMailboxSession,
+    _IdleUnsupportedError,
     message_bytes_to_envelope,
 )
 from mail_runner.models import OutgoingAttachment
@@ -77,6 +79,77 @@ def test_message_bytes_to_envelope_preserves_utf8_chinese_headers_and_body() -> 
     assert envelope.subject == "[OC] 并发验证 A"
     assert envelope.raw_headers["From"] == "姜淳 <user@example.com>"
     assert "检查 app.py 和 runner.py 的关系。" in envelope.body_text
+
+
+def test_send_mail_preserves_html_alternative_and_inline_related_image(monkeypatch, tmp_path) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeSmtp:
+        def __init__(self, host: str, port: int) -> None:
+            captured["host"] = host
+            captured["port"] = port
+
+        def login(self, user: str, password: str) -> None:
+            captured["login"] = (user, password)
+
+        def send_message(self, message: EmailMessage) -> None:
+            captured["message"] = message
+
+        def quit(self) -> None:
+            captured["quit"] = True
+
+    monkeypatch.setattr("mail_runner.mail_io.smtplib.SMTP_SSL", FakeSmtp)
+
+    image_path = tmp_path / "preview.png"
+    image_path.write_bytes(b"fake-png")
+
+    client = MailClient(
+        AppConfig(
+            smtp_host="smtp.example.com",
+            smtp_port=465,
+            smtp_user="runner@example.com",
+            smtp_password="secret",
+            imap_host="imap.example.com",
+            imap_port=993,
+            imap_user="runner@example.com",
+            imap_password="secret",
+            from_name="Runner",
+        )
+    )
+
+    client.send_mail(
+        to_addr="user@example.com",
+        subject="[DONE] Demo",
+        body="Plain body",
+        html_body='<article class="task-mail"><section class="task-summary"><p>HTML body</p></section></article>',
+        attachments=[
+            OutgoingAttachment(
+                path=str(image_path),
+                name="preview.png",
+                content_type="image/png",
+                attach=True,
+                inline=True,
+                caption="Preview image",
+                content_id="preview-cid",
+            )
+        ],
+    )
+
+    message = captured["message"]
+    assert isinstance(message, EmailMessage)
+    content_types = [part.get_content_type() for part in message.walk()]
+    assert "multipart/alternative" in content_types
+    assert "multipart/related" in content_types
+    assert "text/plain" in content_types
+    assert "text/html" in content_types
+    html_part = message.get_body(("html",))
+    assert html_part is not None
+    assert 'article class="task-mail"' in html_part.get_content()
+    assert any(part.get("Content-ID") == "<preview-cid>" for part in message.walk())
+    assert any(
+        part.get_filename() == "preview.png" and part.get_content_disposition() == "attachment"
+        for part in message.walk()
+    )
 
 
 def test_fetch_unseen_messages_uses_uid_scan_and_skips_system_mail(monkeypatch, tmp_path) -> None:
@@ -247,6 +320,321 @@ def test_fetch_unseen_messages_skips_duplicate_message_ids_from_new_uids(monkeyp
     assert inbox_state["last_uid"] == 202
     assert inbox_state["processed_uids"] == ["201", "202"]
     assert inbox_state["processed_message_ids"] == ["<duplicate@example.com>"]
+
+
+def test_idle_mailbox_session_detects_exists_and_exits_cleanly() -> None:
+    class FakeImap:
+        def __init__(self, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+            self.sock = object()
+            self.sent: list[bytes] = []
+            self.lines: list[bytes] = []
+            self.current_tag = b""
+            self.logged_out = False
+
+        def login(self, user: str, password: str) -> tuple[str, list[bytes]]:
+            return "OK", [b""]
+
+        def capability(self) -> tuple[str, list[bytes]]:
+            return "OK", [b"IMAP4rev1 IDLE UIDPLUS"]
+
+        def select(self, mailbox: str) -> tuple[str, list[bytes]]:
+            return "OK", [b""]
+
+        def _new_tag(self) -> bytes:
+            self.current_tag = b"T1"
+            return self.current_tag
+
+        def send(self, data: bytes) -> None:
+            self.sent.append(data)
+            if data.endswith(b" IDLE\r\n"):
+                self.lines.append(b"+ idling")
+            elif data == b"DONE\r\n":
+                self.lines.append(self.current_tag + b" OK IDLE terminated")
+
+        def _get_line(self) -> bytes:
+            return self.lines.pop(0)
+
+        def logout(self) -> None:
+            self.logged_out = True
+
+        def shutdown(self) -> None:
+            self.logged_out = True
+
+    fake_imap = FakeImap("imap.example.com", 993)
+    select_calls = {"count": 0}
+
+    def fake_factory(host: str, port: int) -> FakeImap:
+        assert host == "imap.example.com"
+        assert port == 993
+        return fake_imap
+
+    def fake_select(readers, _writers, _errors, timeout):
+        assert readers == [fake_imap.sock]
+        assert timeout == 5.0
+        if select_calls["count"] == 0:
+            fake_imap.lines.append(b"* 9 EXISTS")
+        select_calls["count"] += 1
+        return readers, [], []
+
+    session = _IdleMailboxSession(
+        AppConfig(
+            imap_host="imap.example.com",
+            imap_port=993,
+            imap_user="user",
+            imap_password="pass",
+            smtp_host="smtp.example.com",
+            smtp_port=465,
+            smtp_user="user",
+            smtp_password="pass",
+            from_addr="runner@example.com",
+        ),
+        imap_factory=fake_factory,
+        select_fn=fake_select,
+        monotonic_fn=lambda: 0.0,
+    )
+
+    assert session.wait_for_event(5.0) is True
+    session.close()
+
+    assert fake_imap.sent == [b"T1 IDLE\r\n", b"DONE\r\n"]
+    assert fake_imap.logged_out is True
+
+
+def test_idle_mailbox_session_times_out_stalled_line_reads() -> None:
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.timeout = None
+            self.history: list[float | None] = []
+
+        def gettimeout(self):
+            return self.timeout
+
+        def settimeout(self, value) -> None:
+            self.timeout = value
+            self.history.append(value)
+
+    class FakeImap:
+        def __init__(self, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+            self.sock = FakeSocket()
+            self.sent: list[bytes] = []
+            self.lines: list[bytes] = []
+            self.current_tag = b""
+
+        def login(self, user: str, password: str) -> tuple[str, list[bytes]]:
+            return "OK", [b""]
+
+        def capability(self) -> tuple[str, list[bytes]]:
+            return "OK", [b"IMAP4rev1 IDLE UIDPLUS"]
+
+        def select(self, mailbox: str) -> tuple[str, list[bytes]]:
+            return "OK", [b""]
+
+        def _new_tag(self) -> bytes:
+            self.current_tag = b"T1"
+            return self.current_tag
+
+        def send(self, data: bytes) -> None:
+            self.sent.append(data)
+            if data.endswith(b" IDLE\r\n"):
+                self.lines.append(b"+ idling")
+
+        def _get_line(self) -> bytes:
+            if self.lines:
+                return self.lines.pop(0)
+            raise TimeoutError("simulated stalled readline")
+
+    fake_imap = FakeImap("imap.example.com", 993)
+
+    def fake_factory(host: str, port: int) -> FakeImap:
+        return fake_imap
+
+    def fake_select(readers, _writers, _errors, timeout):
+        assert readers == [fake_imap.sock]
+        return readers, [], []
+
+    session = _IdleMailboxSession(
+        AppConfig(
+            imap_host="imap.example.com",
+            imap_port=993,
+            imap_user="user",
+            imap_password="pass",
+            smtp_host="smtp.example.com",
+            smtp_port=465,
+            smtp_user="user",
+            smtp_password="pass",
+            from_addr="runner@example.com",
+        ),
+        imap_factory=fake_factory,
+        select_fn=fake_select,
+        monotonic_fn=lambda: 0.0,
+    )
+
+    try:
+        session.wait_for_event(1.0)
+        raise AssertionError("Expected stalled IMAP IDLE readline to time out.")
+    except RuntimeError as exc:
+        assert "timed out" in str(exc)
+
+    assert fake_imap.sock.history == [10.0, None, 1.0, None]
+
+
+def test_idle_mailbox_session_rejects_servers_without_idle() -> None:
+    class FakeImap:
+        def __init__(self, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+            self.logged_out = False
+
+        def login(self, user: str, password: str) -> tuple[str, list[bytes]]:
+            return "OK", [b""]
+
+        def capability(self) -> tuple[str, list[bytes]]:
+            return "OK", [b"IMAP4rev1 UIDPLUS"]
+
+        def logout(self) -> None:
+            self.logged_out = True
+
+        def shutdown(self) -> None:
+            self.logged_out = True
+
+    fake_imap = FakeImap("imap.example.com", 993)
+    session = _IdleMailboxSession(
+        AppConfig(
+            imap_host="imap.example.com",
+            imap_port=993,
+            imap_user="user",
+            imap_password="pass",
+            smtp_host="smtp.example.com",
+            smtp_port=465,
+            smtp_user="user",
+            smtp_password="pass",
+            from_addr="runner@example.com",
+        ),
+        imap_factory=lambda host, port: fake_imap,
+        select_fn=lambda *_args: ([], [], []),
+        monotonic_fn=lambda: 0.0,
+    )
+
+    try:
+        session.wait_for_event(1.0)
+        raise AssertionError("Expected IMAP IDLE to be rejected.")
+    except _IdleUnsupportedError:
+        pass
+
+    assert fake_imap.logged_out is True
+
+
+def test_mail_client_wait_for_new_messages_falls_back_after_idle_unsupported(monkeypatch) -> None:
+    slept: list[float] = []
+
+    class UnsupportedIdleClient(MailClient):
+        def _build_idle_session(self):
+            class UnsupportedSession:
+                def wait_for_event(self, timeout_seconds: float) -> bool:
+                    raise _IdleUnsupportedError("server does not support IDLE")
+
+                def close(self) -> None:
+                    return None
+
+            return UnsupportedSession()
+
+    monkeypatch.setattr("mail_runner.mail_io.time.sleep", slept.append)
+    monkeypatch.setattr("mail_runner.mail_io.time.monotonic", lambda: 10.0)
+
+    client = UnsupportedIdleClient(
+        AppConfig(
+            imap_host="imap.example.com",
+            imap_port=993,
+            imap_user="user",
+            imap_password="pass",
+            smtp_host="smtp.example.com",
+            smtp_port=465,
+            smtp_user="user",
+            smtp_password="pass",
+            from_addr="runner@example.com",
+            imap_receive_mode="auto",
+        )
+    )
+
+    assert client.wait_for_new_messages(0.5) is False
+    assert client.receive_mode() == "poll"
+    assert slept == [0.5]
+
+
+def test_mail_client_wait_for_new_messages_falls_back_after_idle_wait_failure(monkeypatch) -> None:
+    slept: list[float] = []
+    closed: list[str] = []
+
+    class FlakyIdleClient(MailClient):
+        def _build_idle_session(self):
+            class FlakySession:
+                def wait_for_event(self, timeout_seconds: float) -> bool:
+                    raise RuntimeError("IMAP IDLE read timed out after 1.0s")
+
+                def close(self) -> None:
+                    closed.append("closed")
+
+            return FlakySession()
+
+    monkeypatch.setattr("mail_runner.mail_io.time.sleep", slept.append)
+    monkeypatch.setattr("mail_runner.mail_io.time.monotonic", lambda: 10.0)
+
+    client = FlakyIdleClient(
+        AppConfig(
+            imap_host="imap.example.com",
+            imap_port=993,
+            imap_user="user",
+            imap_password="pass",
+            smtp_host="smtp.example.com",
+            smtp_port=465,
+            smtp_user="user",
+            smtp_password="pass",
+            from_addr="runner@example.com",
+            imap_receive_mode="auto",
+        )
+    )
+
+    assert client.wait_for_new_messages(0.5) is False
+    assert client._idle_retry_after_monotonic == 70.0
+    assert client._idle_session is None
+    assert closed == ["closed"]
+    assert slept == [0.5]
+
+
+def test_mail_client_wait_for_new_messages_forces_periodic_sync_and_rebuild(monkeypatch) -> None:
+    closed: list[str] = []
+
+    class ExistingIdleSession:
+        def close(self) -> None:
+            closed.append("closed")
+
+    monkeypatch.setattr("mail_runner.mail_io.time.monotonic", lambda: 300.0)
+
+    client = MailClient(
+        AppConfig(
+            imap_host="imap.example.com",
+            imap_port=993,
+            imap_user="user",
+            imap_password="pass",
+            smtp_host="smtp.example.com",
+            smtp_port=465,
+            smtp_user="user",
+            smtp_password="pass",
+            from_addr="runner@example.com",
+            imap_receive_mode="auto",
+        )
+    )
+    client._idle_session = ExistingIdleSession()
+    client._idle_force_sync_after_monotonic = 299.0
+
+    assert client.wait_for_new_messages(1.0) is True
+    assert client._idle_session is None
+    assert client._idle_force_sync_after_monotonic == 600.0
+    assert closed == ["closed"]
 
 
 def test_delete_messages_by_message_ids_searches_inbox_by_message_id(monkeypatch) -> None:

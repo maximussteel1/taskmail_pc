@@ -110,6 +110,8 @@ def test_monitor_window_manager_launches_focused_thread_window(tmp_path: Path) -
         config_path=project_root / "mail_config.bot.local.yaml",
         runtime_dir=project_root / "_tmp_live_mail_runner",
         refresh_seconds=9,
+        buffer_lines=640,
+        history_limit=24,
         launcher=launcher,
     )
 
@@ -123,6 +125,10 @@ def test_monitor_window_manager_launches_focused_thread_window(tmp_path: Path) -
     assert "thread_001" in command
     assert "-TaskRoot" in command
     assert str((tmp_path / "tasks").resolve()) in command
+    assert "-MaxBufferLines" in command
+    assert "640" in command
+    assert "-HistoryLimit" in command
+    assert "24" in command
     assert "-ExitWhenThreadNotRunning" in command
     assert "-WindowTitle" in command
     assert "Mail Runner Monitor thread_001" in command

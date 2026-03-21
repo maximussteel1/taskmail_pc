@@ -9,6 +9,8 @@ from mail_runner.status import BACKEND_OPENCODE, THREAD_STATUS_AWAITING_USER_INP
 
 def test_parse_action_identifies_explicit_status_rerun_and_kill_commands() -> None:
     assert parse_action({"reply_delta": "/status"}).action == "STATUS_QUERY"
+    assert parse_action({"reply_delta": "/last"}).action == "LAST_RESULT_QUERY"
+    assert parse_action({"reply_delta": "/restart-runner"}).action == "RESTART_RUNNER"
     assert parse_action({"reply_delta": "/rerun"}).action == "RERUN"
     assert parse_action({"reply_delta": "/kill"}).action == "KILL"
 
@@ -101,6 +103,27 @@ def test_parse_action_supports_resume_and_sessions_commands() -> None:
     assert resume.action == "CONTINUE_SESSION"
     assert resume.raw_user_text == "Please continue with the cleanup."
     assert sessions.action == "LIST_SESSIONS"
+
+
+def test_parse_action_supports_continue_command_with_target_session() -> None:
+    action = parse_action(
+        {
+            "reply_delta": "/continue thread_002\nPermission: highest\nTimeout: 120\nTask:\nOnly analyze the issue."
+        }
+    )
+
+    assert action.action == "CONTINUE_SESSION"
+    assert action.target_session_id == "thread_002"
+    assert action.permission == "highest"
+    assert action.timeout_minutes == 120
+    assert action.task_text_delta == "Only analyze the issue."
+
+
+def test_parse_action_supports_last_command_with_target_session() -> None:
+    action = parse_action({"reply_delta": "/last thread_002"})
+
+    assert action.action == "LAST_RESULT_QUERY"
+    assert action.target_session_id == "thread_002"
 
 
 def test_parse_action_supports_resume_with_structured_permission_override() -> None:

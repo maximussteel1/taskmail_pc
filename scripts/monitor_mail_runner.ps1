@@ -4,9 +4,12 @@ param(
     [string]$RuntimeDir = "",
     [string]$TaskRoot = "",
     [int]$RefreshSeconds = 5,
+    [int]$MaxBufferLines = 1000,
+    [int]$HistoryLimit = 12,
     [int]$Iterations = 0,
     [string]$ThreadId = "",
     [string]$WindowTitle = "",
+    [switch]$RequestKill,
     [switch]$ExitWhenThreadNotRunning,
     [switch]$NoClear
 )
@@ -47,10 +50,37 @@ function Invoke-ObserveCommand {
     return $output.TrimEnd("`r", "`n")
 }
 
+function Set-ConsoleBufferLimit {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$BufferLines
+    )
+
+    try {
+        $rawUi = $Host.UI.RawUI
+        $bufferSize = $rawUi.BufferSize
+        $windowSize = $rawUi.WindowSize
+        $targetHeight = [Math]::Max($BufferLines, $windowSize.Height)
+        $bufferSize.Width = [Math]::Max($bufferSize.Width, $windowSize.Width)
+        $bufferSize.Height = $targetHeight
+        $rawUi.BufferSize = $bufferSize
+    } catch {
+    }
+}
+
 $ErrorActionPreference = "Stop"
 
 if ($RefreshSeconds -lt 0) {
     throw "RefreshSeconds must be greater than or equal to 0."
+}
+if ($MaxBufferLines -lt 1) {
+    throw "MaxBufferLines must be greater than or equal to 1."
+}
+if ($HistoryLimit -lt 1) {
+    throw "HistoryLimit must be greater than or equal to 1."
+}
+if ($RequestKill -and [string]::IsNullOrWhiteSpace($ThreadId)) {
+    throw "ThreadId is required when RequestKill is used."
 }
 if ($Iterations -lt 0) {
     throw "Iterations must be greater than or equal to 0."
@@ -76,6 +106,7 @@ if (-not [string]::IsNullOrWhiteSpace($WindowTitle)) {
     } catch {
     }
 }
+Set-ConsoleBufferLimit -BufferLines $MaxBufferLines
 
 if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
     $preferred = Join-Path $resolvedRuntimeDir "mail_config.loop_30s.yaml"
@@ -110,15 +141,41 @@ if (-not [string]::IsNullOrWhiteSpace($TaskRoot)) {
 }
 
 if (-not [string]::IsNullOrWhiteSpace($ThreadId)) {
+    if ($RequestKill) {
+        $controlArgs = @(
+            "-m", "mail_runner.runtime_control",
+            "request-thread-kill",
+            $ThreadId,
+            "--runtime-dir", $resolvedRuntimeDir,
+            "--config", $resolvedConfigPath,
+            "--source", "monitor_window"
+        )
+        if (-not [string]::IsNullOrWhiteSpace($TaskRoot)) {
+            $controlArgs += @("--task-root", $resolvedTaskRoot)
+        }
+        & $pythonPath @controlArgs
+        exit $LASTEXITCODE
+    }
+
     Write-Host "Mail Runner Monitor"
     Write-Host "Config: $resolvedConfigPath"
     Write-Host "Runtime Dir: $resolvedRuntimeDir"
     Write-Host "Focused Thread: $ThreadId"
     Write-Host "Poll Seconds: $RefreshSeconds"
+    Write-Host "Buffer Lines: $MaxBufferLines"
+    Write-Host "History Limit: $HistoryLimit"
+    Write-Host "Kill Command: .\\scripts\\monitor_mail_runner.cmd -ThreadId $ThreadId -RequestKill"
     Write-Host ""
 
     $followArgs = @($observeBaseArgs)
-    $followArgs += @("follow-thread-live", $ThreadId, "--poll-seconds", [string]$RefreshSeconds)
+    $followArgs += @(
+        "follow-thread-live",
+        $ThreadId,
+        "--poll-seconds",
+        [string]$RefreshSeconds,
+        "--history-limit",
+        [string]$HistoryLimit
+    )
     if ($ExitWhenThreadNotRunning) {
         $followArgs += "--exit-when-inactive"
     }

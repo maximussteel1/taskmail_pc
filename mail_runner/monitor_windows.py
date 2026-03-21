@@ -40,6 +40,8 @@ class MonitorWindowManager:
         config_path: str | Path | None = None,
         runtime_dir: str | Path | None = None,
         refresh_seconds: int = 5,
+        buffer_lines: int = 1000,
+        history_limit: int = 12,
         launcher: MonitorLauncher | None = None,
     ) -> None:
         self.enabled = bool(enabled and os.name == "nt")
@@ -48,6 +50,8 @@ class MonitorWindowManager:
         self.config_path = None if config_path is None else Path(config_path).resolve()
         self.runtime_dir = None if runtime_dir is None else Path(runtime_dir).resolve()
         self.refresh_seconds = max(1, int(refresh_seconds))
+        self.buffer_lines = max(1, int(buffer_lines))
+        self.history_limit = max(1, int(history_limit))
         self._launcher = launcher or _default_launcher
         self._windows: dict[str, object] = {}
 
@@ -96,6 +100,10 @@ class MonitorWindowManager:
             str(self.task_root),
             "-RefreshSeconds",
             str(self.refresh_seconds),
+            "-MaxBufferLines",
+            str(self.buffer_lines),
+            "-HistoryLimit",
+            str(self.history_limit),
             "-ThreadId",
             thread_id,
             "-WindowTitle",

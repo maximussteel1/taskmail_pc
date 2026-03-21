@@ -510,6 +510,14 @@ def _render_follow_stream_events(
             if text:
                 chunks.append(f"{event.ts} | Assistant\n{text}\n")
             continue
+        if event.item_type == "reasoning":
+            chunks.extend(_finalize_follow_output(cursor))
+            text = event.text or _payload_summary(event) or ""
+            if text:
+                chunks.append(f"{event.ts} | Reasoning\n{text}\n")
+            continue
+        if event.kind not in {"turn.started", "turn.completed", "turn.failed"}:
+            continue
         chunks.extend(_finalize_follow_output(cursor))
         text = event.text or _payload_summary(event) or event.kind
         chunks.append(f"{event.ts} | {event.kind} | {text}\n")
@@ -618,8 +626,12 @@ def _render_live_event_lines(events: list[StreamEvent]) -> list[str]:
             continue
         if event.kind == "assistant.completed":
             text = "assistant message completed"
-        else:
+        elif event.item_type == "reasoning":
             text = event.text or _payload_summary(event) or event.kind
+        elif event.kind in {"turn.started", "turn.completed", "turn.failed"}:
+            text = event.text or _payload_summary(event) or event.kind
+        else:
+            continue
         lines.append(f"{event.ts} | {event.kind} | {text}")
     return lines[-8:]
 

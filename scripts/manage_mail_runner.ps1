@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("start", "restart", "stop", "shutdown", "status")]
+    [ValidateSet("start", "restart", "stop", "shutdown", "status", "detach-restart")]
     [string]$Action = "status",
     [string]$ConfigPath = "",
     [string]$ProjectRoot = "",
@@ -116,6 +116,37 @@ function Save-PidRecord {
         host_pid     = if ($HostProcessId -gt 0) { $HostProcessId } else { $null }
     }
     $payload | ConvertTo-Json | Set-Content -Encoding utf8 -Path $PidFile
+}
+
+function Quote-PowerShellLiteral {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    return "'" + $Value.Replace("'", "''") + "'"
+}
+
+function Start-DetachedRunnerRestart {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedConfigPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedRuntimeDir
+    )
+
+    $restartCommand = "Start-Sleep -Seconds 2; & " + (Quote-PowerShellLiteral -Value $ScriptPath) + " restart -ConfigPath " + (Quote-PowerShellLiteral -Value $ResolvedConfigPath) + " -RuntimeDir " + (Quote-PowerShellLiteral -Value $ResolvedRuntimeDir)
+    if ($NoPopup) {
+        $restartCommand += " -NoPopup"
+    }
+    $helper = Start-Process `
+        -FilePath "powershell.exe" `
+        -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $restartCommand) `
+        -WindowStyle Hidden `
+        -PassThru
+    return ("powershell-helper-pid=" + $helper.Id)
 }
 
 function Add-UniqueProcessId {
@@ -643,6 +674,16 @@ $stdoutLog = Join-Path $resolvedRuntimeDir "loop.stdout.log"
 $stderrLog = Join-Path $resolvedRuntimeDir "loop.stderr.log"
 $userFile = Join-Path $resolvedRuntimeDir "loop.user.txt"
 $hostStatePath = Join-Path $resolvedRuntimeDir "host_state.json"
+$scriptPath = [System.IO.Path]::GetFullPath($MyInvocation.MyCommand.Path)
+
+if ($Action -eq "detach-restart") {
+    $launcherPath = Start-DetachedRunnerRestart `
+        -ScriptPath $scriptPath `
+        -ResolvedConfigPath $resolvedConfigPath `
+        -ResolvedRuntimeDir $resolvedRuntimeDir
+    Write-Output ("Detached mail runner restart scheduled via launcher: " + $launcherPath)
+    exit 0
+}
 
 if ($Action -in @("stop", "shutdown", "restart")) {
     Stop-RunnerProcesses -ResolvedProjectRoot $resolvedProjectRoot -ResolvedConfigPath $resolvedConfigPath -PidFile $pidFile -HostStatePath $hostStatePath

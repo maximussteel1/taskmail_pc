@@ -5,12 +5,19 @@ from __future__ import annotations
 import json
 
 from mail_runner.adapters.mock_adapter import MockAdapter
-from mail_runner.app import _build_recovery_callback_factory, _handle_existing_action, _process_batch, process_once
+from mail_runner.app import (
+    _build_recovery_callback_factory,
+    _handle_existing_action,
+    _maybe_schedule_requested_runner_restart,
+    _process_batch,
+    process_once,
+)
 from mail_runner.config import AppConfig
 from mail_runner.context_layer import build_context
 from mail_runner.dispatcher import Dispatcher
 from mail_runner.mail_io import SYSTEM_MESSAGE_HEADER, SYSTEM_MESSAGE_HEADER_VALUE
 from mail_runner.models import MailEnvelope, ParsedMailAction, RunResult, TaskSnapshot
+from mail_runner.runtime_control import list_runner_restart_request_paths, write_runner_restart_request
 from mail_runner.runner import SerialTaskRunner
 from mail_runner.status import BACKEND_CODEX, BACKEND_OPENCODE, RUN_STATUS_KILLED, THREAD_STATUS_FAILED
 from mail_runner.thread_store import create_thread, load_session_state, load_thread_state, save_raw_mail, save_thread_state
@@ -46,10 +53,33 @@ class RecordingAdapter(MockAdapter):
 
 
 def _setup_existing_thread(task_root, dispatcher: Dispatcher) -> None:
+    _setup_existing_thread_with_id(
+        task_root,
+        dispatcher,
+        thread_id="thread_001",
+        task_id="task_001",
+        subject_norm="demo task",
+        session_name="demo task",
+        root_message_id="<root@example.com>",
+        latest_message_id="<done@example.com>",
+    )
+
+
+def _setup_existing_thread_with_id(
+    task_root,
+    dispatcher: Dispatcher,
+    *,
+    thread_id: str,
+    task_id: str,
+    subject_norm: str,
+    session_name: str,
+    root_message_id: str,
+    latest_message_id: str,
+) -> None:
     runner = SerialTaskRunner(task_root, dispatcher)
     snapshot = TaskSnapshot(
-        task_id="task_001",
-        thread_id="thread_001",
+        task_id=task_id,
+        thread_id=thread_id,
         backend=BACKEND_OPENCODE,
         profile=None,
         repo_path="D:\\repo",
@@ -64,9 +94,10 @@ def _setup_existing_thread(task_root, dispatcher: Dispatcher) -> None:
     )
     runner.run_task_snapshot(
         snapshot,
-        root_message_id="<root@example.com>",
-        latest_message_id="<done@example.com>",
-        subject_norm="demo task",
+        root_message_id=root_message_id,
+        latest_message_id=latest_message_id,
+        subject_norm=subject_norm,
+        session_name=session_name,
     )
 
 
@@ -95,6 +126,168 @@ def _create_finished_thread(task_root, thread_id: str, *, last_active_at: str, u
     save_thread_state(state, task_root)
 
 
+def _setup_running_thread_with_live_assistant_output(task_root) -> None:
+    workspace = WorkspaceManager(task_root)
+    snapshot = TaskSnapshot(
+        task_id="task_run",
+        thread_id="thread_001",
+        backend=BACKEND_CODEX,
+        profile=None,
+        repo_path="D:\\repo",
+        workdir="src",
+        task_text="Inspect the live state.",
+        acceptance=[],
+        timeout_minutes=60,
+        mode="modify",
+        attachments=[],
+        created_at="2026-03-12T12:00:00",
+        updated_at="2026-03-12T12:00:00",
+        backend_transport="sdk",
+    )
+    snapshot_path = workspace.save_snapshot(snapshot)
+    create_thread(
+        thread_id="thread_001",
+        root_message_id="<root@example.com>",
+        latest_message_id="<running@example.com>",
+        subject_norm="demo task",
+        session_name="demo task",
+        backend=BACKEND_CODEX,
+        profile=None,
+        repo_path="D:\\repo",
+        workdir="src",
+        current_task_id="task_run",
+        last_task_snapshot_file=snapshot_path.relative_to(task_root / "thread_001").as_posix(),
+        task_root=task_root,
+        status="running",
+        history_files=[],
+        last_summary="Mock run completed successfully.",
+        backend_transport="sdk",
+        created_at="2026-03-12T12:00:00",
+        updated_at="2026-03-12T12:00:00",
+    )
+    stream_path = workspace.run_file_path("thread_001", "task_run", "stream.events.jsonl")
+    stream_path.parent.mkdir(parents=True, exist_ok=True)
+    stream_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": "2026-03-12T12:10:00",
+                        "seq": 1,
+                        "thread_id": "thread_001",
+                        "task_id": "task_run",
+                        "backend": "codex",
+                        "backend_transport": "sdk",
+                        "kind": "status",
+                        "text": "Need to inspect the parser before patching.",
+                        "item_type": "reasoning",
+                        "status": "running",
+                        "payload": {"message": "Need to inspect the parser before patching."},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-03-12T12:10:05",
+                        "seq": 2,
+                        "thread_id": "thread_001",
+                        "task_id": "task_run",
+                        "backend": "codex",
+                        "backend_transport": "sdk",
+                        "kind": "assistant.delta",
+                        "text": "I am applying the patch now.",
+                        "delta": "I am applying the patch now.",
+                        "item_type": "agent_message",
+                        "status": "streaming",
+                    }
+                )
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _setup_running_thread_with_tool_only_events(task_root) -> None:
+    workspace = WorkspaceManager(task_root)
+    snapshot = TaskSnapshot(
+        task_id="task_run",
+        thread_id="thread_001",
+        backend=BACKEND_CODEX,
+        profile=None,
+        repo_path="D:\\repo",
+        workdir="src",
+        task_text="Inspect the live state.",
+        acceptance=[],
+        timeout_minutes=60,
+        mode="modify",
+        attachments=[],
+        created_at="2026-03-12T12:00:00",
+        updated_at="2026-03-12T12:00:00",
+        backend_transport="sdk",
+    )
+    snapshot_path = workspace.save_snapshot(snapshot)
+    create_thread(
+        thread_id="thread_001",
+        root_message_id="<root@example.com>",
+        latest_message_id="<running@example.com>",
+        subject_norm="demo task",
+        session_name="demo task",
+        backend=BACKEND_CODEX,
+        profile=None,
+        repo_path="D:\\repo",
+        workdir="src",
+        current_task_id="task_run",
+        last_task_snapshot_file=snapshot_path.relative_to(task_root / "thread_001").as_posix(),
+        task_root=task_root,
+        status="running",
+        history_files=[],
+        last_summary="Mock run completed successfully.",
+        backend_transport="sdk",
+        created_at="2026-03-12T12:00:00",
+        updated_at="2026-03-12T12:00:00",
+    )
+    stream_path = workspace.run_file_path("thread_001", "task_run", "stream.events.jsonl")
+    stream_path.parent.mkdir(parents=True, exist_ok=True)
+    stream_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": "2026-03-12T12:10:00",
+                        "seq": 1,
+                        "thread_id": "thread_001",
+                        "task_id": "task_run",
+                        "backend": "codex",
+                        "backend_transport": "sdk",
+                        "kind": "tool.started",
+                        "text": "pytest -q",
+                        "item_type": "command_execution",
+                        "status": "running",
+                        "payload": {"command": "pytest -q"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-03-12T12:10:01",
+                        "seq": 2,
+                        "thread_id": "thread_001",
+                        "task_id": "task_run",
+                        "backend": "codex",
+                        "backend_transport": "sdk",
+                        "kind": "tool.completed",
+                        "text": "pytest -q",
+                        "item_type": "command_execution",
+                        "status": "completed",
+                        "payload": {"command": "pytest -q", "exit_code": 0},
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def test_process_once_handles_status_query_reply(tmp_path) -> None:
     dispatcher = Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0))
     _setup_existing_thread(tmp_path / "tasks", dispatcher)
@@ -116,8 +309,263 @@ def test_process_once_handles_status_query_reply(tmp_path) -> None:
 
     assert stats == {"fetched": 1, "processed": 1, "skipped": 0, "failed": 0}
     assert [item["subject"] for item in client.sent_messages] == ["[STATUS][S:thread_001] demo task"]
+    assert "This session is not currently running." in client.sent_messages[0]["body"]
+    assert "\nSummary: Mock run completed successfully.\n" not in client.sent_messages[0]["body"]
     snapshots = list((tmp_path / "tasks" / "thread_001" / "snapshots").glob("*.json"))
     assert len(snapshots) == 1
+
+
+def test_handle_existing_action_status_query_for_running_thread_uses_live_assistant_output(tmp_path) -> None:
+    task_root = tmp_path / "tasks"
+    _setup_running_thread_with_live_assistant_output(task_root)
+    envelope = MailEnvelope(
+        message_id="<reply-status-running@example.com>",
+        subject="Re: [RUNNING][S:thread_001] Demo task",
+        from_addr="user@example.com",
+        to_addr="user@example.com",
+        date="2026-03-12T12:10:30",
+        in_reply_to="<running@example.com>",
+        references=["<root@example.com>", "<running@example.com>"],
+        body_text="/status",
+        raw_headers={"Subject": "Re: [RUNNING][S:thread_001] Demo task"},
+    )
+    client = FakeMailClient([envelope])
+    config = AppConfig(from_addr="user@example.com", from_name="Mail Runner", task_root="tasks")
+    state = load_thread_state("thread_001", task_root)
+    workspace = WorkspaceManager(task_root)
+    snapshot = workspace.load_snapshot("thread_001", state.last_task_snapshot_file)
+
+    handled = _handle_existing_action(
+        envelope,
+        config,
+        task_root,
+        client,
+        None,
+        state=state,
+        snapshot=snapshot,
+        latest_result=None,
+        incoming_attachment_paths=[],
+        subject_text="demo task",
+        action=ParsedMailAction(action="STATUS_QUERY", confidence=1.0, raw_user_text=""),
+        background=False,
+        target_reply_chain=False,
+    )
+
+    assert handled is True
+    assert [item["subject"] for item in client.sent_messages] == ["[STATUS][S:thread_001] demo task"]
+    assert "\nSummary: Running.\n" in client.sent_messages[0]["body"]
+    assert "Reply:\nI am applying the patch now." in client.sent_messages[0]["body"]
+    assert "Need to inspect the parser before patching." not in client.sent_messages[0]["body"]
+    assert "\nSummary: Mock run completed successfully.\n" not in client.sent_messages[0]["body"]
+
+
+def test_handle_existing_action_status_query_for_running_thread_hides_tool_only_stream_events(tmp_path) -> None:
+    task_root = tmp_path / "tasks"
+    _setup_running_thread_with_tool_only_events(task_root)
+    envelope = MailEnvelope(
+        message_id="<reply-status-running@example.com>",
+        subject="Re: [RUNNING][S:thread_001] Demo task",
+        from_addr="user@example.com",
+        to_addr="user@example.com",
+        date="2026-03-12T12:10:30",
+        in_reply_to="<running@example.com>",
+        references=["<root@example.com>", "<running@example.com>"],
+        body_text="/status",
+        raw_headers={"Subject": "Re: [RUNNING][S:thread_001] Demo task"},
+    )
+    client = FakeMailClient([envelope])
+    config = AppConfig(from_addr="user@example.com", from_name="Mail Runner", task_root="tasks")
+    state = load_thread_state("thread_001", task_root)
+    workspace = WorkspaceManager(task_root)
+    snapshot = workspace.load_snapshot("thread_001", state.last_task_snapshot_file)
+
+    handled = _handle_existing_action(
+        envelope,
+        config,
+        task_root,
+        client,
+        None,
+        state=state,
+        snapshot=snapshot,
+        latest_result=None,
+        incoming_attachment_paths=[],
+        subject_text="demo task",
+        action=ParsedMailAction(action="STATUS_QUERY", confidence=1.0, raw_user_text=""),
+        background=False,
+        target_reply_chain=False,
+    )
+
+    assert handled is True
+    assert "\nSummary: Running.\n" in client.sent_messages[0]["body"]
+    assert "Reply:\nNo assistant output yet." in client.sent_messages[0]["body"]
+    assert "pytest -q" not in client.sent_messages[0]["body"]
+
+
+def test_process_once_handles_last_query_reply_without_backend_call(tmp_path) -> None:
+    dispatcher = Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0))
+    _setup_existing_thread(tmp_path / "tasks", dispatcher)
+    envelope = MailEnvelope(
+        message_id="<reply-last@example.com>",
+        subject="Re: [DONE] Demo task",
+        from_addr="user@example.com",
+        to_addr="user@example.com",
+        date="2026-03-12T12:10:00",
+        in_reply_to="<done@example.com>",
+        references=["<root@example.com>", "<done@example.com>"],
+        body_text="/last",
+        raw_headers={"Subject": "Re: [DONE] Demo task"},
+    )
+    client = FakeMailClient([envelope])
+    config = AppConfig(from_addr="user@example.com", from_name="Mail Runner", task_root="tasks")
+
+    stats = process_once(config, base_dir=tmp_path, mail_client=client, dispatcher=dispatcher)
+
+    assert stats == {"fetched": 1, "processed": 1, "skipped": 0, "failed": 0}
+    assert [item["subject"] for item in client.sent_messages] == ["[STATUS][S:thread_001] demo task"]
+    assert "Latest local result for this session. This is a local lookup only; no backend call was made." in client.sent_messages[0]["body"]
+    assert "Mock run completed successfully." in client.sent_messages[0]["body"]
+    snapshots = list((tmp_path / "tasks" / "thread_001" / "snapshots").glob("*.json"))
+    assert len(snapshots) == 1
+
+
+def test_process_once_rejects_restart_runner_in_one_shot_mode(tmp_path, monkeypatch) -> None:
+    dispatcher = Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0))
+    _setup_existing_thread(tmp_path / "tasks", dispatcher)
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setenv("MAIL_RUNNER_RUNTIME_DIR", str(runtime_dir))
+    envelope = MailEnvelope(
+        message_id="<reply-restart@example.com>",
+        subject="Re: [DONE] Demo task",
+        from_addr="user@example.com",
+        to_addr="user@example.com",
+        date="2026-03-12T12:10:00",
+        in_reply_to="<done@example.com>",
+        references=["<root@example.com>", "<done@example.com>"],
+        body_text="/restart-runner",
+        raw_headers={"Subject": "Re: [DONE] Demo task"},
+    )
+    client = FakeMailClient([envelope])
+    config = AppConfig(from_addr="user@example.com", from_name="Mail Runner", task_root="tasks")
+
+    stats = process_once(config, base_dir=tmp_path, mail_client=client, dispatcher=dispatcher)
+
+    assert stats == {"fetched": 1, "processed": 1, "skipped": 0, "failed": 0}
+    assert [item["subject"] for item in client.sent_messages] == ["[STATUS][S:thread_001] demo task"]
+    assert "Runner restart is only available while the hosted background mail loop is running." in client.sent_messages[0]["body"]
+    assert list_runner_restart_request_paths(runtime_dir) == []
+
+
+def test_maybe_schedule_requested_runner_restart_uses_detached_launcher(tmp_path, monkeypatch) -> None:
+    runtime_dir = tmp_path / "runtime"
+    request_path = write_runner_restart_request(
+        runtime_dir,
+        source="mail",
+        thread_id="thread_073",
+        message_id="<reply@example.com>",
+    )
+    calls: list[tuple[str, str]] = []
+
+    def fake_schedule(*, config_path: str, runtime_dir):
+        calls.append((config_path, str(runtime_dir)))
+        return True, "scheduled"
+
+    monkeypatch.setenv("MAIL_RUNNER_CONFIG", str(tmp_path / "mail_config.yaml"))
+    monkeypatch.setattr("mail_runner.app._schedule_detached_runner_restart", fake_schedule)
+
+    scheduled = _maybe_schedule_requested_runner_restart(runtime_dir)
+
+    assert scheduled is True
+    assert calls == [(str(tmp_path / "mail_config.yaml"), str(runtime_dir))]
+    assert not request_path.exists()
+    assert list_runner_restart_request_paths(runtime_dir) == []
+
+
+def test_process_once_targeted_status_query_replies_on_target_session_chain(tmp_path) -> None:
+    dispatcher = Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0))
+    task_root = tmp_path / "tasks"
+    _setup_existing_thread(task_root, dispatcher)
+    _setup_existing_thread_with_id(
+        task_root,
+        dispatcher,
+        thread_id="thread_002",
+        task_id="task_002",
+        subject_norm="other task",
+        session_name="other task",
+        root_message_id="<root-other@example.com>",
+        latest_message_id="<done-other@example.com>",
+    )
+    envelope = MailEnvelope(
+        message_id="<reply-target-status@example.com>",
+        subject="Re: [DONE][S:thread_001] Demo task",
+        from_addr="user@example.com",
+        to_addr="user@example.com",
+        date="2026-03-12T12:10:00",
+        in_reply_to="<done@example.com>",
+        references=["<root@example.com>", "<done@example.com>"],
+        body_text="/status thread_002",
+        raw_headers={"Subject": "Re: [DONE][S:thread_001] Demo task"},
+    )
+    client = FakeMailClient([envelope])
+    config = AppConfig(from_addr="user@example.com", from_name="Mail Runner", task_root="tasks")
+
+    stats = process_once(config, base_dir=tmp_path, mail_client=client, dispatcher=dispatcher)
+
+    assert stats == {"fetched": 1, "processed": 1, "skipped": 0, "failed": 0}
+    assert [item["subject"] for item in client.sent_messages] == ["[STATUS][S:thread_002] other task"]
+    assert client.sent_messages[0]["in_reply_to"] == "<done-other@example.com>"
+    assert load_thread_state("thread_001", task_root).latest_message_id == "<done@example.com>"
+
+
+def test_process_once_targeted_status_query_reports_unknown_session_in_current_thread(tmp_path) -> None:
+    dispatcher = Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0))
+    _setup_existing_thread(tmp_path / "tasks", dispatcher)
+    envelope = MailEnvelope(
+        message_id="<reply-missing-target@example.com>",
+        subject="Re: [DONE][S:thread_001] Demo task",
+        from_addr="user@example.com",
+        to_addr="user@example.com",
+        date="2026-03-12T12:10:00",
+        in_reply_to="<done@example.com>",
+        references=["<root@example.com>", "<done@example.com>"],
+        body_text="/status thread_999",
+        raw_headers={"Subject": "Re: [DONE][S:thread_001] Demo task"},
+    )
+    client = FakeMailClient([envelope])
+    config = AppConfig(from_addr="user@example.com", from_name="Mail Runner", task_root="tasks")
+
+    stats = process_once(config, base_dir=tmp_path, mail_client=client, dispatcher=dispatcher)
+
+    assert stats == {"fetched": 1, "processed": 1, "skipped": 0, "failed": 0}
+    assert [item["subject"] for item in client.sent_messages] == ["[STATUS][S:thread_001] demo task"]
+    assert client.sent_messages[0]["in_reply_to"] == envelope.message_id
+    assert "was not found in this workspace" in client.sent_messages[0]["body"]
+
+
+def test_process_once_sessions_listing_includes_targeted_command_hints(tmp_path) -> None:
+    dispatcher = Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0))
+    _setup_existing_thread(tmp_path / "tasks", dispatcher)
+    envelope = MailEnvelope(
+        message_id="<reply-sessions@example.com>",
+        subject="Re: [DONE][S:thread_001] Demo task",
+        from_addr="user@example.com",
+        to_addr="user@example.com",
+        date="2026-03-12T12:10:00",
+        in_reply_to="<done@example.com>",
+        references=["<root@example.com>", "<done@example.com>"],
+        body_text="/sessions",
+        raw_headers={"Subject": "Re: [DONE][S:thread_001] Demo task"},
+    )
+    client = FakeMailClient([envelope])
+    config = AppConfig(from_addr="user@example.com", from_name="Mail Runner", task_root="tasks")
+
+    stats = process_once(config, base_dir=tmp_path, mail_client=client, dispatcher=dispatcher)
+
+    assert stats == {"fetched": 1, "processed": 1, "skipped": 0, "failed": 0}
+    assert [item["subject"] for item in client.sent_messages] == ["[STATUS][S:thread_001] demo task"]
+    assert "/last <session_id>" in client.sent_messages[0]["body"]
+    assert "/continue <session_id>" in client.sent_messages[0]["body"]
+    assert "/restart-runner" in client.sent_messages[0]["body"]
+    assert "Targeted replies continue on the target session's own mail chain." in client.sent_messages[0]["body"]
 
 
 def test_process_once_long_reply_with_status_words_continues_existing_session(tmp_path) -> None:
@@ -190,6 +638,95 @@ def test_process_once_plain_reply_resumes_existing_session(tmp_path) -> None:
     assert snapshot_payload["mode"] == "analysis_only"
     assert snapshot_payload["task_text"] == "Only analyze the issue."
     assert not (tmp_path / "tasks" / "thread_002").exists()
+
+
+def test_process_once_targeted_continue_runs_against_target_session(tmp_path) -> None:
+    adapter = RecordingAdapter()
+    dispatcher = Dispatcher(adapter, adapter)
+    task_root = tmp_path / "tasks"
+    _setup_existing_thread(task_root, dispatcher)
+    _setup_existing_thread_with_id(
+        task_root,
+        dispatcher,
+        thread_id="thread_002",
+        task_id="task_002",
+        subject_norm="other task",
+        session_name="other task",
+        root_message_id="<root-other@example.com>",
+        latest_message_id="<done-other@example.com>",
+    )
+    envelope = MailEnvelope(
+        message_id="<reply-target-continue@example.com>",
+        subject="Re: [DONE][S:thread_001] Demo task",
+        from_addr="user@example.com",
+        to_addr="user@example.com",
+        date="2026-03-12T12:11:00",
+        in_reply_to="<done@example.com>",
+        references=["<root@example.com>", "<done@example.com>"],
+        body_text="/continue thread_002\nTimeout: 120\nTask:\nOnly analyze the issue.",
+        raw_headers={"Subject": "Re: [DONE][S:thread_001] Demo task"},
+    )
+    client = FakeMailClient([envelope])
+    config = AppConfig(from_addr="user@example.com", from_name="Mail Runner", task_root="tasks")
+
+    stats = process_once(config, base_dir=tmp_path, mail_client=client, dispatcher=dispatcher)
+
+    assert stats == {"fetched": 1, "processed": 1, "skipped": 0, "failed": 0}
+    assert adapter.snapshots[-1].thread_id == "thread_002"
+    assert adapter.snapshots[-1].run_mode == "resume"
+    assert adapter.snapshots[-1].turn_text == "Timeout: 120\nTask:\nOnly analyze the issue."
+    assert [item["subject"] for item in client.sent_messages] == [
+        "[ACCEPTED][S:thread_002] other task",
+        "[RUNNING][S:thread_002] other task",
+        "[DONE][S:thread_002] other task",
+    ]
+    assert client.sent_messages[0]["in_reply_to"] == "<done-other@example.com>"
+    assert load_thread_state("thread_001", task_root).latest_message_id == "<done@example.com>"
+
+
+def test_process_once_targeted_resume_reactivates_paused_target_session(tmp_path) -> None:
+    adapter = RecordingAdapter()
+    dispatcher = Dispatcher(adapter, adapter)
+    task_root = tmp_path / "tasks"
+    _setup_existing_thread(task_root, dispatcher)
+    _setup_existing_thread_with_id(
+        task_root,
+        dispatcher,
+        thread_id="thread_002",
+        task_id="task_002",
+        subject_norm="other task",
+        session_name="other task",
+        root_message_id="<root-other@example.com>",
+        latest_message_id="<done-other@example.com>",
+    )
+    paused_state = load_thread_state("thread_002", task_root)
+    paused_state.status = "paused"
+    paused_state.paused_from_status = "done"
+    save_thread_state(paused_state, task_root)
+    envelope = MailEnvelope(
+        message_id="<reply-target-resume@example.com>",
+        subject="Re: [DONE][S:thread_001] Demo task",
+        from_addr="user@example.com",
+        to_addr="user@example.com",
+        date="2026-03-12T12:12:00",
+        in_reply_to="<done@example.com>",
+        references=["<root@example.com>", "<done@example.com>"],
+        body_text="/resume thread_002\nPlease continue with the cleanup.",
+        raw_headers={"Subject": "Re: [DONE][S:thread_001] Demo task"},
+    )
+    client = FakeMailClient([envelope])
+    config = AppConfig(from_addr="user@example.com", from_name="Mail Runner", task_root="tasks")
+
+    stats = process_once(config, base_dir=tmp_path, mail_client=client, dispatcher=dispatcher)
+
+    assert stats == {"fetched": 1, "processed": 1, "skipped": 0, "failed": 0}
+    assert adapter.snapshots[-1].thread_id == "thread_002"
+    assert adapter.snapshots[-1].run_mode == "resume"
+    assert [item["subject"] for item in client.sent_messages] == [
+        "[ACCEPTED][S:thread_002] other task",
+        "[RUNNING][S:thread_002] other task",
+        "[DONE][S:thread_002] other task",
+    ]
 
 
 def test_process_once_new_codex_task_defaults_to_sdk_transport(tmp_path) -> None:

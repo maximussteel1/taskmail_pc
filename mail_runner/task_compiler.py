@@ -128,7 +128,7 @@ def compile_task(
     incoming_attachment_paths: list[str] | None = None,
     fallback_to_new_run: bool = False,
 ) -> TaskSnapshot | None:
-    if action.action in {"STATUS_QUERY", "KILL", "UNKNOWN", "LIST_SESSIONS", "PAUSE_SESSION"}:
+    if action.action in {"STATUS_QUERY", "LAST_RESULT_QUERY", "RESTART_RUNNER", "KILL", "UNKNOWN", "LIST_SESSIONS", "PAUSE_SESSION"}:
         return None
 
     new_task_id = task_id or latest_snapshot.task_id

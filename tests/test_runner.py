@@ -136,6 +136,67 @@ def test_serial_task_runner_background_kill(tmp_path) -> None:
     assert result.status == RUN_STATUS_KILLED
 
 
+def test_serial_task_runner_can_kill_by_thread_id(tmp_path) -> None:
+    task_root = tmp_path / "tasks"
+    dispatcher = Dispatcher(MockAdapter(sleep_seconds=0.5), MockAdapter(sleep_seconds=0.5))
+    runner = SerialTaskRunner(task_root, dispatcher)
+    snapshot = TaskSnapshot(
+        task_id="task_001",
+        thread_id="thread_001",
+        backend=BACKEND_OPENCODE,
+        profile=None,
+        repo_path="D:\\repo",
+        workdir="src",
+        task_text="Long running mock task.",
+        acceptance=[],
+        timeout_minutes=60,
+        mode="modify",
+        attachments=[],
+        created_at="2026-03-12T12:30:00",
+        updated_at="2026-03-12T12:30:00",
+    )
+
+    runner.start_background_task(snapshot)
+    time.sleep(0.1)
+
+    assert runner.kill_thread("thread_001", expected_task_id="task_001") is True
+    result = runner.wait_for_active()
+
+    assert result is not None
+    assert result.status == RUN_STATUS_KILLED
+
+
+def test_serial_task_runner_does_not_kill_thread_when_task_id_mismatches(tmp_path) -> None:
+    task_root = tmp_path / "tasks"
+    dispatcher = Dispatcher(MockAdapter(sleep_seconds=0.5), MockAdapter(sleep_seconds=0.5))
+    runner = SerialTaskRunner(task_root, dispatcher)
+    snapshot = TaskSnapshot(
+        task_id="task_001",
+        thread_id="thread_001",
+        backend=BACKEND_OPENCODE,
+        profile=None,
+        repo_path="D:\\repo",
+        workdir="src",
+        task_text="Long running mock task.",
+        acceptance=[],
+        timeout_minutes=60,
+        mode="modify",
+        attachments=[],
+        created_at="2026-03-12T12:30:00",
+        updated_at="2026-03-12T12:30:00",
+    )
+
+    runner.start_background_task(snapshot)
+    time.sleep(0.1)
+
+    assert runner.kill_thread("thread_001", expected_task_id="task_999") is False
+    assert runner.kill("task_001") is True
+    result = runner.wait_for_active()
+
+    assert result is not None
+    assert result.status == RUN_STATUS_KILLED
+
+
 def test_serial_task_runner_keeps_backend_session_resumable_after_kill(tmp_path) -> None:
     task_root = tmp_path / "tasks"
     dispatcher = Dispatcher(MockAdapter(sleep_seconds=0.5), MockAdapter(sleep_seconds=0.5))
@@ -171,7 +232,7 @@ def test_serial_task_runner_keeps_backend_session_resumable_after_kill(tmp_path)
 def test_serial_task_runner_queues_following_session_in_same_workspace(tmp_path) -> None:
     task_root = tmp_path / "tasks"
     dispatcher = Dispatcher(MockAdapter(sleep_seconds=0.5), MockAdapter(sleep_seconds=0.5))
-    runner = SerialTaskRunner(task_root, dispatcher)
+    runner = SerialTaskRunner(task_root, dispatcher, max_active_sessions_per_workspace=1)
     first = _snapshot("task_001", "thread_001")
     second = _snapshot("task_002", "thread_002")
 
@@ -183,6 +244,7 @@ def test_serial_task_runner_queues_following_session_in_same_workspace(tmp_path)
     second_state = load_thread_state("thread_002", task_root)
 
     assert runner.queued_count() == 1
+    assert workspace_state.active_session_ids == ["thread_001"]
     assert workspace_state.active_session_id == "thread_001"
     assert workspace_state.queued_session_ids == ["thread_002"]
     assert second_state.status == "accepted"
@@ -195,6 +257,7 @@ def test_serial_task_runner_queues_following_session_in_same_workspace(tmp_path)
     second_state = load_thread_state("thread_002", task_root)
 
     assert final_workspace.active_session_id is None
+    assert final_workspace.active_session_ids == []
     assert final_workspace.queued_session_ids == []
     assert first_state.status == THREAD_STATUS_DONE
     assert second_state.status == THREAD_STATUS_DONE
@@ -233,7 +296,7 @@ def test_serial_task_runner_keeps_pending_follow_up_for_running_session(tmp_path
 def test_serial_task_runner_runs_different_workspaces_concurrently(tmp_path) -> None:
     task_root = tmp_path / "tasks"
     dispatcher = Dispatcher(MockAdapter(sleep_seconds=0.5), MockAdapter(sleep_seconds=0.5))
-    runner = SerialTaskRunner(task_root, dispatcher, max_concurrent_runs=2)
+    runner = SerialTaskRunner(task_root, dispatcher, max_active_sessions=2)
     first = _snapshot("task_001", "thread_001", workdir="src_a")
     second = _snapshot("task_002", "thread_002", workdir="src_b")
 
@@ -257,6 +320,70 @@ def test_serial_task_runner_runs_different_workspaces_concurrently(tmp_path) -> 
 
     assert load_thread_state("thread_001", task_root).status == THREAD_STATUS_DONE
     assert load_thread_state("thread_002", task_root).status == THREAD_STATUS_DONE
+
+
+def test_serial_task_runner_runs_two_sessions_in_same_workspace_when_workspace_cap_allows_it(tmp_path) -> None:
+    task_root = tmp_path / "tasks"
+    dispatcher = Dispatcher(MockAdapter(sleep_seconds=0.5), MockAdapter(sleep_seconds=0.5))
+    runner = SerialTaskRunner(task_root, dispatcher, max_active_sessions=4, max_active_sessions_per_workspace=2)
+    first = _snapshot("task_001", "thread_001")
+    second = _snapshot("task_002", "thread_002")
+
+    runner.start_background_task(first)
+    runner.start_background_task(second)
+    time.sleep(0.05)
+
+    workspace_state = load_workspace_state(build_workspace_id("D:\\repo", "src"), task_root)
+    first_state = load_thread_state("thread_001", task_root)
+    second_state = load_thread_state("thread_002", task_root)
+
+    assert runner.active_count() == 2
+    assert runner.queued_count() == 0
+    assert sorted(workspace_state.active_session_ids) == ["thread_001", "thread_002"]
+    assert workspace_state.active_session_id == "thread_001"
+    assert workspace_state.queued_session_ids == []
+    assert first_state.status == THREAD_STATUS_RUNNING
+    assert second_state.status == THREAD_STATUS_RUNNING
+
+    runner.wait_until_idle()
+
+    final_workspace = load_workspace_state(build_workspace_id("D:\\repo", "src"), task_root)
+    assert final_workspace.active_session_ids == []
+    assert final_workspace.active_session_id is None
+    assert load_thread_state("thread_001", task_root).status == THREAD_STATUS_DONE
+    assert load_thread_state("thread_002", task_root).status == THREAD_STATUS_DONE
+
+
+def test_serial_task_runner_queues_third_session_after_workspace_cap_is_reached(tmp_path) -> None:
+    task_root = tmp_path / "tasks"
+    dispatcher = Dispatcher(MockAdapter(sleep_seconds=0.5), MockAdapter(sleep_seconds=0.5))
+    runner = SerialTaskRunner(task_root, dispatcher, max_active_sessions=4, max_active_sessions_per_workspace=2)
+    first = _snapshot("task_001", "thread_001")
+    second = _snapshot("task_002", "thread_002")
+    third = _snapshot("task_003", "thread_003")
+
+    runner.start_background_task(first)
+    runner.start_background_task(second)
+    time.sleep(0.05)
+    runner.start_background_task(third)
+
+    workspace_state = load_workspace_state(build_workspace_id("D:\\repo", "src"), task_root)
+    third_state = load_thread_state("thread_003", task_root)
+
+    assert runner.active_count() == 2
+    assert runner.queued_count() == 1
+    assert sorted(workspace_state.active_session_ids) == ["thread_001", "thread_002"]
+    assert workspace_state.queued_session_ids == ["thread_003"]
+    assert third_state.status == THREAD_STATUS_ACCEPTED
+    assert third_state.current_task_id == "task_003"
+
+    runner.wait_until_idle()
+
+    final_workspace = load_workspace_state(build_workspace_id("D:\\repo", "src"), task_root)
+    assert final_workspace.active_session_ids == []
+    assert final_workspace.active_session_id is None
+    assert final_workspace.queued_session_ids == []
+    assert load_thread_state("thread_003", task_root).status == THREAD_STATUS_DONE
 
 
 def test_serial_task_runner_notifies_monitor_window_manager(tmp_path) -> None:
@@ -297,7 +424,7 @@ def test_serial_task_runner_recovers_accepted_queue_on_restart(tmp_path) -> None
         updated_at="2026-03-12T12:00:00",
     )
 
-    runner = SerialTaskRunner(task_root, Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0)), max_concurrent_runs=2)
+    runner = SerialTaskRunner(task_root, Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0)), max_active_sessions=2)
 
     assert runner.queued_count() == 1
 
@@ -348,7 +475,7 @@ def test_serial_task_runner_recovery_uses_callback_factory(tmp_path) -> None:
     runner = SerialTaskRunner(
         task_root,
         Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0)),
-        max_concurrent_runs=2,
+        max_active_sessions=2,
         recovery_callback_factory=build_callbacks,
     )
 
@@ -382,7 +509,7 @@ def test_serial_task_runner_marks_running_task_failed_on_restart(tmp_path) -> No
         updated_at="2026-03-12T12:00:00",
     )
 
-    runner = SerialTaskRunner(task_root, Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0)), max_concurrent_runs=2)
+    runner = SerialTaskRunner(task_root, Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0)), max_active_sessions=2)
     state = load_thread_state("thread_001", task_root)
 
     assert runner.queued_count() == 0
@@ -418,7 +545,7 @@ def test_serial_task_runner_promotes_follow_up_after_restart(tmp_path) -> None:
         updated_at="2026-03-12T12:00:00",
     )
 
-    runner = SerialTaskRunner(task_root, Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0)), max_concurrent_runs=2)
+    runner = SerialTaskRunner(task_root, Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0)), max_active_sessions=2)
     state = load_thread_state("thread_001", task_root)
 
     assert runner.queued_count() == 1

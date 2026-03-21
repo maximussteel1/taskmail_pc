@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 from mail_runner.config import AppConfig
-from mail_runner.external_delivery import prepare_external_deliveries
+from mail_runner.external_delivery import _build_cos_client, prepare_external_deliveries
 from mail_runner.models import OutgoingAttachment, RunArtifact, RunResult
 from mail_runner.status import BACKEND_OPENCODE, RUN_STATUS_SUCCESS
 
@@ -41,6 +43,42 @@ class FakeCosClient:
     def get_presigned_download_url(self, **kwargs):
         self.download_calls.append(kwargs)
         return f"https://cos.example/{kwargs['Key']}"
+
+
+def test_build_cos_client_disables_environment_proxy(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCosConfig:
+        def __init__(self, **kwargs):
+            captured["config_kwargs"] = kwargs
+
+    class FakeCosS3Client:
+        def __init__(self, config, session=None):
+            captured["config"] = config
+            captured["session"] = session
+
+    monkeypatch.setitem(
+        sys.modules,
+        "qcloud_cos",
+        SimpleNamespace(CosConfig=FakeCosConfig, CosS3Client=FakeCosS3Client),
+    )
+
+    _build_cos_client(
+        {
+            "region": "ap-shanghai",
+            "bucket": "mailbot-1412015279",
+            "secret_id": "secret-id",
+            "secret_key": "secret-key",
+            "object_prefix": "mail-runner",
+        }
+    )
+
+    session = captured["session"]
+    assert session is not None
+    assert session.trust_env is False
+    assert captured["config_kwargs"]["Proxies"] == {}
+    assert "http://" in session.adapters
+    assert "https://" in session.adapters
 
 
 def test_prepare_external_deliveries_externalizes_oversized_artifact(tmp_path: Path) -> None:

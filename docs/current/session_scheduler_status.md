@@ -12,12 +12,12 @@ As of 2026-03-14, the scheduler refactor is no longer just a proposal. The codeb
 - run artifacts still persist under `tasks/thread_xxx/`
 - workspace/session indexes persist under `tasks/_scheduler/workspaces/<workspace_id>/`
 - `WorkspaceState` and `SessionState` are derived from and kept in sync with `ThreadState`
-- the background runner enforces one active session per workspace
-- different workspaces can run concurrently up to `max_concurrent_runs`
+- the background runner now allows up to `max_active_sessions_per_workspace` active sessions per workspace
+- different workspaces can run concurrently up to the global `max_active_sessions` cap
 - follow-up work for a running session is queued on that same session
 - accepted and queued work can be recovered after runner restart, including automatic status-mail callbacks
 
-What is still incomplete is the mail-routing layer and the user-facing control surface around those scheduler primitives.
+What is still incomplete is the non-reply routing policy and any broader cross-workspace control surface around those scheduler primitives.
 
 ## What Has Landed
 
@@ -25,16 +25,19 @@ What is still incomplete is the mail-routing layer and the user-facing control s
 
 - `workspace` is identified by `repo_path + workdir`
 - `session` metadata is stored separately from the thread directory tree
+- workspace state now persists `active_session_ids` plus compatibility `active_session_id`
 - session and workspace indexes are rebuilt/synced when `thread_state.json` changes
 
 ### Scheduling rules
 
-- one workspace cannot run two sessions at the same time
-- different workspaces may run concurrently
+- one workspace may now run multiple sessions concurrently up to `max_active_sessions_per_workspace` (default `2`)
+- different workspaces may run concurrently until the global `max_active_sessions` cap is reached
 - a running session can hold one queued follow-up snapshot
 - restarting the runner requeues persisted `accepted` work and preserves automatic `[RUNNING]` / terminal mail callbacks
 - restarting the runner promotes queued follow-up work if the previous run was interrupted and preserves automatic status-mail callbacks
 - restarting the runner marks an orphaned persisted `running` task as failed when no safe queued follow-up exists
+- `max_active_sessions` remains the active working-set cap and the global concurrency cap
+- `max_active_sessions_per_workspace` now separately controls how many sessions from the same workspace may run at once
 
 ### Health visibility
 
@@ -49,7 +52,10 @@ What is still incomplete is the mail-routing layer and the user-facing control s
 ### Mail-layer behavior already using this model
 
 - `/sessions` lists sessions in the current workspace
+- `/sessions` now also gives copyable targeted command hints for the current workspace
 - reply mail continues an existing session when explicit thread/session clues are available
+- explicit same-workspace targeting from commands is now available for `/status <session_id>`, `/last <session_id>`, `/continue <session_id>`, `/pause <session_id>`, `/resume <session_id>`, `/end <session_id>`, and `/kill <session_id>`
+- targeted command results continue on the target session's own mail chain instead of the invoking thread
 - `/new` creates a fresh session from an existing reply chain
 - `/end` explicitly removes a non-running thread/session from the active working set without rewriting its last run result
 - native backend session ids are persisted and reused for reply continuation and question-answer recovery
@@ -92,13 +98,14 @@ Current reality:
 
 ### Session targeting from commands
 
-The current command surface is still thread-local.
+The first round of explicit command-side targeting has landed, but only inside the current workspace.
 
 Current reality:
 
-- `/sessions` is informational
-- continuing a different session still requires replying to that session's latest status mail
-- explicit command-side targeting/switching is not implemented
+- `/sessions` remains the discovery entrypoint for the current workspace
+- users can now target another session in that same workspace with explicit commands such as `/status <session_id>`, `/last <session_id>`, and `/continue <session_id>`
+- targeted replies continue on the target session's own mail chain
+- cross-workspace switching is still not implemented
 
 ### Fixed real-mailbox acceptance
 
@@ -121,13 +128,13 @@ Current evidence:
 
 ### Step 2: Session control UX
 
-- decide whether `/sessions` should remain read-only or evolve into a session-switch workflow
-- if switching is added, make the routing explicit and avoid hidden title-based guessing
+- refine Android/Desktop UX around the new explicit same-workspace targeting flow
+- if broader switching is added later, keep the routing explicit and avoid hidden title-based guessing
 
 ### Step 3: Runtime protocol hardening
 
 - keep the fixed real-mailbox acceptance paths green while extending behavior
-- keep the existing workspace exclusivity and restart-recovery guarantees green while extending behavior
+- keep the existing same-thread follow-up queueing, workspace concurrency caps, and restart-recovery guarantees green while extending behavior
 
 ## Test Gates
 

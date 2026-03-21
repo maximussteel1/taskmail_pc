@@ -20,6 +20,7 @@ MailAction = Literal[
     "NEW_SESSION",
     "CONTINUE_SESSION",
     "RESUME_SESSION",
+    "RESTART_RUNNER",
     "END_SESSION",
     "PAUSE_SESSION",
     "UPDATE_TASK",
@@ -27,6 +28,7 @@ MailAction = Literal[
     "ANSWER_QUESTION",
     "LIST_SESSIONS",
     "STATUS_QUERY",
+    "LAST_RESULT_QUERY",
     "RERUN",
     "KILL",
     "UNKNOWN",
@@ -45,6 +47,7 @@ _ACTIONS = {
     "NEW_SESSION",
     "CONTINUE_SESSION",
     "RESUME_SESSION",
+    "RESTART_RUNNER",
     "END_SESSION",
     "PAUSE_SESSION",
     "UPDATE_TASK",
@@ -52,6 +55,7 @@ _ACTIONS = {
     "ANSWER_QUESTION",
     "LIST_SESSIONS",
     "STATUS_QUERY",
+    "LAST_RESULT_QUERY",
     "RERUN",
     "KILL",
     "UNKNOWN",
@@ -87,6 +91,19 @@ def _require_string_list(values: list[str], field_name: str) -> None:
         raise ModelValidationError(f"{field_name} must be a list[str]")
     for item in values:
         _require_text(item, field_name)
+
+
+def _normalize_string_list(values: list[str], field_name: str) -> list[str]:
+    _require_string_list(values, field_name)
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        text = item.strip()
+        if text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    return normalized
 
 
 def _require_literal(value: str, field_name: str, allowed: set[str]) -> None:
@@ -414,6 +431,7 @@ class WorkspaceState:
     workdir: str | None
     workspace_norm: str
     session_ids: list[str] = field(default_factory=list)
+    active_session_ids: list[str] = field(default_factory=list)
     active_session_id: str | None = None
     queued_session_ids: list[str] = field(default_factory=list)
     created_at: str = ""
@@ -424,9 +442,20 @@ class WorkspaceState:
         _require_text(self.repo_path, "repo_path")
         _require_optional_text(self.workdir, "workdir")
         _require_text(self.workspace_norm, "workspace_norm")
-        _require_string_list(self.session_ids, "session_ids")
+        self.session_ids = _normalize_string_list(self.session_ids, "session_ids")
+        self.active_session_ids = _normalize_string_list(self.active_session_ids, "active_session_ids")
         _require_optional_text(self.active_session_id, "active_session_id")
-        _require_string_list(self.queued_session_ids, "queued_session_ids")
+        if self.active_session_id:
+            if self.active_session_id in self.active_session_ids:
+                self.active_session_ids = [
+                    self.active_session_id,
+                    *[item for item in self.active_session_ids if item != self.active_session_id],
+                ]
+            else:
+                self.active_session_ids = [self.active_session_id, *self.active_session_ids]
+        elif self.active_session_ids:
+            self.active_session_id = self.active_session_ids[0]
+        self.queued_session_ids = _normalize_string_list(self.queued_session_ids, "queued_session_ids")
         _require_text(self.created_at, "created_at")
         _require_text(self.updated_at, "updated_at")
 

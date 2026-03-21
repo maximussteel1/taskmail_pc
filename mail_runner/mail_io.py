@@ -8,7 +8,10 @@ import json
 import logging
 import mimetypes
 import re
+import select
 import smtplib
+import socket
+import time
 from email import message_from_bytes, policy
 from email.header import decode_header
 from email.message import EmailMessage
@@ -30,6 +33,239 @@ _MAILBOX_STATE_MAILBOX = "INBOX"
 _MAILBOX_STATE_VERSION = 1
 _BOOTSTRAP_UID_SCAN_LIMIT = 200
 _MAX_TRACKED_PROCESSED_IDS = 2000
+_IMAP_RECEIVE_MODE_AUTO = "auto"
+_IMAP_RECEIVE_MODE_POLL = "poll"
+_IMAP_RECEIVE_MODE_IDLE = "idle"
+_IMAP_IDLE_RETRY_AFTER_SECONDS = 60.0
+_IMAP_IDLE_HANDSHAKE_TIMEOUT_SECONDS = 10.0
+_IMAP_IDLE_PERIODIC_SYNC_SECONDS = 5 * 60.0
+
+
+class _IdleUnsupportedError(RuntimeError):
+    """Raised when the IMAP server does not support IDLE."""
+
+
+def _decode_imap_line(line: bytes | str | None) -> str:
+    if line is None:
+        return ""
+    if isinstance(line, bytes):
+        return line.decode("utf-8", errors="replace").strip()
+    return str(line).strip()
+
+
+def _extract_imap_capabilities(payload: list[bytes] | None) -> set[str]:
+    capabilities: set[str] = set()
+    for item in payload or []:
+        if not isinstance(item, bytes):
+            continue
+        for part in item.split():
+            token = part.decode("ascii", errors="ignore").strip().upper()
+            if token:
+                capabilities.add(token)
+    return capabilities
+
+
+class _IdleMailboxSession:
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        mailbox: str = _MAILBOX_STATE_MAILBOX,
+        imap_factory=imaplib.IMAP4_SSL,
+        select_fn=select.select,
+        monotonic_fn=time.monotonic,
+    ) -> None:
+        self._config = config
+        self._mailbox = mailbox
+        self._imap_factory = imap_factory
+        self._select_fn = select_fn
+        self._monotonic_fn = monotonic_fn
+        self._client = None
+        self._idle_tag: bytes | None = None
+        self._idle_started_at: float | None = None
+
+    def wait_for_event(self, timeout_seconds: float) -> bool:
+        deadline = self._monotonic_fn() + max(0.0, float(timeout_seconds))
+        while True:
+            self._ensure_connected()
+            self._ensure_idle()
+
+            now = self._monotonic_fn()
+            remaining = deadline - now
+            if remaining <= 0:
+                return False
+
+            renew_remaining = self._idle_renew_remaining(now)
+            if renew_remaining <= 0:
+                self._renew_idle()
+                continue
+
+            wait_seconds = min(remaining, renew_remaining)
+            ready, _, _ = self._select_fn([self._socket()], [], [], wait_seconds)
+            if not ready:
+                if self._idle_renew_remaining(self._monotonic_fn()) <= 0:
+                    self._renew_idle()
+                    continue
+                return False
+
+            line = self._read_line(timeout_seconds=wait_seconds)
+            if not line:
+                raise RuntimeError("IMAP IDLE connection closed unexpectedly.")
+            upper = line.upper()
+            if upper.startswith(b"* BYE"):
+                raise RuntimeError(f"IMAP server closed IDLE connection: {_decode_imap_line(line)}")
+            if upper.startswith(b"+"):
+                continue
+            if self._idle_tag is not None and upper.startswith(self._idle_tag.upper() + b" "):
+                self._idle_tag = None
+                self._idle_started_at = None
+                continue
+            if upper.startswith(b"* "):
+                if b" EXISTS" in upper or b" RECENT" in upper:
+                    LOGGER.info(
+                        "IMAP IDLE detected mailbox activity. host=%s mailbox=%s line=%s",
+                        self._config.imap_host,
+                        self._mailbox,
+                        _decode_imap_line(line),
+                    )
+                    return True
+                LOGGER.debug(
+                    "Ignoring non-delivery IMAP IDLE line. host=%s mailbox=%s line=%s",
+                    self._config.imap_host,
+                    self._mailbox,
+                    _decode_imap_line(line),
+                )
+
+    def close(self) -> None:
+        try:
+            if self._client is not None and self._idle_tag is not None:
+                self._exit_idle()
+        except Exception:
+            LOGGER.debug("Failed to exit IMAP IDLE cleanly.", exc_info=True)
+        finally:
+            client = self._client
+            self._client = None
+            self._idle_tag = None
+            self._idle_started_at = None
+            if client is None:
+                return
+            try:
+                client.logout()
+            except Exception:
+                try:
+                    client.shutdown()
+                except Exception:
+                    pass
+
+    def _ensure_connected(self) -> None:
+        if self._client is not None:
+            return
+
+        client = self._imap_factory(self._config.imap_host, self._config.imap_port)
+        try:
+            client.login(self._config.imap_user, self._config.imap_password)
+            status, capability_data = client.capability()
+            if status != "OK":
+                raise RuntimeError("Unable to query IMAP CAPABILITY for IDLE.")
+            capabilities = _extract_imap_capabilities(capability_data)
+            if "IDLE" not in capabilities:
+                raise _IdleUnsupportedError(
+                    f"Server {self._config.imap_host} does not advertise IMAP IDLE."
+                )
+            status, _ = client.select(self._mailbox)
+            if status != "OK":
+                raise RuntimeError(f"Unable to select mailbox for IMAP IDLE: {self._mailbox}")
+        except Exception:
+            try:
+                client.logout()
+            except Exception:
+                try:
+                    client.shutdown()
+                except Exception:
+                    pass
+            raise
+
+        self._client = client
+        LOGGER.info(
+            "IMAP IDLE watcher connected. host=%s mailbox=%s",
+            self._config.imap_host,
+            self._mailbox,
+        )
+
+    def _ensure_idle(self) -> None:
+        if self._idle_tag is not None:
+            return
+        client = self._require_client()
+        tag = client._new_tag()
+        client.send(tag + b" IDLE\r\n")
+        response = self._read_line(timeout_seconds=_IMAP_IDLE_HANDSHAKE_TIMEOUT_SECONDS)
+        if not response.startswith(b"+"):
+            raise RuntimeError(f"IMAP IDLE was rejected: {_decode_imap_line(response)}")
+        self._idle_tag = tag
+        self._idle_started_at = self._monotonic_fn()
+
+    def _renew_idle(self) -> None:
+        self._exit_idle()
+        self._ensure_idle()
+
+    def _exit_idle(self) -> None:
+        if self._idle_tag is None:
+            self._idle_started_at = None
+            return
+        client = self._require_client()
+        tag = self._idle_tag
+        client.send(b"DONE\r\n")
+        while True:
+            line = self._read_line(timeout_seconds=_IMAP_IDLE_HANDSHAKE_TIMEOUT_SECONDS)
+            if not line:
+                raise RuntimeError("IMAP IDLE terminated before DONE completed.")
+            upper = line.upper()
+            if upper.startswith(b"* BYE"):
+                raise RuntimeError(f"IMAP server closed IDLE during DONE: {_decode_imap_line(line)}")
+            if upper.startswith(tag.upper() + b" "):
+                break
+        self._idle_tag = None
+        self._idle_started_at = None
+
+    def _idle_renew_remaining(self, now: float) -> float:
+        if self._idle_started_at is None:
+            return 0.0
+        renew_seconds = max(1, int(self._config.imap_idle_renew_seconds))
+        return max(0.0, renew_seconds - (now - self._idle_started_at))
+
+    def _socket(self):
+        client = self._require_client()
+        return client.sock
+
+    def _read_line(self, timeout_seconds: float | None = None) -> bytes:
+        client = self._require_client()
+        sock = getattr(client, "sock", None)
+        previous_timeout = None
+        can_restore_timeout = False
+        if timeout_seconds is not None and sock is not None and hasattr(sock, "gettimeout") and hasattr(sock, "settimeout"):
+            previous_timeout = sock.gettimeout()
+            sock.settimeout(max(0.1, float(timeout_seconds)))
+            can_restore_timeout = True
+        try:
+            return client._get_line()
+        except (socket.timeout, TimeoutError) as exc:
+            raise RuntimeError(
+                f"IMAP IDLE read timed out after {max(0.1, float(timeout_seconds or 0.0)):.1f}s"
+            ) from exc
+        except imaplib.IMAP4.abort as exc:
+            if "timed out" in str(exc).lower():
+                raise RuntimeError(
+                    f"IMAP IDLE read timed out after {max(0.1, float(timeout_seconds or 0.0)):.1f}s"
+                ) from exc
+            raise
+        finally:
+            if can_restore_timeout:
+                sock.settimeout(previous_timeout)
+
+    def _require_client(self):
+        if self._client is None:
+            raise RuntimeError("IMAP IDLE session is not connected.")
+        return self._client
 
 
 def _decode_bytes_value(payload: bytes, charset: str | None = None) -> str:
@@ -320,13 +556,93 @@ class MailClient:
 
     def __init__(self, config: AppConfig) -> None:
         self._config = config
+        self._idle_session: _IdleMailboxSession | None = None
+        self._idle_supported: bool | None = None
+        self._idle_retry_after_monotonic: float = 0.0
+        self._idle_force_sync_after_monotonic: float = 0.0
 
     def _imap_client(self):
         return imaplib.IMAP4_SSL(self._config.imap_host, self._config.imap_port)
 
+    def _build_idle_session(self) -> _IdleMailboxSession:
+        return _IdleMailboxSession(self._config)
+
     def _processed_message_index(self) -> _ProcessedMessageIndex:
         task_root = self._config.resolve_task_root()
         return _ProcessedMessageIndex(task_root / "_mailbox" / _MAILBOX_STATE_FILENAME)
+
+    def receive_mode(self) -> str:
+        requested = str(self._config.imap_receive_mode or _IMAP_RECEIVE_MODE_AUTO).strip().lower()
+        if requested == _IMAP_RECEIVE_MODE_POLL:
+            return _IMAP_RECEIVE_MODE_POLL
+        if self._idle_supported is False:
+            return _IMAP_RECEIVE_MODE_POLL
+        if requested in {_IMAP_RECEIVE_MODE_AUTO, _IMAP_RECEIVE_MODE_IDLE}:
+            return _IMAP_RECEIVE_MODE_IDLE
+        return _IMAP_RECEIVE_MODE_POLL
+
+    def wait_for_new_messages(self, timeout_seconds: float) -> bool:
+        timeout = max(0.0, float(timeout_seconds))
+        if timeout <= 0:
+            return False
+        if self.receive_mode() == _IMAP_RECEIVE_MODE_POLL:
+            time.sleep(timeout)
+            return False
+
+        started_at = time.monotonic()
+        if self._idle_force_sync_after_monotonic <= 0.0:
+            self._idle_force_sync_after_monotonic = started_at + _IMAP_IDLE_PERIODIC_SYNC_SECONDS
+        if started_at >= self._idle_force_sync_after_monotonic:
+            self._close_idle_session()
+            self._idle_force_sync_after_monotonic = started_at + _IMAP_IDLE_PERIODIC_SYNC_SECONDS
+            LOGGER.info(
+                "Ending IMAP IDLE wait to force a periodic mailbox sync. host=%s interval=%.0fs",
+                self._config.imap_host,
+                _IMAP_IDLE_PERIODIC_SYNC_SECONDS,
+            )
+            return True
+        if self._idle_retry_after_monotonic > started_at:
+            time.sleep(timeout)
+            return False
+
+        try:
+            if self._idle_session is None:
+                self._idle_session = self._build_idle_session()
+            event_detected = self._idle_session.wait_for_event(timeout)
+            self._idle_supported = True
+            self._idle_retry_after_monotonic = 0.0
+            if event_detected:
+                self._close_idle_session()
+                self._idle_force_sync_after_monotonic = time.monotonic() + _IMAP_IDLE_PERIODIC_SYNC_SECONDS
+            return event_detected
+        except _IdleUnsupportedError as exc:
+            self._idle_supported = False
+            self._close_idle_session()
+            self._idle_force_sync_after_monotonic = 0.0
+            LOGGER.info(
+                "IMAP IDLE is unavailable for host=%s; falling back to polling. reason=%s",
+                self._config.imap_host,
+                exc,
+            )
+        except Exception as exc:
+            self._idle_supported = True
+            self._close_idle_session()
+            self._idle_retry_after_monotonic = time.monotonic() + _IMAP_IDLE_RETRY_AFTER_SECONDS
+            LOGGER.warning(
+                "IMAP IDLE wait failed for host=%s; falling back to polling for %.0fs. error=%s",
+                self._config.imap_host,
+                _IMAP_IDLE_RETRY_AFTER_SECONDS,
+                exc,
+            )
+
+        elapsed = time.monotonic() - started_at
+        remaining = timeout - elapsed
+        if remaining > 0:
+            time.sleep(remaining)
+        return False
+
+    def close(self) -> None:
+        self._close_idle_session()
 
     def fetch_unseen_messages(self) -> list[MailEnvelope]:
         messages: list[MailEnvelope] = []
@@ -555,3 +871,10 @@ class MailClient:
             except Exception:
                 pass
         return message_id
+
+    def _close_idle_session(self) -> None:
+        idle_session = self._idle_session
+        self._idle_session = None
+        if idle_session is None:
+            return
+        idle_session.close()

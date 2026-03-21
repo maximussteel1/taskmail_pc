@@ -17,6 +17,7 @@ from mail_runner.reporter import (
     MAIL_STATUS_FAILED,
     MAIL_STATUS_PAUSED,
     MAIL_STATUS_QUESTION,
+    MAIL_STATUS_STATUS,
     build_status_html,
     build_status_markdown,
     build_status_mail,
@@ -330,9 +331,12 @@ def test_build_status_html_includes_inline_image_preview_and_notices() -> None:
 
     html = build_status_html("Status: DONE\nReply:\nRendered.", attachments, ["Skipped attachment because missing"])
 
+    assert '<article class="task-mail"' in html
     assert "cid:mail-runner-inline-1" in html
     assert "Preview image" in html
     assert "Skipped attachment because missing" in html
+    assert '<section class="task-attachment-notices"' in html
+    assert '<section class="task-inline-previews"' in html
 
 
 def test_build_status_markdown_includes_artifact_links_and_image_refs() -> None:
@@ -419,6 +423,52 @@ def test_build_status_markdown_includes_artifact_links_and_image_refs() -> None:
     assert plain_body.index("Artifacts:") < plain_body.index("Attachment Notices:")
 
 
+def test_build_status_markdown_keeps_summary_and_reply_override_together() -> None:
+    state = ThreadState(
+        thread_id="thread_001",
+        root_message_id="<root@example.com>",
+        latest_message_id="<root@example.com>",
+        subject_norm="demo",
+        backend=BACKEND_OPENCODE,
+        repo_path="D:\\repo",
+        workdir="src",
+        current_task_id="task_001",
+        last_task_snapshot_file="snapshots/task_001.json",
+        status=THREAD_STATUS_DONE,
+        history_files=["runs/task_001/result.json"],
+        last_summary="Completed successfully.",
+        created_at="2026-03-12T12:00:00",
+        updated_at="2026-03-12T12:00:05",
+    )
+    snapshot = TaskSnapshot(
+        task_id="task_001",
+        thread_id="thread_001",
+        backend=BACKEND_OPENCODE,
+        repo_path="D:\\repo",
+        workdir="src",
+        task_text="Refactor",
+        acceptance=[],
+        timeout_minutes=60,
+        mode="modify",
+        attachments=[],
+        created_at="2026-03-12T12:00:00",
+        updated_at="2026-03-12T12:00:00",
+    )
+
+    markdown_body = build_status_markdown(
+        MAIL_STATUS_STATUS,
+        state,
+        task_snapshot=snapshot,
+        summary_override="Running.",
+        reply_override="I am applying the patch now.",
+    )
+    plain_body = render_status_markdown_to_plain_text(markdown_body)
+
+    assert "Summary: Running." in plain_body
+    assert "Reply:\nI am applying the patch now." in plain_body
+    assert "Summary: Completed successfully." not in plain_body
+
+
 def test_build_status_html_projects_markdown_artifact_image_refs_to_cid() -> None:
     markdown_body = "\n".join(
         [
@@ -466,14 +516,20 @@ def test_build_status_html_projects_markdown_artifact_image_refs_to_cid() -> Non
         artifacts=artifacts,
     )
 
-    assert "<h2>Artifacts</h2>" in html
-    assert html.count("<h2>Artifacts</h2>") == 1
+    assert '<article class="task-mail"' in html
+    assert '<section class="task-artifacts"' in html
+    assert "Artifacts</h2>" in html
+    assert html.count("Artifacts</h2>") == 1
+    assert '<section class="task-inline-previews"' in html
+    assert "Inline Previews</h2>" in html
     assert "<h2>Images</h2>" not in html
     assert "<h2>Files</h2>" not in html
-    assert "<li>preview.png: Preview image (inline preview)</li>" in html
-    assert "<h2>Attachment Notices</h2>" in html
-    assert html.index("<h2>Artifacts</h2>") < html.index("<h2>Attachment Notices</h2>")
-    assert "<li>Skipped attachment because missing</li>" in html
+    assert "preview.png: Preview image (inline preview)" in html
+    assert '<section class="task-attachment-notices"' in html
+    assert "Attachment Notices</h2>" in html
+    assert html.index("Artifacts</h2>") < html.index("Attachment Notices</h2>")
+    assert html.index("Attachment Notices</h2>") < html.index("Inline Previews</h2>")
+    assert "Skipped attachment because missing" in html
     assert "cid:mail-runner-inline-1" in html
     assert "Preview image" in html
 
@@ -537,5 +593,90 @@ def test_build_status_markdown_includes_external_delivery_links() -> None:
     assert "External Deliveries:" in plain_body
     assert "app.apk: Delivered via COS" in plain_body
     assert " | https://cos.example/mail-runner/thread_001/task_001/app.apk" in plain_body
-    assert '<h2>External Deliveries</h2>' in html
-    assert '<a href="https://cos.example/mail-runner/thread_001/task_001/app.apk">app.apk</a>' in html
+    assert '<section class="task-external-deliveries"' in html
+    assert "External Deliveries</h2>" in html
+    assert 'href="https://cos.example/mail-runner/thread_001/task_001/app.apk"' in html
+    assert 'rel="noopener noreferrer"' in html
+    assert ">app.apk</a>" in html
+
+
+def test_build_status_html_wraps_state_and_question_capsules_in_pre_blocks() -> None:
+    markdown_body = "\n".join(
+        [
+            "Summary: Ready for review.",
+            "",
+            "---TASK-STATE-BEGIN---",
+            "thread_id: thread_001",
+            "session_id: session_001",
+            "---TASK-STATE-END---",
+            "",
+            "---TASK-QUESTION-BEGIN---",
+            "question_set_id: qs_001",
+            "question_id: q_001",
+            "question_type: short_text",
+            "required: true",
+            "question_text: Continue?",
+            "---TASK-QUESTION-END---",
+        ]
+    )
+
+    html = build_status_html(
+        render_status_markdown_to_plain_text(markdown_body),
+        markdown_body=markdown_body,
+        artifacts=[],
+    )
+
+    assert '<article class="task-mail"' in html
+    assert '<pre class="task-state-capsule"' in html
+    assert "---TASK-STATE-BEGIN---" in html
+    assert '<pre class="task-question-capsule"' in html
+    assert "---TASK-QUESTION-BEGIN---" in html
+
+
+def test_build_status_html_projects_svg_artifact_preview_into_inline_previews_section() -> None:
+    markdown_body = "\n".join(
+        [
+            "Status: DONE",
+            "",
+            "## Artifacts",
+            "",
+            "- [formula.svg](artifact://artifact-formula): Rendered formula (inline preview)",
+            "![Rendered formula](artifact://artifact-formula)",
+        ]
+    )
+    artifacts = [
+        RunArtifact(
+            artifact_id="artifact-formula",
+            path="E:\\repo\\formula.svg",
+            name="formula.svg",
+            kind="image",
+            content_type="image/svg+xml",
+            source="directory_fallback",
+            attach=True,
+            inline_preview=True,
+            caption="Rendered formula",
+        )
+    ]
+    attachments = [
+        OutgoingAttachment(
+            path="E:\\repo\\formula.svg",
+            name="formula.svg",
+            content_type="image/svg+xml",
+            attach=True,
+            inline=True,
+            caption="Rendered formula",
+        )
+    ]
+
+    html = build_status_html(
+        render_status_markdown_to_plain_text(markdown_body),
+        attachments,
+        markdown_body=markdown_body,
+        artifacts=artifacts,
+    )
+
+    assert '<section class="task-artifacts"' in html
+    assert '<section class="task-inline-previews"' in html
+    assert "formula.svg: Rendered formula (inline preview)" in html
+    assert "Inline Previews</h2>" in html
+    assert "cid:mail-runner-inline-1" in html

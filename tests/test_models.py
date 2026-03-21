@@ -99,12 +99,14 @@ def test_workspace_state_accepts_valid_input() -> None:
         workdir="src",
         workspace_norm="d:/repo|src",
         session_ids=["thread_001"],
+        active_session_ids=["thread_001"],
         active_session_id="thread_001",
         created_at="2026-03-12T10:00:00",
         updated_at="2026-03-12T10:05:00",
     )
 
     assert workspace.workspace_id == "workspace_123"
+    assert workspace.active_session_ids == ["thread_001"]
 
 
 def test_session_state_rejects_invalid_status() -> None:

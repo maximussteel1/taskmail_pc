@@ -168,23 +168,26 @@ def _build_workspace_state_from_thread(state: ThreadState, existing: WorkspaceSt
     session_id = state.session_id or state.thread_id
     if session_id not in session_ids:
         session_ids.append(session_id)
-    active_session_id = existing.active_session_id if existing is not None else None
+    active_session_ids = list(existing.active_session_ids) if existing is not None else []
+    if existing is not None and not active_session_ids and existing.active_session_id:
+        active_session_ids = [existing.active_session_id]
     queued_session_ids = list(existing.queued_session_ids) if existing is not None else []
     queued_session_ids = [item for item in queued_session_ids if item != session_id]
+    active_session_ids = [item for item in active_session_ids if item != session_id]
     if state.lifecycle == "active" and state.status == THREAD_STATUS_RUNNING:
-        active_session_id = session_id
-    elif active_session_id == session_id:
-        active_session_id = None
+        active_session_ids.append(session_id)
     if state.lifecycle == "active" and (
         state.status == THREAD_STATUS_ACCEPTED or (state.queued_task_id and state.status != THREAD_STATUS_RUNNING)
     ):
         queued_session_ids.append(session_id)
+    active_session_id = active_session_ids[0] if active_session_ids else None
     return WorkspaceState(
         workspace_id=state.workspace_id or build_workspace_id(state.repo_path, state.workdir),
         repo_path=state.repo_path,
         workdir=state.workdir,
         workspace_norm=state.workspace_norm or build_workspace_norm(state.repo_path, state.workdir),
         session_ids=session_ids,
+        active_session_ids=active_session_ids,
         active_session_id=active_session_id,
         queued_session_ids=queued_session_ids,
         created_at=existing.created_at if existing is not None else (state.created_at or now),
@@ -305,6 +308,26 @@ def list_workspace_sessions(
         payload = workspace.load_json(state_path)
         sessions.append(SessionState(**payload))
     return sorted(sessions, key=lambda item: item.updated_at, reverse=True)
+
+
+def find_workspace_session_by_id(
+    repo_path: str,
+    workdir: str | None,
+    session_id: str,
+    task_root: str | Path | None = None,
+) -> SessionState | None:
+    workspace = _workspace(task_root)
+    if not workspace.task_root.exists():
+        return None
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        return None
+    workspace_id = build_workspace_id(repo_path, workdir)
+    session_path = workspace.session_state_path(workspace_id, normalized_session_id)
+    if not session_path.exists():
+        return None
+    payload = workspace.load_json(session_path)
+    return SessionState(**payload)
 
 
 def sync_session_indexes(state: ThreadState, task_root: str | Path | None = None) -> None:

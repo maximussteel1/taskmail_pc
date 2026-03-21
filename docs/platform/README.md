@@ -14,6 +14,7 @@
 - `task_manager_platform_delivery.md`
 - `task_manager_implementation_roadmap.md`
 - `task_manager_tool_interface_spec.md`
+- `relay_transport_protocol_draft.md`
 - `schemas/task_manager_schemas_v0.1.zip`
 
 分层依据见 [document_layering_plan.md](../document_layering_plan.md)。

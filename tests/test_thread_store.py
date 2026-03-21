@@ -65,6 +65,7 @@ def test_load_thread_state_and_save_raw_mail(tmp_path) -> None:
     session_state = find_session("D:\\repo", "src", "local-demo", task_root)
 
     assert workspace_state.session_ids == ["thread_010"]
+    assert workspace_state.active_session_ids == []
     assert workspace_state.active_session_id is None
     assert workspace_state.queued_session_ids == ["thread_010"]
     assert session_state is not None

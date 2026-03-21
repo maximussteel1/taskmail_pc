@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 
 from mail_runner.adapters.codex_sdk_adapter import CodexSdkAdapter
 from mail_runner.config import AppConfig
@@ -21,11 +22,13 @@ class _FakePopen:
         self.kwargs = kwargs
         self.pid = 4242
         self.returncode = 0
+        self._alive = True
         _FakePopen.last_command = self.command
         _FakePopen.last_env = kwargs.get("env")
 
-    def communicate(self, stdin_text: str):
-        _FakePopen.last_stdin = stdin_text
+    def communicate(self, stdin_text: str | None = None, timeout: float | None = None):
+        if stdin_text is not None:
+            _FakePopen.last_stdin = stdin_text
         return (
             json.dumps(
                 {
@@ -39,12 +42,20 @@ class _FakePopen:
         )
 
     def poll(self):
+        return None if self._alive else self.returncode
+
+    def wait(self, timeout: float | None = None):
+        self._alive = False
         return self.returncode
+
+    def kill(self):
+        self._alive = False
 
 
 class _StructuredResultPopen(_FakePopen):
-    def communicate(self, stdin_text: str):
-        _FakePopen.last_stdin = stdin_text
+    def communicate(self, stdin_text: str | None = None, timeout: float | None = None):
+        if stdin_text is not None:
+            _FakePopen.last_stdin = stdin_text
         final_response = "\n".join(
             [
                 "SDK adapter completed the task successfully.",
@@ -68,6 +79,55 @@ class _StructuredResultPopen(_FakePopen):
             ),
             "",
         )
+
+
+class _QuestionPopen(_FakePopen):
+    def communicate(self, stdin_text: str | None = None, timeout: float | None = None):
+        if stdin_text is not None:
+            _FakePopen.last_stdin = stdin_text
+        final_response = "\n".join(
+            [
+                "I need one decision before I continue.",
+                "",
+                "---TASK-QUESTION-BEGIN---",
+                "question_set_id: vps_scope_001",
+                "question_id: vps_state_scope",
+                "question_type: single_choice",
+                "required: true",
+                "question_text: Should VPS persist session continuity?",
+                "choices: relay_history_session | full_task_authority",
+                (
+                    "choice_labels: relay_history_session=Keep relay/session history "
+                    "| full_task_authority=Make VPS authoritative"
+                ),
+                "---TASK-QUESTION-END---",
+            ]
+        )
+        return (
+            json.dumps(
+                {
+                    "thread_id": "sdk-thread-001",
+                    "final_response": final_response,
+                    "usage": {"input_tokens": 12, "output_tokens": 6},
+                    "item_count": 1,
+                }
+            ),
+            "",
+        )
+
+
+class _TimeoutAfterCompletedPopen(_FakePopen):
+    def __init__(self, command, **kwargs) -> None:
+        super().__init__(command, **kwargs)
+        self._timed_out = False
+
+    def communicate(self, stdin_text: str | None = None, timeout: float | None = None):
+        if stdin_text is not None:
+            _FakePopen.last_stdin = stdin_text
+        if not self._timed_out:
+            self._timed_out = True
+            raise subprocess.TimeoutExpired(self.command, timeout or 0, output="", stderr="sidecar still draining\n")
+        return super().communicate(stdin_text=stdin_text, timeout=timeout)
 
 
 def _snapshot(tmp_path: Path) -> TaskSnapshot:
@@ -195,3 +255,194 @@ def test_codex_sdk_adapter_parses_structured_result_capsule(tmp_path, monkeypatc
     assert result.changed_files == ["src/app.py", "tests/test_app.py"]
     assert result.tests_passed is True
     assert "---TASK-RUN-RESULT-BEGIN---" not in stdout_text
+
+
+def test_codex_sdk_adapter_returns_awaiting_user_input_for_question_capsules(tmp_path, monkeypatch) -> None:
+    snapshot = _snapshot(tmp_path)
+    run_dir = tmp_path / snapshot.thread_id / "runs" / snapshot.task_id
+    adapter = CodexSdkAdapter(AppConfig(codex_sdk_sidecar_command="node fake-sidecar.js"))
+    monkeypatch.setattr("mail_runner.adapters.codex_sdk_adapter.subprocess.Popen", _QuestionPopen)
+
+    result = adapter.run(snapshot, str(run_dir))
+    stdout_text = (run_dir / "stdout.log").read_text(encoding="utf-8")
+
+    assert result.status == "awaiting_user_input"
+    assert result.question_id == "vps_state_scope"
+    assert result.question_text == "Should VPS persist session continuity?"
+    assert result.pending_choices == ["relay_history_session", "full_task_authority"]
+    assert result.question_set_id == "vps_scope_001"
+    assert len(result.pending_questions) == 1
+    assert result.pending_questions[0].question_text == "Should VPS persist session continuity?"
+    assert result.changed_files == []
+    assert result.tests_passed is None
+    assert "I need one decision before I continue." in stdout_text
+    assert "---TASK-QUESTION-BEGIN---" in stdout_text
+
+
+def test_codex_sdk_adapter_recovers_when_terminal_stream_completed_but_sidecar_hangs(tmp_path, monkeypatch) -> None:
+    snapshot = _snapshot(tmp_path)
+    run_dir = tmp_path / snapshot.thread_id / "runs" / snapshot.task_id
+    run_dir.mkdir(parents=True)
+    stream_path = run_dir / "stream.events.jsonl"
+    stream_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": "2026-03-18T10:05:10.000Z",
+                        "seq": 1,
+                        "thread_id": snapshot.thread_id,
+                        "task_id": snapshot.task_id,
+                        "backend": "codex",
+                        "backend_transport": "sdk",
+                        "kind": "assistant.completed",
+                        "text": "Recovered final response from stream events.",
+                        "item_type": "agent_message",
+                        "status": "completed",
+                        "payload": {
+                            "item_id": "item_1",
+                            "event_type": "item.completed",
+                            "sdk_thread_id": "sdk-thread-recovered",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-03-18T10:05:11.000Z",
+                        "seq": 2,
+                        "thread_id": snapshot.thread_id,
+                        "task_id": snapshot.task_id,
+                        "backend": "codex",
+                        "backend_transport": "sdk",
+                        "kind": "turn.completed",
+                        "text": "Turn completed",
+                        "status": "completed",
+                        "payload": {
+                            "usage": {"input_tokens": 3, "output_tokens": 4},
+                            "event_type": "turn.completed",
+                            "sdk_thread_id": "sdk-thread-recovered",
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    taskkill_calls: list[list[str]] = []
+
+    def _fake_run(command, **kwargs):
+        taskkill_calls.append(list(command))
+        return None
+
+    adapter = CodexSdkAdapter(AppConfig(codex_sdk_sidecar_command="node fake-sidecar.js"))
+    monkeypatch.setattr("mail_runner.adapters.codex_sdk_adapter.WINDOWS", True)
+    monkeypatch.setattr("mail_runner.adapters.codex_sdk_adapter.subprocess.Popen", _TimeoutAfterCompletedPopen)
+    monkeypatch.setattr("mail_runner.adapters.codex_sdk_adapter.subprocess.run", _fake_run)
+
+    result = adapter.run(snapshot, str(run_dir))
+
+    stdout_text = (run_dir / "stdout.log").read_text(encoding="utf-8")
+    stderr_text = (run_dir / "stderr.log").read_text(encoding="utf-8")
+    sidecar_payload = json.loads((run_dir / "sdk_turn.json").read_text(encoding="utf-8"))
+
+    assert result.status == "success"
+    assert result.backend_session_id == "sdk-thread-recovered"
+    assert "Recovered final response from stream events." in stdout_text
+    assert "forced shutdown" in stderr_text
+    assert sidecar_payload["thread_id"] == "sdk-thread-recovered"
+    assert sidecar_payload["recovered_from_terminal_stream"] is True
+    assert taskkill_calls == [["taskkill", "/T", "/F", "/PID", "4242"]]
+
+
+def test_codex_sdk_adapter_recovery_ignores_trailing_empty_assistant_message(tmp_path, monkeypatch) -> None:
+    snapshot = _snapshot(tmp_path)
+    run_dir = tmp_path / snapshot.thread_id / "runs" / snapshot.task_id
+    run_dir.mkdir(parents=True)
+    stream_path = run_dir / "stream.events.jsonl"
+    stream_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": "2026-03-18T10:05:10.000Z",
+                        "seq": 1,
+                        "thread_id": snapshot.thread_id,
+                        "task_id": snapshot.task_id,
+                        "backend": "codex",
+                        "backend_transport": "sdk",
+                        "kind": "assistant.completed",
+                        "text": "Recovered final response from stream events.",
+                        "item_type": "agent_message",
+                        "status": "completed",
+                        "payload": {
+                            "item_id": "item_1",
+                            "event_type": "item.completed",
+                            "sdk_thread_id": "sdk-thread-recovered",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-03-18T10:05:10.500Z",
+                        "seq": 2,
+                        "thread_id": snapshot.thread_id,
+                        "task_id": snapshot.task_id,
+                        "backend": "codex",
+                        "backend_transport": "sdk",
+                        "kind": "assistant.completed",
+                        "text": "",
+                        "item_type": "agent_message",
+                        "status": "completed",
+                        "payload": {
+                            "item_id": "item_2",
+                            "event_type": "item.completed",
+                            "sdk_thread_id": "sdk-thread-recovered",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-03-18T10:05:11.000Z",
+                        "seq": 3,
+                        "thread_id": snapshot.thread_id,
+                        "task_id": snapshot.task_id,
+                        "backend": "codex",
+                        "backend_transport": "sdk",
+                        "kind": "turn.completed",
+                        "text": "Turn completed",
+                        "status": "completed",
+                        "payload": {
+                            "usage": {"input_tokens": 3, "output_tokens": 4},
+                            "event_type": "turn.completed",
+                            "sdk_thread_id": "sdk-thread-recovered",
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    taskkill_calls: list[list[str]] = []
+
+    def _fake_run(command, **kwargs):
+        taskkill_calls.append(list(command))
+        return None
+
+    adapter = CodexSdkAdapter(AppConfig(codex_sdk_sidecar_command="node fake-sidecar.js"))
+    monkeypatch.setattr("mail_runner.adapters.codex_sdk_adapter.WINDOWS", True)
+    monkeypatch.setattr("mail_runner.adapters.codex_sdk_adapter.subprocess.Popen", _TimeoutAfterCompletedPopen)
+    monkeypatch.setattr("mail_runner.adapters.codex_sdk_adapter.subprocess.run", _fake_run)
+
+    result = adapter.run(snapshot, str(run_dir))
+
+    stdout_text = (run_dir / "stdout.log").read_text(encoding="utf-8")
+    sidecar_payload = json.loads((run_dir / "sdk_turn.json").read_text(encoding="utf-8"))
+
+    assert result.status == "success"
+    assert "Recovered final response from stream events." in stdout_text
+    assert sidecar_payload["final_response"] == "Recovered final response from stream events."
+    assert taskkill_calls == [["taskkill", "/T", "/F", "/PID", "4242"]]

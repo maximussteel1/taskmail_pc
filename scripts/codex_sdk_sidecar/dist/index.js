@@ -1,7 +1,7 @@
 import { promises as fs } from "fs";
 import path from "path";
 import { Codex } from "@openai/codex-sdk";
-import { createTurnOutcomeState, noteTurnCompleted, noteTurnFailure, terminalTurnFailureMessage } from "./turn_outcome.js";
+import { consumeTurnEvents } from "./turn_stream.js";
 function optionalText(value) {
     if (typeof value !== "string") {
         return undefined;
@@ -28,71 +28,6 @@ async function writeJsonlLine(targetPath, payload) {
 }
 function timestamp() {
     return new Date().toISOString();
-}
-function diffText(previous, current) {
-    if (!current) {
-        return "";
-    }
-    if (!previous) {
-        return current;
-    }
-    if (current.startsWith(previous)) {
-        return current.slice(previous.length);
-    }
-    return current;
-}
-function summarizeItem(item) {
-    if (item.type === "command_execution") {
-        return {
-            text: item.command,
-            payload: {
-                command: item.command,
-                exit_code: item.exit_code,
-                status: item.status,
-            },
-        };
-    }
-    if (item.type === "mcp_tool_call") {
-        return {
-            text: `${item.server}.${item.tool}`,
-            payload: {
-                server: item.server,
-                tool: item.tool,
-                status: item.status,
-            },
-        };
-    }
-    if (item.type === "web_search") {
-        return {
-            text: item.query,
-            payload: { query: item.query },
-        };
-    }
-    if (item.type === "file_change") {
-        return {
-            text: `${item.changes.length} file change(s)`,
-            payload: { changes: item.changes, status: item.status },
-        };
-    }
-    if (item.type === "error") {
-        return {
-            text: item.message,
-            payload: { message: item.message },
-        };
-    }
-    if (item.type === "todo_list") {
-        return {
-            text: `${item.items.length} todo item(s)`,
-            payload: { count: item.items.length },
-        };
-    }
-    if (item.type === "reasoning") {
-        return {
-            text: item.text,
-            payload: { message: item.text },
-        };
-    }
-    return {};
 }
 async function main() {
     const rawInput = await readStdin();
@@ -126,14 +61,9 @@ async function main() {
     }
     const mailThreadId = payloadOrEnvText(payload.mail_thread_id, "MAIL_RUNNER_MAIL_THREAD_ID") ?? fail("mail_thread_id is required");
     const taskId = payloadOrEnvText(payload.task_id, "MAIL_RUNNER_TASK_ID") ?? fail("task_id is required");
-    const streamed = await thread.runStreamed(prompt);
-    const completedItems = [];
-    const previousAgentTextById = new Map();
+    const turnAbort = new AbortController();
+    const streamed = await thread.runStreamed(prompt, { signal: turnAbort.signal });
     let seq = 0;
-    let finalResponse = "";
-    let usage = null;
-    let sdkThreadId = thread.id;
-    let turnOutcome = createTurnOutcomeState();
     const emit = async (kind, extra = {}) => {
         seq += 1;
         const event = {
@@ -148,120 +78,25 @@ async function main() {
         };
         await writeJsonlLine(streamPath, event);
     };
-    for await (const event of streamed.events) {
-        if (event.type === "thread.started") {
-            sdkThreadId = event.thread_id;
-            await emit("status", {
-                text: `SDK thread started: ${event.thread_id}`,
-                status: "running",
-                payload: { sdk_thread_id: event.thread_id, event_type: event.type },
-            });
-            continue;
-        }
-        if (event.type === "turn.started") {
-            await emit("turn.started", {
-                text: "Turn started",
-                status: "running",
-                payload: { event_type: event.type, sdk_thread_id: sdkThreadId },
-            });
-            continue;
-        }
-        if (event.type === "turn.completed") {
-            turnOutcome = noteTurnCompleted(turnOutcome);
-            usage = event.usage;
-            await emit("turn.completed", {
-                text: "Turn completed",
-                status: "completed",
-                payload: { usage: event.usage, event_type: event.type, sdk_thread_id: sdkThreadId },
-            });
-            continue;
-        }
-        if (event.type === "turn.failed") {
-            turnOutcome = noteTurnFailure(turnOutcome, event.error.message);
-            await emit("turn.failed", {
-                text: event.error.message,
-                status: "failed",
-                payload: { message: event.error.message, event_type: event.type, sdk_thread_id: sdkThreadId },
-            });
-            continue;
-        }
-        if (event.type === "error") {
-            turnOutcome = noteTurnFailure(turnOutcome, event.message);
-            await emit("turn.failed", {
-                text: event.message,
-                status: "failed",
-                payload: { message: event.message, event_type: event.type, sdk_thread_id: sdkThreadId },
-            });
-            continue;
-        }
-        const item = event.item;
-        if (item.type === "agent_message") {
-            const previousText = previousAgentTextById.get(item.id) ?? "";
-            const delta = diffText(previousText, item.text);
-            previousAgentTextById.set(item.id, item.text);
-            if (delta) {
-                await emit("assistant.delta", {
-                    text: item.text,
-                    delta,
-                    item_type: item.type,
-                    status: event.type === "item.completed" ? "completed" : "streaming",
-                    payload: { item_id: item.id, event_type: event.type, sdk_thread_id: sdkThreadId },
-                });
+    const consumed = await consumeTurnEvents({
+        events: streamed.events,
+        initialThreadId: thread.id,
+        emit,
+        onTerminalEvent: async () => {
+            if (!turnAbort.signal.aborted) {
+                turnAbort.abort();
             }
-            if (event.type === "item.completed") {
-                completedItems.push(item);
-                finalResponse = item.text;
-                await emit("assistant.completed", {
-                    text: item.text,
-                    item_type: item.type,
-                    status: "completed",
-                    payload: { item_id: item.id, event_type: event.type, sdk_thread_id: sdkThreadId },
-                });
-            }
-            continue;
-        }
-        if (event.type === "item.completed") {
-            completedItems.push(item);
-        }
-        const { text, payload: itemPayload } = summarizeItem(item);
-        if (item.type === "command_execution" || item.type === "mcp_tool_call") {
-            const kind = event.type === "item.completed" ? "tool.completed" : "tool.started";
-            await emit(kind, {
-                text,
-                item_type: item.type,
-                status: event.type === "item.completed" ? "completed" : "running",
-                payload: {
-                    ...(itemPayload ?? {}),
-                    item_id: item.id,
-                    event_type: event.type,
-                    sdk_thread_id: sdkThreadId,
-                },
-            });
-            continue;
-        }
-        if (event.type === "item.started" || event.type === "item.completed") {
-            await emit("status", {
-                text,
-                item_type: item.type,
-                status: event.type === "item.completed" ? "completed" : "running",
-                payload: {
-                    ...(itemPayload ?? {}),
-                    item_id: item.id,
-                    event_type: event.type,
-                    sdk_thread_id: sdkThreadId,
-                },
-            });
-        }
-    }
-    const failureMessage = terminalTurnFailureMessage(turnOutcome);
+        },
+    });
+    const failureMessage = consumed.failureMessage;
     if (failureMessage) {
         throw new Error(failureMessage);
     }
     const response = {
-        thread_id: thread.id ?? sdkThreadId,
-        final_response: finalResponse,
-        usage,
-        item_count: completedItems.length,
+        thread_id: consumed.threadId,
+        final_response: consumed.finalResponse,
+        usage: consumed.usage,
+        item_count: consumed.itemCount,
     };
     process.stdout.write(`${JSON.stringify(response)}\n`);
 }

@@ -351,7 +351,8 @@ def test_show_thread_live_merges_transcript_and_live_stream(tmp_path: Path, caps
     assert "Last Progress At: 2099-03-17T01:00:06" in output
     assert "Please continue the refactor." in output
     assert "I am applying the patch now." in output
-    assert "tool.started | pytest -q" in output
+    assert "turn.started | Turn started" in output
+    assert "tool.started | pytest -q" not in output
 
 
 def test_show_thread_live_handles_missing_stream_log(tmp_path: Path, capsys) -> None:
@@ -477,7 +478,7 @@ def test_follow_thread_live_replays_recent_transcript_and_live_stream(tmp_path: 
     assert "Live Thread Monitor: thread_001" in output
     assert "Please continue the refactor." in output
     assert "I am applying the patch now." in output
-    assert "tool.started | pytest -q" in output
+    assert "tool.started | pytest -q" not in output
 
 
 def test_follow_thread_live_keeps_resumable_done_thread_open_until_iteration_limit(tmp_path: Path, capsys) -> None:

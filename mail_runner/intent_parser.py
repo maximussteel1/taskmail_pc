@@ -324,6 +324,19 @@ def parse_action(context: dict[str, Any], subject_info: dict[str, Any] | None = 
             raw_user_text=effective_text,
             target_session_id=target_session_id,
         )
+    if command_name == "last":
+        return ParsedMailAction(
+            action="LAST_RESULT_QUERY",
+            confidence=1.0,
+            raw_user_text=effective_text,
+            target_session_id=target_session_id,
+        )
+    if command_name == "restart-runner":
+        return ParsedMailAction(
+            action="RESTART_RUNNER",
+            confidence=1.0,
+            raw_user_text=effective_text,
+        )
     if command_name == "kill":
         return ParsedMailAction(
             action="KILL",
@@ -369,6 +382,20 @@ def parse_action(context: dict[str, Any], subject_info: dict[str, Any] | None = 
     permission = structured["permission"]
     task_text_delta = structured["task_text_delta"]
     acceptance_delta = structured["acceptance_delta"]
+
+    if command_name == "continue":
+        return ParsedMailAction(
+            action="CONTINUE_SESSION",
+            confidence=1.0,
+            profile=profile,
+            permission=permission,
+            task_text_delta=task_text_delta,
+            acceptance_delta=acceptance_delta,
+            timeout_minutes=timeout_minutes,
+            mode=mode,
+            raw_user_text=effective_text,
+            target_session_id=target_session_id,
+        )
 
     if command_name == "resume":
         if paused:
