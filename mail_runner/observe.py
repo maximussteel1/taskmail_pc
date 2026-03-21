@@ -373,6 +373,7 @@ def follow_thread_live(
     iterations: int,
     history_limit: int,
     exit_when_inactive: bool,
+    exit_state_path: str | None,
 ) -> int:
     cursor = ThreadFollowCursor()
     completed_iterations = 0
@@ -380,6 +381,7 @@ def follow_thread_live(
         context = build_context(config_path=config_path, runtime_dir=runtime_dir, task_root=task_root)
         thread = _find_thread(context, thread_id)
         if thread is None:
+            _write_follow_exit_state(exit_state_path, reason="not_found", thread_id=thread_id)
             print(f"Thread not found: {thread_id}")
             return 1
 
@@ -395,12 +397,14 @@ def follow_thread_live(
 
         if exit_when_inactive and not thread_monitor_should_stay_open(thread):
             _write_follow_chunks(_finalize_follow_output(cursor))
+            _write_follow_exit_state(exit_state_path, reason="inactive", thread_id=thread.thread_id)
             print(f"Thread {thread.thread_id} monitor closed: {thread_monitor_exit_reason(thread)}.")
             return 0
 
         completed_iterations += 1
         if iterations > 0 and completed_iterations >= iterations:
             _write_follow_chunks(_finalize_follow_output(cursor))
+            _write_follow_exit_state(exit_state_path, reason="iterations", thread_id=thread.thread_id)
             return 0
         if poll_seconds > 0:
             time.sleep(poll_seconds)
@@ -537,6 +541,18 @@ def _write_follow_chunks(chunks: list[str]) -> None:
     for chunk in chunks:
         sys.stdout.write(chunk)
     sys.stdout.flush()
+
+
+def _write_follow_exit_state(path_text: str | None, *, reason: str, thread_id: str) -> None:
+    if not path_text:
+        return
+    path = Path(path_text)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "reason": reason,
+        "thread_id": thread_id,
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def _line_chunks(lines: list[str]) -> list[str]:
@@ -746,6 +762,10 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Close once the thread is no longer active/resumable.",
     )
+    follow_thread_live_parser.add_argument(
+        "--exit-state-path",
+        help="Optional internal path used by monitor controllers to record why follow-thread-live exited.",
+    )
     return parser
 
 
@@ -788,8 +808,10 @@ def main(argv: list[str] | None = None) -> int:
                 iterations=max(0, int(args.iterations)),
                 history_limit=max(1, int(args.history_limit)),
                 exit_when_inactive=bool(args.exit_when_inactive),
+                exit_state_path=getattr(args, "exit_state_path", None),
             )
         except KeyboardInterrupt:
+            _write_follow_exit_state(getattr(args, "exit_state_path", None), reason="interrupted", thread_id=args.thread_id)
             print("")
             return 0
 

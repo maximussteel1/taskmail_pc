@@ -124,6 +124,7 @@ class TransportReceipt:
     sent_at: str
     transport_message_id: str | None = None
     error_message: str | None = None
+    error_code: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.success, bool):
@@ -132,6 +133,7 @@ class TransportReceipt:
         _require_text(self.sent_at, "sent_at")
         _require_optional_text(self.transport_message_id, "transport_message_id")
         _require_optional_text(self.error_message, "error_message")
+        _require_optional_text(self.error_code, "error_code")
 
 
 @dataclass(slots=True)

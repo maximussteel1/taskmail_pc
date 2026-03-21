@@ -12,6 +12,7 @@ from pathlib import Path
 from threading import Lock
 
 from ..config import AppConfig, PROJECT_ROOT
+from ..codex_process_registry import remove_process_record, write_process_record
 from ..models import QuestionItem, RunResult, TaskSnapshot
 from ..run_result_capsule import parse_run_result_capsule, strip_run_result_capsules
 from ..state_capsule import parse_question_capsules
@@ -179,6 +180,7 @@ class CodexSdkAdapter(WorkerAdapter):
         sidecar_response_path = run_path / "sdk_turn.json"
         sidecar_request_path = run_path / "sidecar_request.json"
         stream_events_path = run_path / STREAM_EVENTS_FILENAME
+        process: subprocess.Popen[str] | None = None
 
         try:
             cwd = prepare_task_cwd(task, auto_create_workdir=self._config.auto_create_workdir)
@@ -239,6 +241,16 @@ class CodexSdkAdapter(WorkerAdapter):
                 env=env,
                 creationflags=creationflags,
                 start_new_session=not WINDOWS,
+            )
+            write_process_record(
+                run_path,
+                pid=process.pid,
+                task_id=task.task_id,
+                thread_id=task.thread_id,
+                started_at=started_at,
+                repo_path=task.repo_path,
+                workdir=str(cwd),
+                command=command,
             )
             with self._lock:
                 self._active_processes[task.task_id] = _ActiveSidecarProcess(process=process)
@@ -528,6 +540,11 @@ class CodexSdkAdapter(WorkerAdapter):
                 error_message=error_message,
                 backend_transport=task.backend_transport,
             )
+        finally:
+            with self._lock:
+                self._active_processes.pop(task.task_id, None)
+            if process is not None and (process.poll() is not None or process.returncode is not None):
+                remove_process_record(run_path)
 
     def kill(self, task_id: str) -> bool:
         with self._lock:

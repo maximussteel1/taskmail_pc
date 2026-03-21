@@ -185,6 +185,7 @@ def test_codex_sdk_adapter_runs_sidecar_and_records_thread_id(tmp_path, monkeypa
     assert result.backend_session_id == "sdk-thread-001"
     assert "SDK adapter completed the task successfully." in stdout_text
     assert "Runtime Mail Paths:" in prompt_text
+    assert not (run_dir / "codex_sidecar_process.json").exists()
 
 
 def test_codex_sdk_adapter_reply_uses_existing_thread_id(tmp_path, monkeypatch) -> None:

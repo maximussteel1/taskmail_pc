@@ -97,7 +97,7 @@ def test_monitor_window_manager_launches_focused_thread_window(tmp_path: Path) -
     project_root = tmp_path / "repo"
     script_dir = project_root / "scripts"
     script_dir.mkdir(parents=True)
-    (script_dir / "monitor_mail_runner.ps1").write_text("# test\n", encoding="utf-8")
+    (script_dir / "monitor_mail_runner_controller.ps1").write_text("# test\n", encoding="utf-8")
 
     def launcher(command: list[str], creationflags: int, cwd: Path) -> object:
         launched.append((command, creationflags, cwd))
@@ -121,6 +121,8 @@ def test_monitor_window_manager_launches_focused_thread_window(tmp_path: Path) -
     assert len(launched) == 1
     command, creationflags, cwd = launched[0]
     assert command[0].lower() == "powershell.exe"
+    assert "-WindowStyle" in command
+    assert "Hidden" in command
     assert "-ThreadId" in command
     assert "thread_001" in command
     assert "-TaskRoot" in command
@@ -140,7 +142,7 @@ def test_monitor_window_manager_reopens_after_previous_window_exits(tmp_path: Pa
     project_root = tmp_path / "repo"
     script_dir = project_root / "scripts"
     script_dir.mkdir(parents=True)
-    (script_dir / "monitor_mail_runner.ps1").write_text("# test\n", encoding="utf-8")
+    (script_dir / "monitor_mail_runner_controller.ps1").write_text("# test\n", encoding="utf-8")
     launches: list[FakeProcess] = []
 
     def launcher(command: list[str], creationflags: int, cwd: Path) -> object:

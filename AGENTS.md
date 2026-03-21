@@ -42,6 +42,9 @@ future platform ideas.
   `docs/plans/`.
 - If `README.md`, `state.md`, and `docs/current/` disagree, treat
   `docs/current/` as the current protocol source of truth.
+- Write repository documentation in Chinese by default. Unless the task
+  explicitly requires another language, new docs and updated doc content should
+  use Chinese.
 - Keep documentation layered. Do not mix current runtime facts with speculative
   platform design in the same file.
 

@@ -9,6 +9,8 @@ param(
     [int]$Iterations = 0,
     [string]$ThreadId = "",
     [string]$WindowTitle = "",
+    [string]$ReadyFile = "",
+    [string]$ExitStatePath = "",
     [switch]$RequestKill,
     [switch]$ExitWhenThreadNotRunning,
     [switch]$NoClear
@@ -66,6 +68,24 @@ function Set-ConsoleBufferLimit {
         $rawUi.BufferSize = $bufferSize
     } catch {
     }
+}
+
+function Write-MonitorState {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PathText,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Payload
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PathText)) {
+        return
+    }
+    $parent = Split-Path -Parent $PathText
+    if (-not [string]::IsNullOrWhiteSpace($parent)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
+    ($Payload | ConvertTo-Json -Depth 4) + "`n" | Set-Content -Encoding utf8 $PathText
 }
 
 $ErrorActionPreference = "Stop"
@@ -157,6 +177,14 @@ if (-not [string]::IsNullOrWhiteSpace($ThreadId)) {
         exit $LASTEXITCODE
     }
 
+    if (-not [string]::IsNullOrWhiteSpace($ReadyFile)) {
+        Write-MonitorState -PathText $ReadyFile -Payload @{
+            thread_id   = $ThreadId
+            ready_at    = (Get-Date).ToString("s")
+            runtime_dir = $resolvedRuntimeDir
+        }
+    }
+
     Write-Host "Mail Runner Monitor"
     Write-Host "Config: $resolvedConfigPath"
     Write-Host "Runtime Dir: $resolvedRuntimeDir"
@@ -182,9 +210,19 @@ if (-not [string]::IsNullOrWhiteSpace($ThreadId)) {
     if ($Iterations -gt 0) {
         $followArgs += @("--iterations", [string]$Iterations)
     }
+    if (-not [string]::IsNullOrWhiteSpace($ExitStatePath)) {
+        $followArgs += @("--exit-state-path", $ExitStatePath)
+    }
 
     & $pythonPath @followArgs
     if ($LASTEXITCODE -ne 0) {
+        if (-not [string]::IsNullOrWhiteSpace($ExitStatePath) -and -not (Test-Path $ExitStatePath)) {
+            Write-MonitorState -PathText $ExitStatePath -Payload @{
+                reason    = "script_error"
+                thread_id = $ThreadId
+                exit_code = $LASTEXITCODE
+            }
+        }
         throw "Observe command failed with exit code ${LASTEXITCODE}: follow-thread-live $ThreadId"
     }
     exit 0

@@ -524,6 +524,7 @@ def test_follow_thread_live_closes_for_unresumable_thread(tmp_path: Path, capsys
     runtime_dir = tmp_path / "runtime"
     config_path = _write_runtime_config(runtime_dir)
     task_root = runtime_dir / "tasks"
+    exit_state_path = runtime_dir / "follow_exit.json"
     save_thread_state(
         _thread_state(
             thread_id="thread_001",
@@ -548,12 +549,55 @@ def test_follow_thread_live_closes_for_unresumable_thread(tmp_path: Path, capsys
             "--poll-seconds",
             "0",
             "--exit-when-inactive",
+            "--exit-state-path",
+            str(exit_state_path),
         ]
     )
 
     output = capsys.readouterr().out
+    exit_state = json.loads(exit_state_path.read_text(encoding="utf-8"))
     assert exit_code == 0
     assert "monitor closed: native session context is unavailable." in output
+    assert exit_state == {"reason": "inactive", "thread_id": "thread_001"}
+
+
+def test_follow_thread_live_writes_iteration_exit_state(tmp_path: Path, capsys) -> None:
+    runtime_dir = tmp_path / "runtime"
+    config_path = _write_runtime_config(runtime_dir)
+    task_root = runtime_dir / "tasks"
+    exit_state_path = runtime_dir / "follow_iterations.json"
+    save_thread_state(
+        _thread_state(
+            thread_id="thread_001",
+            status="running",
+            current_task_id="task_run",
+            backend_transport="sdk",
+            updated_at="2099-03-17T01:00:03",
+        ),
+        task_root,
+    )
+
+    exit_code = main(
+        [
+            "--config",
+            str(config_path),
+            "--runtime-dir",
+            str(runtime_dir),
+            "follow-thread-live",
+            "thread_001",
+            "--iterations",
+            "1",
+            "--poll-seconds",
+            "0",
+            "--exit-state-path",
+            str(exit_state_path),
+        ]
+    )
+
+    capsys.readouterr()
+    exit_state = json.loads(exit_state_path.read_text(encoding="utf-8"))
+    assert exit_code == 0
+    assert exit_state == {"reason": "iterations", "thread_id": "thread_001"}
 
 
 def test_show_thread_returns_nonzero_for_missing_thread(tmp_path: Path, capsys) -> None:

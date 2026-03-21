@@ -57,7 +57,7 @@ class MonitorWindowManager:
 
     @property
     def script_path(self) -> Path:
-        return self.project_root / "scripts" / "monitor_mail_runner.ps1"
+        return self.project_root / "scripts" / "monitor_mail_runner_controller.ps1"
 
     def on_run_started(self, state: ThreadState, snapshot: TaskSnapshot) -> None:
         if not self.enabled:
@@ -90,6 +90,8 @@ class MonitorWindowManager:
         command = [
             "powershell.exe",
             "-NoProfile",
+            "-WindowStyle",
+            "Hidden",
             "-ExecutionPolicy",
             "Bypass",
             "-File",

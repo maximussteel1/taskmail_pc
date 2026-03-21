@@ -44,8 +44,10 @@ from .reporter import (
 )
 from .runtime_control import (
     list_runner_restart_request_paths,
+    list_thread_close_request_paths,
     list_thread_kill_request_paths,
     read_runner_restart_request,
+    read_thread_close_request,
     read_thread_kill_request,
     write_runner_restart_request,
 )
@@ -274,6 +276,125 @@ def _process_runtime_thread_kill_requests(
     return stats
 
 
+def _process_runtime_thread_close_requests(
+    runner: SerialTaskRunner,
+    *,
+    runtime_dir: Path | None,
+) -> dict[str, int]:
+    stats = {"seen": 0, "completed": 0, "pending": 0, "ignored": 0, "invalid": 0}
+    if runtime_dir is None:
+        return stats
+
+    for request_path in list_thread_close_request_paths(runtime_dir):
+        stats["seen"] += 1
+        try:
+            request = read_thread_close_request(request_path)
+        except Exception:
+            LOGGER.exception("Unable to parse thread close request: %s", request_path)
+            stats["invalid"] += 1
+            request_path.unlink(missing_ok=True)
+            continue
+
+        thread_id = request["thread_id"]
+        requested_task_id = request["task_id"]
+        source = request["source"]
+        try:
+            state = load_thread_state(thread_id, runner.workspace.task_root)
+        except FileNotFoundError:
+            LOGGER.info(
+                "Ignored local thread close request for missing thread. thread=%s task=%s source=%s",
+                thread_id,
+                requested_task_id,
+                source,
+            )
+            stats["ignored"] += 1
+            request_path.unlink(missing_ok=True)
+            continue
+
+        current_task_id = str(state.current_task_id or "").strip()
+        if current_task_id != requested_task_id:
+            LOGGER.info(
+                "Ignored stale local thread close request. thread=%s requested_task=%s current_task=%s source=%s",
+                thread_id,
+                requested_task_id,
+                current_task_id or "-",
+                source,
+            )
+            stats["ignored"] += 1
+            request_path.unlink(missing_ok=True)
+            continue
+
+        if state.lifecycle != "active":
+            LOGGER.info(
+                "Completed local thread close request because session is already inactive. thread=%s task=%s source=%s",
+                thread_id,
+                requested_task_id,
+                source,
+            )
+            stats["completed"] += 1
+            request_path.unlink(missing_ok=True)
+            continue
+
+        if state.status in _NON_ENDABLE_ACTIVE_THREAD_STATUSES:
+            killed = runner.kill_thread(thread_id, expected_task_id=current_task_id)
+            try:
+                state = load_thread_state(thread_id, runner.workspace.task_root)
+            except FileNotFoundError:
+                state = None
+            if state is None:
+                LOGGER.info(
+                    "Ignored local thread close request after thread disappeared. thread=%s task=%s source=%s",
+                    thread_id,
+                    requested_task_id,
+                    source,
+                )
+                stats["ignored"] += 1
+                request_path.unlink(missing_ok=True)
+                continue
+            if state.current_task_id != requested_task_id:
+                LOGGER.info(
+                    "Ignored local thread close request after task changed. thread=%s requested_task=%s current_task=%s source=%s",
+                    thread_id,
+                    requested_task_id,
+                    state.current_task_id or "-",
+                    source,
+                )
+                stats["ignored"] += 1
+                request_path.unlink(missing_ok=True)
+                continue
+            if state.lifecycle == "active" and state.status in _NON_ENDABLE_ACTIVE_THREAD_STATUSES:
+                if state.status == THREAD_STATUS_ACCEPTED and not killed:
+                    LOGGER.info(
+                        "Completing local thread close request for accepted thread without an active backend run. thread=%s task=%s source=%s",
+                        thread_id,
+                        requested_task_id,
+                        source,
+                    )
+                else:
+                    LOGGER.info(
+                        "Local thread close request is waiting for thread shutdown. thread=%s task=%s source=%s kill_requested=%s",
+                        thread_id,
+                        requested_task_id,
+                        source,
+                        killed,
+                    )
+                    stats["pending"] += 1
+                    continue
+
+        _set_thread_lifecycle(state, lifecycle="ended")
+        save_thread_state(state, runner.workspace.task_root)
+        LOGGER.info(
+            "Completed local thread close request. thread=%s task=%s source=%s final_status=%s",
+            thread_id,
+            requested_task_id,
+            source,
+            state.status,
+        )
+        stats["completed"] += 1
+        request_path.unlink(missing_ok=True)
+    return stats
+
+
 def _manage_mail_runner_script_path() -> Path:
     return (PROJECT_ROOT / "scripts" / "manage_mail_runner.ps1").resolve()
 
@@ -384,10 +505,13 @@ def _sleep_with_runtime_control(
         runner.collect_finished()
         runner.dispatch_ready()
         _process_runtime_thread_kill_requests(runner, runtime_dir=runtime_dir)
+        _process_runtime_thread_close_requests(runner, runtime_dir=runtime_dir)
         if event_detected:
             return True
         remaining -= sleep_seconds
     return False
+
+
 def _materialize_envelope_attachments(envelope: MailEnvelope, repo_path: str, workdir: str | None) -> MailEnvelope:
     if not envelope.attachments:
         return envelope
@@ -397,6 +521,8 @@ def _materialize_envelope_attachments(envelope: MailEnvelope, repo_path: str, wo
         workdir=workdir,
         auto_create_workdir=False,
     )
+
+
 def _sync_reply_state_path(task_root: Path) -> Path:
     return task_root / "_mailbox" / _SYNC_REPLY_STATE_FILENAME
 
@@ -1876,14 +2002,16 @@ def run_forever(config: AppConfig, *, base_dir: str | Path | None = None) -> Non
             runner.collect_finished()
             runner.dispatch_ready()
             _process_runtime_thread_kill_requests(runner, runtime_dir=runtime_dir)
+            _process_runtime_thread_close_requests(runner, runtime_dir=runtime_dir)
             restart_scheduled = _maybe_schedule_requested_runner_restart(runtime_dir)
             stats = _process_batch(config, task_root, client, runner, background=True)
             runner.collect_finished()
             runner.dispatch_ready()
             control_stats = _process_runtime_thread_kill_requests(runner, runtime_dir=runtime_dir)
+            close_stats = _process_runtime_thread_close_requests(runner, runtime_dir=runtime_dir)
             restart_scheduled = _maybe_schedule_requested_runner_restart(runtime_dir) or restart_scheduled
             LOGGER.info(
-                "Polling cycle complete. fetched=%s processed=%s skipped=%s failed=%s busy=%s restart_scheduled=%s control_seen=%s control_accepted=%s control_ignored=%s control_invalid=%s",
+                "Polling cycle complete. fetched=%s processed=%s skipped=%s failed=%s busy=%s restart_scheduled=%s control_seen=%s control_accepted=%s control_ignored=%s control_invalid=%s close_seen=%s close_completed=%s close_pending=%s close_ignored=%s close_invalid=%s",
                 stats["fetched"],
                 stats["processed"],
                 stats["skipped"],
@@ -1894,6 +2022,11 @@ def run_forever(config: AppConfig, *, base_dir: str | Path | None = None) -> Non
                 control_stats["accepted"],
                 control_stats["ignored"],
                 control_stats["invalid"],
+                close_stats["seen"],
+                close_stats["completed"],
+                close_stats["pending"],
+                close_stats["ignored"],
+                close_stats["invalid"],
             )
             woke_for_mail = _sleep_with_runtime_control(
                 config.poll_seconds,
