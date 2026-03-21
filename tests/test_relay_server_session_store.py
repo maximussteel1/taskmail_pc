@@ -20,6 +20,20 @@ def test_in_memory_session_store_tracks_session_lifecycle() -> None:
     assert touched.last_seen_at == "2026-03-20T13:35:05"
     assert listed[0].client_id == "pc-001"
     assert store.count() == 1
+    store.upsert_subscription(
+        "conn-001",
+        subscription_id="sub-001",
+        workspace_id="workspace_001",
+        session_id="session_001",
+        thread_id="thread_001",
+        last_sequence=3,
+    )
+    reserved_sequence = store.reserve_session_sequence("workspace_001", "session_001", minimum_next_sequence=4)
+
+    assert reserved_sequence == 4
+    assert store.get_session("conn-001").active_subscription_id == "sub-001"
+    assert store.get_session("conn-001").last_subscription_sequence == 3
+
     removed = store.remove_session("conn-001")
     assert removed is not None
     assert store.count() == 0
@@ -43,11 +57,23 @@ def test_persistent_session_store_survives_restart(tmp_path) -> None:
         connected_at="2026-03-20T13:35:00",
         last_seen_at="2026-03-20T13:35:00",
     )
+    store.upsert_subscription(
+        "conn-001",
+        subscription_id="sub-001",
+        workspace_id="workspace_001",
+        session_id="session_001",
+        thread_id="thread_001",
+        last_sequence=5,
+    )
+    assert store.reserve_session_sequence("workspace_001", "session_001", minimum_next_sequence=6) == 6
     store.close_session("conn-001", closed_at="2026-03-20T13:36:00")
 
     reloaded = PersistentSessionStore(state_dir)
     session = reloaded.get_session("conn-001")
+    next_sequence = reloaded.reserve_session_sequence("workspace_001", "session_001", minimum_next_sequence=1)
 
     assert session is not None
     assert session.client_id == "pc-001"
     assert session.closed_at == "2026-03-20T13:36:00"
+    assert session.active_subscription_id is None
+    assert next_sequence == 7

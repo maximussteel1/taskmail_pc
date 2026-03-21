@@ -208,3 +208,13 @@ def test_save_raw_mail_persists_attachment_payloads(tmp_path) -> None:
     assert "photo.png" in raw_path.read_text(encoding="utf-8")
     attachment_dir = raw_path.with_name("raw_001_attachments")
     assert (attachment_dir / "001_photo.png").read_bytes() == b"png!"
+
+
+def test_thread_store_defaults_to_mail_runner_task_root_env(tmp_path, monkeypatch) -> None:
+    task_root = tmp_path / "tasks_env"
+    created = _create_thread(task_root, "thread_011")
+    monkeypatch.setenv("MAIL_RUNNER_TASK_ROOT", str(task_root))
+
+    loaded = load_thread_state("thread_011")
+
+    assert loaded == created

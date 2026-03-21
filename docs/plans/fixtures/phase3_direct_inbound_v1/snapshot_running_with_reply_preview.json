@@ -1,0 +1,100 @@
+{
+  "fixture_meta": {
+    "fixture_id": "snapshot_running_with_reply_preview",
+    "schema_version": "phase3-direct-inbound-fixture-package-v1",
+    "intent": "running snapshot with assistant-visible reply preview"
+  },
+  "subscribe_exchange": {
+    "request": {
+      "message_type": "packet",
+      "packet_id": "android-taskmail:subscribe-detail:req_fx008",
+      "client_trace_id": "req_fx008",
+      "task_run_packet": {
+        "schema_version": "phase3-direct-inbound-wire-v1",
+        "action": "subscribe_session_detail",
+        "request_id": "req_fx008",
+        "origin": {
+          "client": "android_taskmail"
+        },
+        "subscription": {
+          "workspace_id": "workspace_a13f92d1c0ef",
+          "session_id": "session_001",
+          "reason": "detail_open"
+        }
+      },
+      "dispatch_metadata": {
+        "channel": "taskmail_android_direct",
+        "schema_version": "phase3-direct-inbound-wire-v1",
+        "action": "subscribe_session_detail"
+      },
+      "sent_at": "2026-03-21T22:37:01"
+    },
+    "ack": {
+      "message_type": "packet_ack",
+      "packet_id": "android-taskmail:subscribe-detail:req_fx008",
+      "accepted": true,
+      "receipt_id": "receipt_fx008",
+      "received_at": "2026-03-21T22:37:02"
+    }
+  },
+  "session_updates": [
+    {
+      "message_type": "session_update",
+      "schema_version": "phase3-direct-inbound-wire-v1",
+      "subscription_id": "sub_fx008",
+      "workspace_id": "workspace_a13f92d1c0ef",
+      "session_id": "session_001",
+      "thread_id": "thread_001",
+      "task_id": "task_001",
+      "update_id": "sessupd:session_001:8",
+      "sequence": 8,
+      "sent_at": "2026-03-21T22:37:03",
+      "update_type": "session_snapshot",
+      "session_snapshot": {
+        "session_name": "Phase 3 detail bridge",
+        "backend": "codex",
+        "repo_path": "E:\\projects\\android_task_manager",
+        "workdir": "feature/taskmail/internal",
+        "status": "running",
+        "lifecycle": "active",
+        "last_summary": "Inspecting the detail merge path.",
+        "last_active_at": "2026-03-21T22:37:03",
+        "last_progress_at": "2026-03-21T22:37:03",
+        "paused_from_status": null,
+        "question_state": null,
+        "timeline_items": [
+          {
+            "item_id": "tl_reply_008",
+            "business_event_key": "reply/2026-03-21T22:37:03",
+            "item_type": "assistant_reply_preview",
+            "created_at": "2026-03-21T22:37:03",
+            "status": null,
+            "text": "Inspecting the detail merge path.",
+            "question_set_id": null,
+            "question_ids": [],
+            "paused_from_status": null
+          }
+        ]
+      }
+    }
+  ],
+  "recovery_exchange": null,
+  "mail_companion": {
+    "items": []
+  },
+  "expected_projection": {
+    "canonical_workspace_id": "workspace_a13f92d1c0ef",
+    "canonical_session_id": "session_001",
+    "canonical_thread_id": "thread_001",
+    "header_status": "running",
+    "header_lifecycle": "active",
+    "last_summary": "Inspecting the detail merge path.",
+    "question_set_id": null,
+    "pending_question_ids": [],
+    "quick_answer_choices": [],
+    "visible_business_event_keys": [
+      "reply/2026-03-21T22:37:03"
+    ],
+    "suppressed_direct_business_event_keys": []
+  }
+}

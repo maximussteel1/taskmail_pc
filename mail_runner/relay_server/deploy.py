@@ -25,12 +25,20 @@ class RelayDeploymentConfig:
     run_user: str = "ubuntu"
     python_bin: str = "python3"
     state_dir: str = ""
+    task_root: str = ""
     smtp_host: str = ""
     smtp_port: int = 465
     smtp_user: str = ""
     smtp_password: str = ""
     from_name: str = "Mail Runner Relay"
     from_addr: str = ""
+    taskmail_bot_mailbox_addr: str = ""
+    taskmail_direct_from_name: str = "TaskMail User"
+    taskmail_direct_from_addr: str = ""
+    taskmail_direct_smtp_host: str = ""
+    taskmail_direct_smtp_port: int = 465
+    taskmail_direct_smtp_user: str = ""
+    taskmail_direct_smtp_password: str = ""
     tls_certfile: str = ""
     tls_keyfile: str = ""
 
@@ -49,6 +57,8 @@ class RelayDeploymentConfig:
         self.run_user = _require_text(self.run_user, "run_user")
         self.python_bin = _require_text(self.python_bin, "python_bin")
         self.state_dir = self.state_dir.strip() or f"{self.remote_base_dir}/shared/state"
+        if self.task_root:
+            self.task_root = _require_text(self.task_root, "task_root")
         self.smtp_host = _require_text(self.smtp_host, "smtp_host")
         if not isinstance(self.smtp_port, int) or not (1 <= self.smtp_port <= 65535):
             raise ValueError("smtp_port must be an integer between 1 and 65535")
@@ -56,6 +66,46 @@ class RelayDeploymentConfig:
         self.smtp_password = _require_text(self.smtp_password, "smtp_password")
         self.from_name = _require_text(self.from_name, "from_name")
         self.from_addr = _require_text(self.from_addr, "from_addr")
+        if self.taskmail_bot_mailbox_addr:
+            self.taskmail_bot_mailbox_addr = _require_text(
+                self.taskmail_bot_mailbox_addr,
+                "taskmail_bot_mailbox_addr",
+            )
+        if self.taskmail_direct_from_addr:
+            self.taskmail_direct_from_addr = _require_text(
+                self.taskmail_direct_from_addr,
+                "taskmail_direct_from_addr",
+            )
+        if not isinstance(self.taskmail_direct_smtp_port, int) or not (1 <= self.taskmail_direct_smtp_port <= 65535):
+            raise ValueError("taskmail_direct_smtp_port must be an integer between 1 and 65535")
+        if self.taskmail_direct_smtp_host:
+            self.taskmail_direct_smtp_host = _require_text(
+                self.taskmail_direct_smtp_host,
+                "taskmail_direct_smtp_host",
+            )
+        if self.taskmail_direct_smtp_user:
+            self.taskmail_direct_smtp_user = _require_text(
+                self.taskmail_direct_smtp_user,
+                "taskmail_direct_smtp_user",
+            )
+        if self.taskmail_direct_smtp_password:
+            self.taskmail_direct_smtp_password = _require_text(
+                self.taskmail_direct_smtp_password,
+                "taskmail_direct_smtp_password",
+            )
+        self.taskmail_direct_from_name = _require_text(
+            self.taskmail_direct_from_name,
+            "taskmail_direct_from_name",
+        )
+        if bool(self.taskmail_bot_mailbox_addr) != bool(self.taskmail_direct_from_addr):
+            raise ValueError(
+                "taskmail_bot_mailbox_addr and taskmail_direct_from_addr must be provided together"
+            )
+        if any((self.taskmail_direct_smtp_host, self.taskmail_direct_smtp_user, self.taskmail_direct_smtp_password)):
+            if not all((self.taskmail_direct_smtp_host, self.taskmail_direct_smtp_user, self.taskmail_direct_smtp_password)):
+                raise ValueError(
+                    "taskmail_direct_smtp_host, taskmail_direct_smtp_user, and taskmail_direct_smtp_password must be provided together"
+                )
         if bool(self.tls_certfile) != bool(self.tls_keyfile):
             raise ValueError("tls_certfile and tls_keyfile must be provided together")
 
@@ -93,9 +143,21 @@ def render_env_file(config: RelayDeploymentConfig, *, transport_token: str) -> s
         f"MAIL_RELAY_SMTP_PASSWORD={config.smtp_password}",
         f"MAIL_RELAY_FROM_NAME={config.from_name}",
         f"MAIL_RELAY_FROM_ADDR={config.from_addr}",
+        f"MAIL_RELAY_TASKMAIL_DIRECT_FROM_NAME={config.taskmail_direct_from_name}",
         f"MAIL_RELAY_LOG_LEVEL={config.log_level}",
         f"MAIL_RELAY_SERVER_NAME={config.server_name}",
     ]
+    if config.task_root:
+        lines.append(f"MAIL_RUNNER_TASK_ROOT={config.task_root}")
+    if config.taskmail_bot_mailbox_addr:
+        lines.append(f"MAIL_RELAY_TASKMAIL_BOT_MAILBOX_ADDR={config.taskmail_bot_mailbox_addr}")
+    if config.taskmail_direct_from_addr:
+        lines.append(f"MAIL_RELAY_TASKMAIL_DIRECT_FROM_ADDR={config.taskmail_direct_from_addr}")
+    if config.taskmail_direct_smtp_host:
+        lines.append(f"MAIL_RELAY_TASKMAIL_DIRECT_SMTP_HOST={config.taskmail_direct_smtp_host}")
+        lines.append(f"MAIL_RELAY_TASKMAIL_DIRECT_SMTP_PORT={config.taskmail_direct_smtp_port}")
+        lines.append(f"MAIL_RELAY_TASKMAIL_DIRECT_SMTP_USER={config.taskmail_direct_smtp_user}")
+        lines.append(f"MAIL_RELAY_TASKMAIL_DIRECT_SMTP_PASSWORD={config.taskmail_direct_smtp_password}")
     if config.tls_certfile:
         lines.append(f"MAIL_RELAY_TLS_CERTFILE={config.tls_certfile}")
         lines.append(f"MAIL_RELAY_TLS_KEYFILE={config.tls_keyfile}")

@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .config import AppConfig
+from .config import load_config
 from .models import MailAttachment, MailEnvelope, QuestionAnswer, QuestionItem, SessionState, ThreadState, WorkspaceState
 from .parser import extract_session_tag, normalize_subject
 from .status import (
@@ -54,7 +54,7 @@ def _json_safe(value: Any) -> Any:
 
 
 def _workspace(task_root: str | Path | None = None) -> WorkspaceManager:
-    root = task_root if task_root is not None else AppConfig().resolve_task_root()
+    root = task_root if task_root is not None else load_config().resolve_task_root()
     return WorkspaceManager(root)
 
 

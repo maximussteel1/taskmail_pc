@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .config import AppConfig
+from .config import load_config
 from .mail_attachments import attachment_summary_lines
 from .models import MailEnvelope, QuestionAnswer, QuestionItem, RunResult, TaskSnapshot, ThreadState
 from .question_utils import effective_pending_questions, effective_question_set_id
@@ -16,7 +16,7 @@ from .workspace import WorkspaceManager
 
 
 def _workspace(task_root: str | Path | None = None) -> WorkspaceManager:
-    root = task_root if task_root is not None else AppConfig().resolve_task_root()
+    root = task_root if task_root is not None else load_config().resolve_task_root()
     return WorkspaceManager(root)
 
 

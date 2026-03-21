@@ -1,0 +1,192 @@
+{
+  "fixture_meta": {
+    "fixture_id": "gap_resubscribe_fresh_snapshot",
+    "schema_version": "phase3-direct-inbound-fixture-package-v1",
+    "intent": "gap detection triggers resubscribe and fresh snapshot recovery"
+  },
+  "subscribe_exchange": {
+    "request": {
+      "message_type": "packet",
+      "packet_id": "android-taskmail:subscribe-detail:req_fx020a",
+      "client_trace_id": "req_fx020a",
+      "task_run_packet": {
+        "schema_version": "phase3-direct-inbound-wire-v1",
+        "action": "subscribe_session_detail",
+        "request_id": "req_fx020a",
+        "origin": {
+          "client": "android_taskmail"
+        },
+        "subscription": {
+          "workspace_id": "workspace_a13f92d1c0ef",
+          "session_id": "session_001",
+          "last_known_sequence": 0,
+          "reason": "detail_open"
+        }
+      },
+      "dispatch_metadata": {
+        "channel": "taskmail_android_direct",
+        "schema_version": "phase3-direct-inbound-wire-v1",
+        "action": "subscribe_session_detail"
+      },
+      "sent_at": "2026-03-21T22:49:01"
+    },
+    "ack": {
+      "message_type": "packet_ack",
+      "packet_id": "android-taskmail:subscribe-detail:req_fx020a",
+      "accepted": true,
+      "receipt_id": "receipt_fx020a",
+      "received_at": "2026-03-21T22:49:02"
+    }
+  },
+  "session_updates": [
+    {
+      "message_type": "session_update",
+      "schema_version": "phase3-direct-inbound-wire-v1",
+      "subscription_id": "sub_fx020a",
+      "workspace_id": "workspace_a13f92d1c0ef",
+      "session_id": "session_001",
+      "thread_id": "thread_001",
+      "task_id": "task_001",
+      "update_id": "sessupd:session_001:30",
+      "sequence": 30,
+      "sent_at": "2026-03-21T22:49:03",
+      "update_type": "session_snapshot",
+      "session_snapshot": {
+        "session_name": "Phase 3 detail bridge",
+        "backend": "codex",
+        "repo_path": "E:\\projects\\android_task_manager",
+        "workdir": "feature/taskmail/internal",
+        "status": "running",
+        "lifecycle": "active",
+        "last_summary": "Running before gap.",
+        "last_active_at": "2026-03-21T22:49:03",
+        "last_progress_at": "2026-03-21T22:49:03",
+        "paused_from_status": null,
+        "question_state": null,
+        "timeline_items": []
+      }
+    },
+    {
+      "message_type": "session_update",
+      "schema_version": "phase3-direct-inbound-wire-v1",
+      "subscription_id": "sub_fx020a",
+      "workspace_id": "workspace_a13f92d1c0ef",
+      "session_id": "session_001",
+      "thread_id": "thread_001",
+      "task_id": "task_001",
+      "update_id": "sessupd:session_001:32",
+      "sequence": 32,
+      "sent_at": "2026-03-21T22:49:10",
+      "update_type": "session_delta",
+      "session_delta": {
+        "delta_type": "timeline_append",
+        "timeline_items": [
+          {
+            "item_id": "tl_reply_gap_020",
+            "business_event_key": "reply/2026-03-21T22:49:10",
+            "item_type": "assistant_reply_preview",
+            "created_at": "2026-03-21T22:49:10",
+            "status": null,
+            "text": "This delta should be treated as gapped because sequence 31 is missing.",
+            "question_set_id": null,
+            "question_ids": [],
+            "paused_from_status": null
+          }
+        ]
+      }
+    },
+    {
+      "message_type": "session_update",
+      "schema_version": "phase3-direct-inbound-wire-v1",
+      "subscription_id": "sub_fx020b",
+      "workspace_id": "workspace_a13f92d1c0ef",
+      "session_id": "session_001",
+      "thread_id": "thread_001",
+      "task_id": "task_001",
+      "update_id": "sessupd:session_001:40",
+      "sequence": 40,
+      "sent_at": "2026-03-21T22:49:20",
+      "update_type": "session_snapshot",
+      "session_snapshot": {
+        "session_name": "Phase 3 detail bridge",
+        "backend": "codex",
+        "repo_path": "E:\\projects\\android_task_manager",
+        "workdir": "feature/taskmail/internal",
+        "status": "running",
+        "lifecycle": "active",
+        "last_summary": "Recovered after resubscribe.",
+        "last_active_at": "2026-03-21T22:49:20",
+        "last_progress_at": "2026-03-21T22:49:20",
+        "paused_from_status": null,
+        "question_state": null,
+        "timeline_items": [
+          {
+            "item_id": "tl_reply_020b",
+            "business_event_key": "reply/2026-03-21T22:49:20",
+            "item_type": "assistant_reply_preview",
+            "created_at": "2026-03-21T22:49:20",
+            "status": null,
+            "text": "Recovered after resubscribe.",
+            "question_set_id": null,
+            "question_ids": [],
+            "paused_from_status": null
+          }
+        ]
+      }
+    }
+  ],
+  "recovery_exchange": {
+    "request": {
+      "message_type": "packet",
+      "packet_id": "android-taskmail:subscribe-detail:req_fx020b",
+      "client_trace_id": "req_fx020b",
+      "task_run_packet": {
+        "schema_version": "phase3-direct-inbound-wire-v1",
+        "action": "subscribe_session_detail",
+        "request_id": "req_fx020b",
+        "origin": {
+          "client": "android_taskmail"
+        },
+        "subscription": {
+          "workspace_id": "workspace_a13f92d1c0ef",
+          "session_id": "session_001",
+          "last_known_sequence": 30,
+          "reason": "detail_refresh"
+        }
+      },
+      "dispatch_metadata": {
+        "channel": "taskmail_android_direct",
+        "schema_version": "phase3-direct-inbound-wire-v1",
+        "action": "subscribe_session_detail"
+      },
+      "sent_at": "2026-03-21T22:49:15"
+    },
+    "ack": {
+      "message_type": "packet_ack",
+      "packet_id": "android-taskmail:subscribe-detail:req_fx020b",
+      "accepted": true,
+      "receipt_id": "receipt_fx020b",
+      "received_at": "2026-03-21T22:49:16"
+    }
+  },
+  "mail_companion": {
+    "items": []
+  },
+  "expected_projection": {
+    "canonical_workspace_id": "workspace_a13f92d1c0ef",
+    "canonical_session_id": "session_001",
+    "canonical_thread_id": "thread_001",
+    "header_status": "running",
+    "header_lifecycle": "active",
+    "last_summary": "Recovered after resubscribe.",
+    "question_set_id": null,
+    "pending_question_ids": [],
+    "quick_answer_choices": [],
+    "visible_business_event_keys": [
+      "reply/2026-03-21T22:49:20"
+    ],
+    "suppressed_direct_business_event_keys": [
+      "reply/2026-03-21T22:49:10"
+    ]
+  }
+}

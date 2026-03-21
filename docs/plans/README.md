@@ -42,6 +42,11 @@ Current plan documents:
 - `phase0_relay_readiness_note.md`: verified readiness note for the chosen public plaintext baseline; records that the live VPS now matches that baseline.
 - `phase0_direct_connect_handoff.md`: short repository-side handoff note that closes Phase 0 planning freeze and points Phase 1 at bootstrap promotion with mail fallback preserved.
 - `phase1_direct_connect_bootstrap.md`: repository-side Phase 1 bootstrap/seam/failure note that defines the reusable relay bootstrap probe boundary and current fallback taxonomy.
+- `phase2_direct_outbound_contract_v1.md`: shared Phase 2 contract freeze for the first direct outbound `new task` slice over the existing relay transport wrapper.
+- `phase2_direct_outbound_closeout_handoff.md`: short repository-side handoff note that closes the Phase 2 direct-outbound v1 slice and points the next session at the Phase 3 direct inbound update bridge.
+- `phase3_direct_inbound_mapping_v1.md`: shared Phase 3 first-slice mapping note for active-session direct inbound updates into the existing Android session-detail read side.
+- `phase3_direct_inbound_wire_v1.md`: shared Phase 3 first-slice wire contract for active-session detail subscribe, `session_update`, ordering, and resync.
+- `phase3_direct_inbound_fixture_package_v1.md`: shared Phase 3 representative fixture package note for subscribe identity fallbacks, status snapshots, reconciliation, and resync.
 - `outbound_mail_contract_convergence_plan.md`: broader long-term plan for converging outbound task mail onto a neutral internal model, summary-first plain text, fragment-based HTML projection, and dual-format subject compatibility.
 
 Original outbound sequencing was: freeze the consumer-facing contract first, land the narrow `p9_html_mail_projection_plan.md` reading slice against that frozen contract, and only then start the broader `outbound_mail_contract_convergence_plan.md` work.
@@ -74,5 +79,28 @@ Android/PC/VPS slice is Phase 1 bootstrap promotion rather than more baseline de
 As of 2026-03-21, repository-side Phase 1 bootstrap artifacts are also published in
 `docs/plans/phase1_direct_connect_bootstrap.md`. That note closes the repository-side bootstrap probe/seam/failure
 taxonomy, while cross-repo Phase 1 still remains open pending Android-side reuse above the debug-only screen.
+
+As of 2026-03-21, the first shared Phase 2 freeze artifact also exists in
+`docs/plans/phase2_direct_outbound_contract_v1.md`. That note freezes only the first direct `new task` packet shape,
+ack meaning, and fallback matrix; it does not claim that the repository already implements direct Android business
+traffic today.
+
+As of 2026-03-21, the repository-side closeout handoff for that first Phase 2 slice is also explicit in
+`docs/plans/phase2_direct_outbound_closeout_handoff.md`. That means the next active cross-repo slice should now be
+read as Phase 3 direct inbound update bridge rather than more implicit Phase 2 scope growth.
+
+As of 2026-03-21, the first repository-side Phase 3 read-side freeze artifact also exists in
+`docs/plans/phase3_direct_inbound_mapping_v1.md`. That note intentionally starts with active-session detail mapping and
+mail/direct coexistence rules rather than jumping straight to a full history or workspace-summary API.
+
+As of 2026-03-21, the next companion artifact for that Phase 3 slice is also explicit in
+`docs/plans/phase3_direct_inbound_wire_v1.md`. That note freezes the active-session detail subscribe flow, the
+`session_update` push message, and the first resync/ordering rules so Android and repository-side work can stop
+guessing different wire behavior.
+
+As of 2026-03-21, the first representative fixture companion for that Phase 3 slice is also explicit in
+`docs/plans/phase3_direct_inbound_fixture_package_v1.md`. That note freezes the fixture-unit contract, identity
+fallback cases, question/status coverage, reconciliation suppress cases, and the first deterministic manifest both
+repositories should implement against.
 
 Layering reference: [document_layering_plan.md](../document_layering_plan.md).

@@ -39,12 +39,53 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-user", default="ubuntu", help="Remote service user.")
     parser.add_argument("--python-bin", default="python3", help="Remote Python executable name.")
     parser.add_argument("--state-dir", default="", help="Persistent state directory. Defaults to <remote-base-dir>/shared/state.")
+    parser.add_argument(
+        "--task-root",
+        default="",
+        help="Optional remote task_root visible to the relay as MAIL_RUNNER_TASK_ROOT.",
+    )
     parser.add_argument("--smtp-host", required=True, help="SMTP host used by the relay for user-facing delivery.")
     parser.add_argument("--smtp-port", type=int, default=465, help="SMTP port used by the relay.")
     parser.add_argument("--smtp-user", required=True, help="SMTP username used by the relay.")
     parser.add_argument("--smtp-password", required=True, help="SMTP password used by the relay.")
     parser.add_argument("--from-name", default="Mail Runner Relay", help="From display name used by the relay.")
     parser.add_argument("--from-addr", required=True, help="From email address used by the relay.")
+    parser.add_argument(
+        "--taskmail-bot-mailbox-addr",
+        default="",
+        help="Bot mailbox address used as the delivery target for direct TaskMail new_task bridge ingress.",
+    )
+    parser.add_argument(
+        "--taskmail-direct-from-name",
+        default="TaskMail User",
+        help="From display name used when the relay bridges direct TaskMail packets into bot mailbox mail ingress.",
+    )
+    parser.add_argument(
+        "--taskmail-direct-from-addr",
+        default="",
+        help="From email address used when the relay bridges direct TaskMail packets into bot mailbox mail ingress.",
+    )
+    parser.add_argument(
+        "--taskmail-direct-smtp-host",
+        default="",
+        help="Optional SMTP host used only for TaskMail direct bridge mail ingress.",
+    )
+    parser.add_argument(
+        "--taskmail-direct-smtp-port",
+        type=int,
+        default=465,
+        help="Optional SMTP port used only for TaskMail direct bridge mail ingress.",
+    )
+    parser.add_argument(
+        "--taskmail-direct-smtp-user",
+        default="",
+        help="Optional SMTP username used only for TaskMail direct bridge mail ingress.",
+    )
+    parser.add_argument(
+        "--taskmail-direct-smtp-password",
+        default="",
+        help="Optional SMTP password used only for TaskMail direct bridge mail ingress.",
+    )
     parser.add_argument("--tls-certfile", default="", help="Remote TLS certificate path for WSS/HTTPS.")
     parser.add_argument("--tls-keyfile", default="", help="Remote TLS private key path for WSS/HTTPS.")
     parser.add_argument("--transport-token", default="", help="Explicit relay transport token.")
@@ -158,14 +199,20 @@ def _remote_bootstrap_script(
 ) -> str:
     base_dir = _normalize_remote_path(config.remote_base_dir)
     release_dir = f"{base_dir}/releases/{release_name}"
+    mkdir_lines = [
+        "sudo mkdir -p \"$BASE_DIR/releases\" \"$BASE_DIR/shared/logs\"",
+        f"sudo mkdir -p {config.state_dir}",
+    ]
+    if config.task_root:
+        mkdir_lines.append(f"sudo mkdir -p {config.task_root}")
+        mkdir_lines.append(f"sudo chown -R {config.run_user}:{config.run_user} {config.task_root}")
     return "\n".join(
         [
             "set -euo pipefail",
             f"BASE_DIR={base_dir}",
             f"RELEASE_DIR={release_dir}",
             f"RUN_USER={config.run_user}",
-            "sudo mkdir -p \"$BASE_DIR/releases\" \"$BASE_DIR/shared/logs\"",
-            f"sudo mkdir -p {config.state_dir}",
+            *mkdir_lines,
             "sudo chown -R \"$RUN_USER\":\"$RUN_USER\" \"$BASE_DIR\"",
             "mkdir -p \"$RELEASE_DIR\"",
             f"tar -xzf {bundle_remote_path} -C \"$RELEASE_DIR\"",
@@ -204,12 +251,20 @@ def main(argv: list[str] | None = None) -> int:
         run_user=args.run_user,
         python_bin=args.python_bin,
         state_dir=args.state_dir,
+        task_root=args.task_root,
         smtp_host=args.smtp_host,
         smtp_port=args.smtp_port,
         smtp_user=args.smtp_user,
         smtp_password=args.smtp_password,
         from_name=args.from_name,
         from_addr=args.from_addr,
+        taskmail_bot_mailbox_addr=args.taskmail_bot_mailbox_addr,
+        taskmail_direct_from_name=args.taskmail_direct_from_name,
+        taskmail_direct_from_addr=args.taskmail_direct_from_addr,
+        taskmail_direct_smtp_host=args.taskmail_direct_smtp_host,
+        taskmail_direct_smtp_port=args.taskmail_direct_smtp_port,
+        taskmail_direct_smtp_user=args.taskmail_direct_smtp_user,
+        taskmail_direct_smtp_password=args.taskmail_direct_smtp_password,
         tls_certfile=args.tls_certfile,
         tls_keyfile=args.tls_keyfile,
     )

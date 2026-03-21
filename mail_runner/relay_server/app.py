@@ -17,6 +17,7 @@ import websockets
 from .auth import token_fingerprint
 from .config import RelayServerConfig, load_relay_server_config
 from .delivery import RelayPacketDeliverer
+from .direct_actions import RelayTaskMailDirectNewTaskMailBridge
 from .loopback import LoopbackRelayServer
 from .packet_store import InMemoryAcceptedPacketStore, PersistentAcceptedPacketStore
 from .session_store import InMemorySessionStore, PersistentSessionStore
@@ -56,10 +57,30 @@ def build_health_payload(
         "packet_count": packet_store.count() if packet_store is not None else 0,
         "state_dir": config.state_dir,
         "tls_enabled": bool(config.tls_certfile),
+        "taskmail_direct_ingress_enabled": config.taskmail_direct_ingress_enabled,
         "auth": {
             "transport_token_id": token_fingerprint(config.transport_token),
         },
     }
+
+
+def build_runtime_relay(
+    config: RelayServerConfig,
+    *,
+    session_store,
+    packet_store,
+) -> LoopbackRelayServer:
+    deliverer = RelayPacketDeliverer(config)
+    direct_packet_handler = None
+    if config.taskmail_direct_ingress_enabled:
+        direct_packet_handler = RelayTaskMailDirectNewTaskMailBridge(config)
+    return LoopbackRelayServer(
+        config,
+        session_store=session_store,
+        packet_store=packet_store,
+        delivery_callback=deliverer.deliver,
+        direct_packet_handler=direct_packet_handler,
+    )
 
 
 def build_http_server(
@@ -149,6 +170,13 @@ async def _websocket_handler(websocket, path: str, *, relay: LoopbackRelayServer
 
     provided_token = _extract_bearer_token(getattr(websocket, "request_headers", {}))
     connection_id: str | None = None
+    send_lock = asyncio.Lock()
+    subscription_push_task: asyncio.Task | None = None
+
+    async def _send_payload(payload: dict[str, Any]) -> None:
+        async with send_lock:
+            await websocket.send(json.dumps(payload, ensure_ascii=False))
+
     try:
         async for raw_message in websocket:
             now = _timestamp()
@@ -157,27 +185,77 @@ async def _websocket_handler(websocket, path: str, *, relay: LoopbackRelayServer
                 if not isinstance(payload, dict):
                     raise ValueError("payload must be an object")
             except Exception as exc:
-                response = {
-                    "message_type": "error",
-                    "code": "invalid_json",
-                    "message": str(exc),
-                    "sent_at": now,
-                }
+                responses = [
+                    {
+                        "message_type": "error",
+                        "code": "invalid_json",
+                        "message": str(exc),
+                        "sent_at": now,
+                    }
+                ]
             else:
-                response = relay.handle_client_message(
+                responses = relay.handle_client_message_batch(
                     payload,
                     provided_token=provided_token if connection_id is None else None,
                     connection_id=connection_id,
                 )
+            if not responses:
+                responses = [
+                    {
+                        "message_type": "error",
+                        "code": "server_error",
+                        "message": "relay produced no response",
+                        "sent_at": now,
+                    }
+                ]
+            first_response = responses[0]
+            for response in responses:
                 if response.get("message_type") == "hello_ack":
                     connection_id = str(response.get("connection_id") or "").strip() or None
-            await websocket.send(json.dumps(response, ensure_ascii=False))
-            if response.get("message_type") == "error" and connection_id is None:
-                await websocket.close(code=1008, reason=str(response.get("code") or "error"))
+                    if connection_id and subscription_push_task is None:
+                        subscription_push_task = asyncio.create_task(
+                            _subscription_push_loop(
+                                websocket,
+                                relay=relay,
+                                connection_id=connection_id,
+                                send_payload=_send_payload,
+                            )
+                        )
+                await _send_payload(response)
+            if first_response.get("message_type") == "error" and connection_id is None:
+                await websocket.close(code=1008, reason=str(first_response.get("code") or "error"))
                 return
     finally:
+        if subscription_push_task is not None:
+            subscription_push_task.cancel()
+            try:
+                await subscription_push_task
+            except asyncio.CancelledError:
+                pass
         if connection_id:
+            relay.clear_subscription_runtime_state(connection_id)
             relay.session_store.close_session(connection_id, closed_at=_timestamp())
+
+
+async def _subscription_push_loop(
+    websocket,
+    *,
+    relay: LoopbackRelayServer,
+    connection_id: str,
+    send_payload,
+) -> None:
+    try:
+        while True:
+            await asyncio.sleep(relay.phase3_broadcast_interval_seconds)
+            responses = relay.collect_subscription_updates(connection_id)
+            for response in responses:
+                await send_payload(response)
+    except asyncio.CancelledError:
+        raise
+    except websockets.ConnectionClosed:
+        return
+    except Exception:
+        LOGGER.exception("relay subscription push loop crashed connection_id=%s", connection_id)
 
 
 async def run_relay_server(
@@ -189,12 +267,10 @@ async def run_relay_server(
 ) -> None:
     sessions = session_store or PersistentSessionStore(config.state_dir)
     packets = packet_store or PersistentAcceptedPacketStore(config.state_dir)
-    deliverer = RelayPacketDeliverer(config)
-    relay = LoopbackRelayServer(
+    relay = build_runtime_relay(
         config,
         session_store=sessions,
         packet_store=packets,
-        delivery_callback=deliverer.deliver,
     )
     ssl_context = _build_ssl_context(config)
     server = await start_relay_server(
@@ -258,6 +334,21 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--smtp-password", default=None, help="SMTP password used by the relay.")
     parser.add_argument("--from-name", default=None, help="From display name for relay-sent mail.")
     parser.add_argument("--from-addr", default=None, help="From email address for relay-sent mail.")
+    parser.add_argument(
+        "--taskmail-bot-mailbox-addr",
+        default=None,
+        help="Bot mailbox address used for TaskMail direct new_task bridge ingress.",
+    )
+    parser.add_argument(
+        "--taskmail-direct-from-name",
+        default=None,
+        help="From display name used when the relay bridges direct TaskMail packets into bot mailbox mail ingress.",
+    )
+    parser.add_argument(
+        "--taskmail-direct-from-addr",
+        default=None,
+        help="From email address used when the relay bridges direct TaskMail packets into bot mailbox mail ingress.",
+    )
     parser.add_argument("--tls-certfile", default=None, help="TLS certificate path for WSS/HTTPS.")
     parser.add_argument("--tls-keyfile", default=None, help="TLS private key path for WSS/HTTPS.")
     parser.add_argument("--log-level", default=None, help="Log level; defaults to MAIL_RELAY_LOG_LEVEL or INFO.")
@@ -279,6 +370,9 @@ def main(argv: list[str] | None = None) -> int:
         smtp_password=args.smtp_password,
         from_name=args.from_name,
         from_addr=args.from_addr,
+        taskmail_bot_mailbox_addr=args.taskmail_bot_mailbox_addr,
+        taskmail_direct_from_name=args.taskmail_direct_from_name,
+        taskmail_direct_from_addr=args.taskmail_direct_from_addr,
         tls_certfile=args.tls_certfile,
         tls_keyfile=args.tls_keyfile,
         log_level=args.log_level,

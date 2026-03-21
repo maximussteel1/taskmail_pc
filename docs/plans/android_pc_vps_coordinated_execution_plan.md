@@ -82,12 +82,15 @@ The active staged path is:
 The current repository-side reading is:
 
 - Phase 0 planning sync is aligned
-- the shared public plaintext baseline is already frozen
-- live readiness has now been judged: the inspected VPS now serves the frozen plaintext baseline
-- the short handoff note is now published on the repository side
-- Phase 0 is closed on the repository side
-- Phase 1 bootstrap promotion is now the next implementation phase on top of a live public plaintext baseline
-- repository-side bootstrap, failure, and fallback artifacts are now published; cross-repo Phase 1 still depends on Android-side reuse
+- Phase 0 and Phase 1 repository-side planning artifacts are already explicit
+- the shared public plaintext baseline is frozen and live
+- Phase 2 direct outbound v1 is now implemented and validated on the repository side
+- the current direct outbound scope remains intentionally narrow:
+  - `new_task` only
+- accepted direct send, fallback-classified rejection, and hard rejection have all been closed through live validation
+- the first repository-side Phase 3 mapping artifact is now explicit for active-session read-side work
+- the next shared Phase 3 artifact should now be the active-session inbound wire freeze
+- the next active cross-repo implementation slice is now Phase 3 direct inbound update bridge
 
 ## Phase 0: Direction Reset And Baseline Freeze
 
@@ -228,7 +231,7 @@ coexists.
 ### Shared Freeze Artifacts
 
 - `phase3-direct-inbound-mapping-v1`
-- representative update fixture set
+- `phase3-direct-inbound-fixture-package-v1`
 - coexistence note for mail-derived and direct-derived state
 
 ### Exit Gate
@@ -307,11 +310,16 @@ Phase 5 is complete only when:
 
 From the current repository baseline, the recommended next slice is:
 
-1. use the frozen public plaintext baseline as the non-moving target
-2. verify whether the live VPS currently serves that baseline or still needs redeploy or reconfiguration
-3. promote the relay bootstrap code into a reusable connection seam
-4. freeze one narrow direct outbound slice, preferably `new task` or `/status`
-5. keep mail fallback explicit for everything else
+1. publish `phase3-direct-inbound-mapping-v1` for one narrow read-side slice
+2. keep mail-derived state as the current fallback and coexistence truth
+3. start with active-session snapshot plus delta, not a general history API
+4. map only current high-signal read-side concepts first:
+   - running
+   - question
+   - paused
+   - done
+   - failed
+5. leave direct reply/control and attachment/history expansion to later explicit scope notes
 
 ## Explicit Non-Goals
 

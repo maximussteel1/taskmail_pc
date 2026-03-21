@@ -4,8 +4,10 @@ import json
 import threading
 import urllib.request
 
-from mail_runner.relay_server.app import build_health_payload, build_http_server
+from mail_runner.relay_server.app import build_health_payload, build_http_server, build_runtime_relay
 from mail_runner.relay_server.config import RelayServerConfig
+from mail_runner.relay_server.direct_actions import RelayTaskMailDirectNewTaskMailBridge
+from mail_runner.relay_server.packet_store import InMemoryAcceptedPacketStore
 from mail_runner.relay_server.session_store import InMemorySessionStore
 
 
@@ -23,6 +25,8 @@ def test_build_health_payload_reports_server_shape() -> None:
     assert payload["service"] == "mail-runner-relay"
     assert payload["listen"] == {"host": "127.0.0.1", "port": 9000}
     assert payload["session_count"] == 0
+    assert payload["taskmail_direct_ingress_enabled"] is False
+    assert "taskmail_direct_negative_hook_enabled" not in payload
     assert len(payload["auth"]["transport_token_id"]) == 12
 
 
@@ -47,3 +51,27 @@ def test_http_server_exposes_healthz_json() -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_build_runtime_relay_enables_taskmail_direct_bridge_when_configured(tmp_path) -> None:
+    config = RelayServerConfig(
+        host="127.0.0.1",
+        port=8787,
+        transport_token="secret-token",
+        state_dir=str(tmp_path / "relay_state"),
+        smtp_host="smtp.example.com",
+        smtp_user="relay@example.com",
+        smtp_password="secret",
+        from_addr="relay@example.com",
+        taskmail_bot_mailbox_addr="bot@example.com",
+        taskmail_direct_from_addr="taskmail-user@example.com",
+    )
+    relay = build_runtime_relay(
+        config,
+        session_store=InMemorySessionStore(),
+        packet_store=InMemoryAcceptedPacketStore(),
+    )
+
+    assert relay._direct_packet_handler is not None
+    assert isinstance(relay._direct_packet_handler, RelayTaskMailDirectNewTaskMailBridge)
+

@@ -1,0 +1,63 @@
+{
+  "fixture_meta": {
+    "fixture_id": "sub_workspace_locator_mismatch_reject",
+    "schema_version": "phase3-direct-inbound-fixture-package-v1",
+    "intent": "conflicting workspace_id and repo_path/workdir must be rejected rather than guessed"
+  },
+  "subscribe_exchange": {
+    "request": {
+      "message_type": "packet",
+      "packet_id": "android-taskmail:subscribe-detail:req_fx006",
+      "client_trace_id": "req_fx006",
+      "task_run_packet": {
+        "schema_version": "phase3-direct-inbound-wire-v1",
+        "action": "subscribe_session_detail",
+        "request_id": "req_fx006",
+        "origin": {
+          "client": "android_taskmail"
+        },
+        "subscription": {
+          "workspace_id": "workspace_conflict999999",
+          "repo_path": "E:\\projects\\android_task_manager",
+          "workdir": "feature/taskmail/internal",
+          "session_id": "session_001",
+          "last_known_sequence": 0,
+          "reason": "detail_open"
+        }
+      },
+      "dispatch_metadata": {
+        "channel": "taskmail_android_direct",
+        "schema_version": "phase3-direct-inbound-wire-v1",
+        "action": "subscribe_session_detail"
+      },
+      "sent_at": "2026-03-21T22:35:01"
+    },
+    "ack": {
+      "message_type": "packet_ack",
+      "packet_id": "android-taskmail:subscribe-detail:req_fx006",
+      "accepted": false,
+      "receipt_id": "receipt_fx006",
+      "received_at": "2026-03-21T22:35:02",
+      "error_code": "workspace_identity_mismatch",
+      "error_message": "workspace_id conflicts with repo_path/workdir resolution"
+    }
+  },
+  "session_updates": [],
+  "recovery_exchange": null,
+  "mail_companion": {
+    "items": []
+  },
+  "expected_projection": {
+    "canonical_workspace_id": null,
+    "canonical_session_id": null,
+    "canonical_thread_id": null,
+    "header_status": "mail_only",
+    "header_lifecycle": null,
+    "last_summary": null,
+    "question_set_id": null,
+    "pending_question_ids": [],
+    "quick_answer_choices": [],
+    "visible_business_event_keys": [],
+    "suppressed_direct_business_event_keys": []
+  }
+}

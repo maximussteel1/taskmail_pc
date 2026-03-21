@@ -1,0 +1,61 @@
+{
+  "fixture_meta": {
+    "fixture_id": "sub_repo_only_reject_workspace_identity_unresolved",
+    "schema_version": "phase3-direct-inbound-fixture-package-v1",
+    "intent": "repo_path without workdir cannot uniquely resolve canonical workspace"
+  },
+  "subscribe_exchange": {
+    "request": {
+      "message_type": "packet",
+      "packet_id": "android-taskmail:subscribe-detail:req_fx005",
+      "client_trace_id": "req_fx005",
+      "task_run_packet": {
+        "schema_version": "phase3-direct-inbound-wire-v1",
+        "action": "subscribe_session_detail",
+        "request_id": "req_fx005",
+        "origin": {
+          "client": "android_taskmail"
+        },
+        "subscription": {
+          "repo_path": "E:\\projects\\android_task_manager",
+          "session_id": "session_001",
+          "last_known_sequence": 0,
+          "reason": "detail_open"
+        }
+      },
+      "dispatch_metadata": {
+        "channel": "taskmail_android_direct",
+        "schema_version": "phase3-direct-inbound-wire-v1",
+        "action": "subscribe_session_detail"
+      },
+      "sent_at": "2026-03-21T22:34:01"
+    },
+    "ack": {
+      "message_type": "packet_ack",
+      "packet_id": "android-taskmail:subscribe-detail:req_fx005",
+      "accepted": false,
+      "receipt_id": "receipt_fx005",
+      "received_at": "2026-03-21T22:34:02",
+      "error_code": "workspace_identity_unresolved",
+      "error_message": "repo_path alone cannot resolve a unique workspace"
+    }
+  },
+  "session_updates": [],
+  "recovery_exchange": null,
+  "mail_companion": {
+    "items": []
+  },
+  "expected_projection": {
+    "canonical_workspace_id": null,
+    "canonical_session_id": null,
+    "canonical_thread_id": null,
+    "header_status": "mail_only",
+    "header_lifecycle": null,
+    "last_summary": null,
+    "question_set_id": null,
+    "pending_question_ids": [],
+    "quick_answer_choices": [],
+    "visible_business_event_keys": [],
+    "suppressed_direct_business_event_keys": []
+  }
+}

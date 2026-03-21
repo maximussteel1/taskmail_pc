@@ -1,0 +1,143 @@
+{
+  "fixture_meta": {
+    "fixture_id": "mail_suppresses_direct_paused_hint",
+    "schema_version": "phase3-direct-inbound-fixture-package-v1",
+    "intent": "matching durable paused mail suppresses direct paused hint item"
+  },
+  "subscribe_exchange": {
+    "request": {
+      "message_type": "packet",
+      "packet_id": "android-taskmail:subscribe-detail:req_fx019",
+      "client_trace_id": "req_fx019",
+      "task_run_packet": {
+        "schema_version": "phase3-direct-inbound-wire-v1",
+        "action": "subscribe_session_detail",
+        "request_id": "req_fx019",
+        "origin": {
+          "client": "android_taskmail"
+        },
+        "subscription": {
+          "workspace_id": "workspace_a13f92d1c0ef",
+          "session_id": "session_001",
+          "reason": "detail_open"
+        }
+      },
+      "dispatch_metadata": {
+        "channel": "taskmail_android_direct",
+        "schema_version": "phase3-direct-inbound-wire-v1",
+        "action": "subscribe_session_detail"
+      },
+      "sent_at": "2026-03-21T22:48:01"
+    },
+    "ack": {
+      "message_type": "packet_ack",
+      "packet_id": "android-taskmail:subscribe-detail:req_fx019",
+      "accepted": true,
+      "receipt_id": "receipt_fx019",
+      "received_at": "2026-03-21T22:48:02"
+    }
+  },
+  "session_updates": [
+    {
+      "message_type": "session_update",
+      "schema_version": "phase3-direct-inbound-wire-v1",
+      "subscription_id": "sub_fx019",
+      "workspace_id": "workspace_a13f92d1c0ef",
+      "session_id": "session_001",
+      "thread_id": "thread_001",
+      "task_id": "task_001",
+      "update_id": "sessupd:session_001:21",
+      "sequence": 21,
+      "sent_at": "2026-03-21T22:48:03",
+      "update_type": "session_snapshot",
+      "session_snapshot": {
+        "session_name": "Phase 3 detail bridge",
+        "backend": "codex",
+        "repo_path": "E:\\projects\\android_task_manager",
+        "workdir": "feature/taskmail/internal",
+        "status": "paused",
+        "lifecycle": "active",
+        "last_summary": "Paused while waiting for user input.",
+        "last_active_at": "2026-03-21T22:48:03",
+        "last_progress_at": "2026-03-21T22:48:03",
+        "paused_from_status": "awaiting_user_input",
+        "question_state": {
+          "question_set_id": "qset_branch_choice",
+          "question_count": 1,
+          "questions": [
+            {
+              "question_id": "q_branch",
+              "question_text": "Which branch should I use?",
+              "question_type": "single_choice",
+              "required": true,
+              "choices": [
+                "main",
+                "release"
+              ],
+              "choice_labels": {
+                "main": "Main branch",
+                "release": "Release branch"
+              }
+            }
+          ]
+        },
+        "timeline_items": [
+          {
+            "item_id": "tl_paused_019",
+            "business_event_key": "paused/awaiting_user_input/2026-03-21T22:48:03",
+            "item_type": "paused_hint",
+            "created_at": "2026-03-21T22:48:03",
+            "status": null,
+            "text": "Paused while waiting for user input.",
+            "question_set_id": "qset_branch_choice",
+            "question_ids": [
+              "q_branch"
+            ],
+            "paused_from_status": "awaiting_user_input"
+          }
+        ]
+      }
+    }
+  ],
+  "recovery_exchange": null,
+  "mail_companion": {
+    "items": [
+      {
+        "source": "mail",
+        "business_event_key": "paused/awaiting_user_input/2026-03-21T22:48:03",
+        "item_type": "paused_receipt",
+        "status": "paused",
+        "summary": "[PAUSED] durable item arrived.",
+        "arrived_at": "2026-03-21T22:48:30"
+      }
+    ]
+  },
+  "expected_projection": {
+    "canonical_workspace_id": "workspace_a13f92d1c0ef",
+    "canonical_session_id": "session_001",
+    "canonical_thread_id": "thread_001",
+    "header_status": "paused",
+    "header_lifecycle": "active",
+    "last_summary": "Paused while waiting for user input.",
+    "question_set_id": "qset_branch_choice",
+    "pending_question_ids": [
+      "q_branch"
+    ],
+    "quick_answer_choices": [
+      {
+        "value": "main",
+        "label": "Main branch"
+      },
+      {
+        "value": "release",
+        "label": "Release branch"
+      }
+    ],
+    "visible_business_event_keys": [
+      "paused/awaiting_user_input/2026-03-21T22:48:03"
+    ],
+    "suppressed_direct_business_event_keys": [
+      "paused/awaiting_user_input/2026-03-21T22:48:03"
+    ]
+  }
+}

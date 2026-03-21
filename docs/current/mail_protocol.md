@@ -2,7 +2,7 @@
 
 ## Status
 
-- Date: 2026-03-20
+- Date: 2026-03-21
 - Scope: current `mail_based_task_manager` mail control plane
 - Role: canonical current protocol document for task mail ingress, reply routing, and user-visible mail actions
 
@@ -45,6 +45,21 @@ Current relay boundary:
 - task execution truth still remains on the PC side
 - the Android-facing mail contract does not change when relay is enabled
 - when relay delivery fails and `relay_auto_fallback_email` is enabled, the PC may automatically fall back to direct `email` delivery in the same outbound flow
+
+Current optional direct TaskMail ingress boundary:
+
+- when the relay operator configures TaskMail direct ingress, the relay may accept one `phase2-direct-outbound-contract-v1` `new_task` packet on `/relay`
+- the relay then bridges that accepted packet back into the current bot-mailbox first-mail ingress instead of becoming task-execution truth
+- the canonical task-creation semantics still remain the current `Repo:` / `Task:` first-mail contract
+- reply routing, waiting-state answers, and post-creation control actions remain mail-based
+
+Current optional direct TaskMail active-detail sidecar boundary:
+
+- when the relay operator provisions the current Phase 3 direct inbound wire, the relay may also accept `subscribe_session_detail` on `/relay`
+- this direct path is read-side only and is limited to `active session detail` freshness (`session_snapshot` / `session_delta`)
+- the relay resolves the current runtime `session_state` / `thread_state` and projects them into the frozen Phase 3 wire shape
+- mail remains the receipt/artifact/attachment truth layer even when this sidecar is enabled
+- direct detail sidecar does not authorize direct reply, `/status`, `/pause`, `/resume`, `/end`, or other post-creation control actions
 
 ## 2. Authority
 
@@ -130,6 +145,18 @@ Current relay boundary:
 - 缺少 `Mode` 时默认 `modify`
 - `Permission` 当前只支持 `default` / `highest`
 - 首封任务未写 `Permission` 时，使用后端默认权限
+
+### 3.3 Optional Direct `new_task` Ingress
+
+For the current Phase 2 v1 slice, the relay may optionally accept a direct Android `new_task` packet over `/relay`.
+
+Current boundary:
+
+- this ingress is limited to `phase2-direct-outbound-contract-v1`
+- only action `new_task` is accepted on this direct path
+- the server bridges the accepted packet into the current bot-mailbox first-mail ingress
+- the PC mail runner still consumes the canonical first-mail body and remains task-execution truth
+- direct ingress does not change reply headers, reply routing, or the current mail-visible status contract
 
 ### Permission Field
 

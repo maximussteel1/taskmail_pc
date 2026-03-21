@@ -1,0 +1,139 @@
+{
+  "fixture_meta": {
+    "fixture_id": "snapshot_waiting_multi_question",
+    "schema_version": "phase3-direct-inbound-fixture-package-v1",
+    "intent": "awaiting_user_input snapshot with ordered multi-question set"
+  },
+  "subscribe_exchange": {
+    "request": {
+      "message_type": "packet",
+      "packet_id": "android-taskmail:subscribe-detail:req_fx010",
+      "client_trace_id": "req_fx010",
+      "task_run_packet": {
+        "schema_version": "phase3-direct-inbound-wire-v1",
+        "action": "subscribe_session_detail",
+        "request_id": "req_fx010",
+        "origin": {
+          "client": "android_taskmail"
+        },
+        "subscription": {
+          "workspace_id": "workspace_a13f92d1c0ef",
+          "session_id": "session_001",
+          "reason": "detail_open"
+        }
+      },
+      "dispatch_metadata": {
+        "channel": "taskmail_android_direct",
+        "schema_version": "phase3-direct-inbound-wire-v1",
+        "action": "subscribe_session_detail"
+      },
+      "sent_at": "2026-03-21T22:39:01"
+    },
+    "ack": {
+      "message_type": "packet_ack",
+      "packet_id": "android-taskmail:subscribe-detail:req_fx010",
+      "accepted": true,
+      "receipt_id": "receipt_fx010",
+      "received_at": "2026-03-21T22:39:02"
+    }
+  },
+  "session_updates": [
+    {
+      "message_type": "session_update",
+      "schema_version": "phase3-direct-inbound-wire-v1",
+      "subscription_id": "sub_fx010",
+      "workspace_id": "workspace_a13f92d1c0ef",
+      "session_id": "session_001",
+      "thread_id": "thread_001",
+      "task_id": "task_001",
+      "update_id": "sessupd:session_001:10",
+      "sequence": 10,
+      "sent_at": "2026-03-21T22:39:03",
+      "update_type": "session_snapshot",
+      "session_snapshot": {
+        "session_name": "Phase 3 detail bridge",
+        "backend": "codex",
+        "repo_path": "E:\\projects\\android_task_manager",
+        "workdir": "feature/taskmail/internal",
+        "status": "awaiting_user_input",
+        "lifecycle": "active",
+        "last_summary": "Need two answers before continuing.",
+        "last_active_at": "2026-03-21T22:39:03",
+        "last_progress_at": "2026-03-21T22:39:03",
+        "paused_from_status": null,
+        "question_state": {
+          "question_set_id": "qset_detail_plan",
+          "question_count": 2,
+          "questions": [
+            {
+              "question_id": "q_scope",
+              "question_text": "Which scope should I prioritize?",
+              "question_type": "single_choice",
+              "required": true,
+              "choices": [
+                "ui",
+                "merge"
+              ],
+              "choice_labels": {
+                "ui": "UI polish",
+                "merge": "Merge semantics"
+              }
+            },
+            {
+              "question_id": "q_tests",
+              "question_text": "Should I run the full test suite?",
+              "question_type": "boolean",
+              "required": true,
+              "choices": [
+                "yes",
+                "no"
+              ],
+              "choice_labels": {
+                "yes": "Run full suite",
+                "no": "Skip full suite"
+              }
+            }
+          ]
+        },
+        "timeline_items": [
+          {
+            "item_id": "tl_question_010",
+            "business_event_key": "question/qset_detail_plan/2026-03-21T22:39:03",
+            "item_type": "question_prompt",
+            "created_at": "2026-03-21T22:39:03",
+            "status": null,
+            "text": "Need two answers before continuing.",
+            "question_set_id": "qset_detail_plan",
+            "question_ids": [
+              "q_scope",
+              "q_tests"
+            ],
+            "paused_from_status": null
+          }
+        ]
+      }
+    }
+  ],
+  "recovery_exchange": null,
+  "mail_companion": {
+    "items": []
+  },
+  "expected_projection": {
+    "canonical_workspace_id": "workspace_a13f92d1c0ef",
+    "canonical_session_id": "session_001",
+    "canonical_thread_id": "thread_001",
+    "header_status": "awaiting_user_input",
+    "header_lifecycle": "active",
+    "last_summary": "Need two answers before continuing.",
+    "question_set_id": "qset_detail_plan",
+    "pending_question_ids": [
+      "q_scope",
+      "q_tests"
+    ],
+    "quick_answer_choices": [],
+    "visible_business_event_keys": [
+      "question/qset_detail_plan/2026-03-21T22:39:03"
+    ],
+    "suppressed_direct_business_event_keys": []
+  }
+}

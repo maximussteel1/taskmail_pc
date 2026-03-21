@@ -2,7 +2,7 @@
 
 ## Status
 
-- Date: 2026-03-20
+- Date: 2026-03-21
 - Scope: concrete Phase C deployment/runbook for the current lightweight relay bootstrap
 - Layer: Layer 2 repository plan
 - Related docs:
@@ -42,6 +42,18 @@ Notes:
 - `--state-dir` is optional; by default it resolves to `/opt/mail_runner_relay/shared/state`.
 - If `--tls-certfile` and `--tls-keyfile` are supplied, the relay serves `wss` / `https` on the configured port.
 - The remote service is installed as `mail-runner-relay`.
+- 如果要让 Phase 3 `subscribe_session_detail` / `session_update` 看到真实 live task store，还需要给 relay 提供可见的 `task_root`：
+  - deploy 时传 `--task-root /opt/mail_runner_relay/shared/task_root`
+  - 这会在远端 env 中写入 `MAIL_RUNNER_TASK_ROOT`
+- To enable the current Phase 2 v1 direct TaskMail `new_task` ingress, also pass:
+  - `--taskmail-bot-mailbox-addr <bot-mailbox-addr>`
+  - `--taskmail-direct-from-addr <user-mailbox-addr>`
+  - optional: `--taskmail-direct-from-name <display-name>`
+  - if the shared relay SMTP account cannot send mail with the user mailbox in `From:`, also pass:
+    - `--taskmail-direct-smtp-host <smtp-host>`
+    - `--taskmail-direct-smtp-port <smtp-port>`
+    - `--taskmail-direct-smtp-user <smtp-user>`
+    - `--taskmail-direct-smtp-password <smtp-password>`
 
 ## Remote Layout
 
@@ -86,6 +98,46 @@ Important freshness note:
 - the verification snapshot above reflects the original Phase C health-check skeleton on `2026-03-20`
 - the newer repository-side Phase D-E path (remote packet endpoint, durable relay history, VPS SMTP delivery, optional TLS) still needs a fresh live verification pass on the inspected VPS after deployment
 
+## Phase 3 Task Root Visibility
+
+当前 VPS relay 只能读取它本机可见的 `task_root`。如果远端没有这份状态落盘，`subscribe_session_detail` 会因为无法 resolve `thread_state` / `session_state` 而返回 `session_not_found`。
+
+推荐的当前仓库侧做法是：
+
+1. deploy relay 时显式指定远端 task root：
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\deploy_relay_server.py `
+  --host <vps-ip> `
+  --user ubuntu `
+  --key-path .\work_bot.pem `
+  --task-root /opt/mail_runner_relay/shared/task_root `
+  ...
+```
+
+2. 把本地 live task store 同步到这个远端目录：
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\sync_relay_task_root.py `
+  --host <vps-ip> `
+  --user ubuntu `
+  --key-path .\work_bot.pem `
+  --local-task-root E:\projects\mail_based_task_manager\_tmp_live_mail_runner\tasks `
+  --remote-task-root /opt/mail_runner_relay/shared/task_root
+```
+
+3. 如果要支撑 smoke 期间持续变化的 live state，可以把同步脚本跑成轮询模式：
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\sync_relay_task_root.py `
+  --host <vps-ip> `
+  --user ubuntu `
+  --key-path .\work_bot.pem `
+  --local-task-root E:\projects\mail_based_task_manager\_tmp_live_mail_runner\tasks `
+  --remote-task-root /opt/mail_runner_relay/shared/task_root `
+  --repeat-seconds 2
+```
+
 ## Expected Health Shape
 
 `/healthz` should return JSON with:
@@ -95,7 +147,17 @@ Important freshness note:
 - `listen.host`
 - `listen.port`
 - `session_count`
+- `packet_count`
+- `tls_enabled`
+- `taskmail_direct_ingress_enabled`
 - `auth.transport_token_id`
+
+For the current Phase 2 v1 Android `new_task` smoke path, operator preflight should explicitly confirm:
+
+- `taskmail_direct_ingress_enabled=true` when Android is expected to use direct first-send
+- `tls_enabled=true` only when the Android client is configured to use TLS for the same relay endpoint
+- health passing alone is not enough; direct-ingress-disabled health should be treated as a mail-fallback scenario, not
+  a direct-send-ready relay
 
 ## Current Boundary
 

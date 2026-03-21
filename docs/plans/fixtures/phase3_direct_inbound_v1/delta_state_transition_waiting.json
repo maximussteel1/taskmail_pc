@@ -1,0 +1,142 @@
+{
+  "fixture_meta": {
+    "fixture_id": "delta_state_transition_waiting",
+    "schema_version": "phase3-direct-inbound-fixture-package-v1",
+    "intent": "state_transition delta flips running session into awaiting_user_input with canonical question state"
+  },
+  "subscribe_exchange": {
+    "request": {
+      "message_type": "packet",
+      "packet_id": "android-taskmail:subscribe-detail:req_fx015",
+      "client_trace_id": "req_fx015",
+      "task_run_packet": {
+        "schema_version": "phase3-direct-inbound-wire-v1",
+        "action": "subscribe_session_detail",
+        "request_id": "req_fx015",
+        "origin": {
+          "client": "android_taskmail"
+        },
+        "subscription": {
+          "workspace_id": "workspace_a13f92d1c0ef",
+          "session_id": "session_001",
+          "last_known_sequence": 0,
+          "reason": "detail_open"
+        }
+      },
+      "dispatch_metadata": {
+        "channel": "taskmail_android_direct",
+        "schema_version": "phase3-direct-inbound-wire-v1",
+        "action": "subscribe_session_detail"
+      },
+      "sent_at": "2026-03-21T22:44:01"
+    },
+    "ack": {
+      "message_type": "packet_ack",
+      "packet_id": "android-taskmail:subscribe-detail:req_fx015",
+      "accepted": true,
+      "receipt_id": "receipt_fx015",
+      "received_at": "2026-03-21T22:44:02"
+    }
+  },
+  "session_updates": [
+    {
+      "message_type": "session_update",
+      "schema_version": "phase3-direct-inbound-wire-v1",
+      "subscription_id": "sub_fx015",
+      "workspace_id": "workspace_a13f92d1c0ef",
+      "session_id": "session_001",
+      "thread_id": "thread_001",
+      "task_id": "task_001",
+      "update_id": "sessupd:session_001:15",
+      "sequence": 15,
+      "sent_at": "2026-03-21T22:44:03",
+      "update_type": "session_snapshot",
+      "session_snapshot": {
+        "session_name": "Phase 3 detail bridge",
+        "backend": "codex",
+        "repo_path": "E:\\projects\\android_task_manager",
+        "workdir": "feature/taskmail/internal",
+        "status": "running",
+        "lifecycle": "active",
+        "last_summary": "Running.",
+        "last_active_at": "2026-03-21T22:44:03",
+        "last_progress_at": "2026-03-21T22:44:03",
+        "paused_from_status": null,
+        "question_state": null,
+        "timeline_items": []
+      }
+    },
+    {
+      "message_type": "session_update",
+      "schema_version": "phase3-direct-inbound-wire-v1",
+      "subscription_id": "sub_fx015",
+      "workspace_id": "workspace_a13f92d1c0ef",
+      "session_id": "session_001",
+      "thread_id": "thread_001",
+      "task_id": "task_001",
+      "update_id": "sessupd:session_001:16",
+      "sequence": 16,
+      "sent_at": "2026-03-21T22:44:10",
+      "update_type": "session_delta",
+      "session_delta": {
+        "delta_type": "state_transition",
+        "state_transition": {
+          "status": "awaiting_user_input",
+          "lifecycle": "active",
+          "last_summary": "Need one answer before continuing.",
+          "last_active_at": "2026-03-21T22:44:10",
+          "last_progress_at": "2026-03-21T22:44:10",
+          "paused_from_status": null,
+          "question_state": {
+            "question_set_id": "qset_branch_choice",
+            "question_count": 1,
+            "questions": [
+              {
+                "question_id": "q_branch",
+                "question_text": "Which branch should I use?",
+                "question_type": "single_choice",
+                "required": true,
+                "choices": [
+                  "main",
+                  "release"
+                ],
+                "choice_labels": {
+                  "main": "Main branch",
+                  "release": "Release branch"
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "recovery_exchange": null,
+  "mail_companion": {
+    "items": []
+  },
+  "expected_projection": {
+    "canonical_workspace_id": "workspace_a13f92d1c0ef",
+    "canonical_session_id": "session_001",
+    "canonical_thread_id": "thread_001",
+    "header_status": "awaiting_user_input",
+    "header_lifecycle": "active",
+    "last_summary": "Need one answer before continuing.",
+    "question_set_id": "qset_branch_choice",
+    "pending_question_ids": [
+      "q_branch"
+    ],
+    "quick_answer_choices": [
+      {
+        "value": "main",
+        "label": "Main branch"
+      },
+      {
+        "value": "release",
+        "label": "Release branch"
+      }
+    ],
+    "visible_business_event_keys": [],
+    "suppressed_direct_business_event_keys": []
+  }
+}

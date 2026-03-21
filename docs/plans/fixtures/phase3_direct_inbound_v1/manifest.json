@@ -1,0 +1,107 @@
+{
+  "schema_version": "phase3-direct-inbound-fixture-package-v1",
+  "package_id": "phase3_direct_inbound_v1",
+  "generated_at": "2026-03-21T22:30:00",
+  "fixtures": [
+    {
+      "fixture_id": "sub_workspace_session_queued_snapshot",
+      "file": "sub_workspace_session_queued_snapshot.json",
+      "category": "identity"
+    },
+    {
+      "fixture_id": "sub_workspace_thread_running_snapshot",
+      "file": "sub_workspace_thread_running_snapshot.json",
+      "category": "identity"
+    },
+    {
+      "fixture_id": "sub_repo_workdir_session_running_snapshot",
+      "file": "sub_repo_workdir_session_running_snapshot.json",
+      "category": "identity"
+    },
+    {
+      "fixture_id": "sub_repo_workdir_thread_running_snapshot",
+      "file": "sub_repo_workdir_thread_running_snapshot.json",
+      "category": "identity"
+    },
+    {
+      "fixture_id": "sub_repo_only_reject_workspace_identity_unresolved",
+      "file": "sub_repo_only_reject_workspace_identity_unresolved.json",
+      "category": "identity"
+    },
+    {
+      "fixture_id": "sub_workspace_locator_mismatch_reject",
+      "file": "sub_workspace_locator_mismatch_reject.json",
+      "category": "identity"
+    },
+    {
+      "fixture_id": "snapshot_running_no_reply_preview",
+      "file": "snapshot_running_no_reply_preview.json",
+      "category": "snapshot"
+    },
+    {
+      "fixture_id": "snapshot_running_with_reply_preview",
+      "file": "snapshot_running_with_reply_preview.json",
+      "category": "snapshot"
+    },
+    {
+      "fixture_id": "snapshot_waiting_single_question",
+      "file": "snapshot_waiting_single_question.json",
+      "category": "snapshot"
+    },
+    {
+      "fixture_id": "snapshot_waiting_multi_question",
+      "file": "snapshot_waiting_multi_question.json",
+      "category": "snapshot"
+    },
+    {
+      "fixture_id": "snapshot_paused_from_question",
+      "file": "snapshot_paused_from_question.json",
+      "category": "snapshot"
+    },
+    {
+      "fixture_id": "snapshot_done_terminal",
+      "file": "snapshot_done_terminal.json",
+      "category": "snapshot"
+    },
+    {
+      "fixture_id": "snapshot_failed_terminal",
+      "file": "snapshot_failed_terminal.json",
+      "category": "snapshot"
+    },
+    {
+      "fixture_id": "snapshot_killed_terminal",
+      "file": "snapshot_killed_terminal.json",
+      "category": "snapshot"
+    },
+    {
+      "fixture_id": "delta_state_transition_waiting",
+      "file": "delta_state_transition_waiting.json",
+      "category": "delta"
+    },
+    {
+      "fixture_id": "delta_timeline_append_reply_preview",
+      "file": "delta_timeline_append_reply_preview.json",
+      "category": "delta"
+    },
+    {
+      "fixture_id": "mail_suppresses_direct_terminal_summary",
+      "file": "mail_suppresses_direct_terminal_summary.json",
+      "category": "reconciliation"
+    },
+    {
+      "fixture_id": "mail_suppresses_direct_question_prompt",
+      "file": "mail_suppresses_direct_question_prompt.json",
+      "category": "reconciliation"
+    },
+    {
+      "fixture_id": "mail_suppresses_direct_paused_hint",
+      "file": "mail_suppresses_direct_paused_hint.json",
+      "category": "reconciliation"
+    },
+    {
+      "fixture_id": "gap_resubscribe_fresh_snapshot",
+      "file": "gap_resubscribe_fresh_snapshot.json",
+      "category": "recovery"
+    }
+  ]
+}

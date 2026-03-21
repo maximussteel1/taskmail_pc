@@ -6,20 +6,28 @@
 
 ## Status
 
-- Date: 2026-03-20
+- Date: 2026-03-21
 - Purpose: handoff document for the Android side that needs to communicate with the current `mail_based_task_manager`
-- Scope: current Android send/read contract, current relay boundary, and implementation rules that remain valid whether the PC uses direct email or VPS relay
+- Scope: current Android send/read contract, current relay boundary, the optional Phase 2 v1 direct `new_task` ingress, and the optional Phase 3 v1 active-session-detail direct read sidecar
 
 ## 1. One-Line Contract
 
-Android is still a **mail control-plane client**.
+Android is still a **mail-first control-plane client**.
 
 Even after the PC enables VPS relay, Android should continue to communicate with the system by:
 
 - reading task/status mail from the `user mailbox`
 - sending new mail or reply mail to the `bot mailbox`
 
-Android should **not** implement the VPS relay WebSocket protocol as its primary app protocol in the current phase.
+Current direct exceptions:
+
+- when the relay operator enables TaskMail direct ingress, Android may submit the first `new_task` action to `/relay`
+- the relay bridges that accepted packet back into the current bot-mailbox first-mail ingress
+- when the relay operator provisions the current Phase 3 direct inbound wire, Android may subscribe the current active session detail on `/relay`
+- this Phase 3 path is read-side only and is limited to `session_snapshot` / `session_delta` freshness for one active session detail view
+- user-visible status mail and all later reply/control actions still stay on the current mail path
+
+Android should **not** implement the VPS relay WebSocket protocol as a general-purpose or primary app protocol in the current phase.
 
 ## 2. Current Topology
 
@@ -34,6 +42,32 @@ Android user
   -> user-facing mail
   -> user mailbox IMAP
   -> Android user
+```
+
+Optional Phase 2 v1 direct-`new_task` ingress:
+
+```text
+Android user
+  -> ws /relay hello
+  -> ws /relay packet(new_task)
+  -> VPS relay
+  -> bot mailbox SMTP ingress
+  -> PC mail runner
+  -> direct email OR relay transport
+  -> user mailbox
+  -> Android user
+```
+
+Optional Phase 3 v1 direct active-session-detail sidecar:
+
+```text
+Android user
+  -> ws /relay hello
+  -> ws /relay packet(subscribe_session_detail)
+  -> VPS relay
+  -> current runtime session_state/thread_state projection
+  -> ws /relay session_update(snapshot/delta)
+  -> Android detail view
 ```
 
 When relay is enabled, only the outbound PC -> user-facing delivery path changes:
@@ -88,13 +122,19 @@ Android should treat the current outbound body contract as frozen by:
 - `docs/current/multi_question_protocol.md`
 - `docs/current/multimedia_mail_protocol.md`
 
+Current optional direct-detail sidecar note:
+
+- if the relay operator provisions the current Phase 3 direct inbound wire and Android is explicitly provisioned for it, Android may subscribe the currently opened active session detail on `/relay`
+- this sidecar is only for detail freshness; mail remains the receipt, artifact, attachment, and history truth source
+- Android must continue to keep the mail/local-cache read path as the fallback when the sidecar is unavailable, rejected, or gapped
+
 ### 3.2 Send Path
 
-Android should send plain RFC-compatible mail, not a custom socket protocol.
+Android remains mail-first. The default send path is plain RFC-compatible mail; the only current direct-relay exception is the first-slice Phase 2 v1 `new_task` ingress when the relay operator explicitly enables it.
 
 Two current send modes exist.
 
-#### A. New task mail
+#### A. New task creation
 
 Use the current first-mail protocol:
 
@@ -107,8 +147,10 @@ Use the current first-mail protocol:
   - `Timeout:`
   - `Mode:`
   - `Profile:`
-  - `Permission:`
-  - `Acceptance:`
+- `Permission:`
+- `Acceptance:`
+
+If the optional direct Phase 2 v1 ingress is used, Android must still compile to these same first-mail semantics. The relay currently accepts only the shared `phase2-direct-outbound-contract-v1` `new_task` packet shape and bridges it back into this existing first-mail path.
 
 #### B. Continue or control an existing session
 
@@ -185,6 +227,8 @@ Relay changes the transport path, not the Android protocol.
 
 - the user-facing status mail may now be sent by VPS SMTP instead of directly by the PC
 - the final delivered `Message-ID` is the VPS-delivered mail's `Message-ID`
+- the relay may now also accept a first-slice direct Android `new_task` packet and bridge it into the current bot-mailbox ingress path when explicitly configured
+- the relay may now also accept a narrow Phase 3 direct active-session-detail subscribe path and push `session_update` messages when explicitly provisioned
 - VPS now persists:
   - relay packet history
   - delivery attempts
@@ -199,6 +243,7 @@ Relay changes the transport path, not the Android protocol.
 - Android reply method
 - current slash-command syntax
 - task execution location
+- all reply/control actions after task creation still remain mail-based
 
 The correct Android behavior is therefore:
 
@@ -210,23 +255,33 @@ The correct Android behavior is therefore:
 
 In the current phase, Android must not:
 
-- connect to the relay `/relay` WebSocket directly as the main app protocol
-- store or use the relay transport token
+- connect to the relay `/relay` WebSocket directly as the main or general-purpose app protocol
+- store or use a general-purpose relay transport token outside the narrow, operator-provisioned Phase 2 / Phase 3 direct scopes
 - treat `/healthz` or `/readyz` as app-facing business APIs
 - log into the `bot mailbox` from the Android client
 - infer session continuation only from title similarity
 - rewrite or partially edit quoted `state capsule` / `question capsules`
 - depend on relay-specific SMTP trace headers or `Received:` chain details
+- use direct relay packets for reply continuation, `/pause`, `/resume`, `/status`, `/kill`, or any other post-creation control action
 
 ## 6. Current Boundary For Future VPS APIs
 
-The current deployed VPS relay is a **PC transport endpoint**, not yet an Android application API.
+The current deployed VPS relay is still **not a general Android application API**.
 
 Current deployed relay-facing endpoints are operator/transport endpoints only:
 
 - `/relay`
 - `/healthz`
 - `/readyz`
+
+Current Android-facing direct support is limited to two narrow slices:
+
+- first-scope `new_task` over the shared `phase2-direct-outbound-contract-v1` packet shape
+- only when the relay operator enables TaskMail direct ingress
+- bridge-to-mail semantics on the server side
+- active-session-detail subscribe over the shared `phase3-direct-inbound-wire-v1` wire
+- only when the relay operator provisions the current direct detail sidecar
+- direct detail is read-side only; it is not a direct session history or control API
 
 That means:
 
@@ -235,7 +290,7 @@ That means:
   - listing VPS-side sessions
   - reading VPS-side packet history
   - resuming work by talking directly to VPS instead of mail
-  - direct Android-side send/receive over relay instead of mail
+  - direct Android-side send/receive over relay instead of mail, except for the narrow first-scope `new_task` ingress and the narrow active-session-detail read sidecar above
 
 If Android later needs direct session/history APIs from VPS, that must be introduced as a new documented protocol, not inferred from the current relay deployment.
 
@@ -286,6 +341,8 @@ Before the Android side claims it can communicate with the current system, it sh
 8. same user-visible behavior when PC uses:
    - direct `email`
    - `relay`
+9. optional Phase 2 v1 direct `new_task` ingress when the relay operator enables it
+10. optional Phase 3 v1 direct active-session-detail subscribe, including `packet_ack -> session_snapshot` and mail/local-cache fallback on reject or gap
 
 The last item is important: Android should observe that transport cutover does not require an Android protocol rewrite.
 
