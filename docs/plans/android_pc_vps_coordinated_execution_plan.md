@@ -89,8 +89,10 @@ The current repository-side reading is:
   - `new_task` only
 - accepted direct send, fallback-classified rejection, and hard rejection have all been closed through live validation
 - the first repository-side Phase 3 mapping artifact is now explicit for active-session read-side work
-- the next shared Phase 3 artifact should now be the active-session inbound wire freeze
-- the next active cross-repo implementation slice is now Phase 3 direct inbound update bridge
+- the repository-side Phase 3 wire freeze and representative fixture package are now also explicit
+- the repository-side Phase 3 closeout handoff is now explicit and aligned to the paired Android-side Phase 4-start reading
+- the next active cross-repo implementation slice is now Phase 4 dual-stack parity and primary-path switch
+- the repository-side Phase 4 execution plan is now explicit and starts with `new_task` as the conservative covered flow
 
 ## Phase 0: Direction Reset And Baseline Freeze
 

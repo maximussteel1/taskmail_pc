@@ -131,7 +131,8 @@ def test_monitor_window_manager_launches_focused_thread_window(tmp_path: Path) -
     assert "640" in command
     assert "-HistoryLimit" in command
     assert "24" in command
-    assert "-ExitWhenThreadNotRunning" in command
+    assert "-ExitWhenThreadNotActive" in command
+    assert "-ExitWhenThreadNotRunning" not in command
     assert "-WindowTitle" in command
     assert "Mail Runner Monitor thread_001" in command
     assert creationflags >= 0

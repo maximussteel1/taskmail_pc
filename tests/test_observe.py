@@ -25,6 +25,7 @@ def _thread_state(
     *,
     thread_id: str,
     status: str,
+    lifecycle: str = "active",
     repo_path: str = "E:\\repo",
     workdir: str | None = ".",
     current_task_id: str,
@@ -50,6 +51,7 @@ def _thread_state(
         status=status,
         history_files=list(history_files or []),
         last_summary=last_summary,
+        lifecycle=lifecycle,
         workspace_id=workspace_id,
         workspace_norm=build_workspace_norm(repo_path, workdir),
         session_id=thread_id,
@@ -481,7 +483,7 @@ def test_follow_thread_live_replays_recent_transcript_and_live_stream(tmp_path: 
     assert "tool.started | pytest -q" not in output
 
 
-def test_follow_thread_live_keeps_resumable_done_thread_open_until_iteration_limit(tmp_path: Path, capsys) -> None:
+def test_follow_thread_live_keeps_active_done_thread_open_until_iteration_limit(tmp_path: Path, capsys) -> None:
     runtime_dir = tmp_path / "runtime"
     config_path = _write_runtime_config(runtime_dir)
     task_root = runtime_dir / "tasks"
@@ -491,8 +493,6 @@ def test_follow_thread_live_keeps_resumable_done_thread_open_until_iteration_lim
             status="done",
             current_task_id="task_done",
             backend_transport="sdk",
-            backend_session_id="sdk-thread-001",
-            backend_session_resumable=True,
             updated_at="2099-03-17T01:00:03",
         ),
         task_root,
@@ -520,7 +520,7 @@ def test_follow_thread_live_keeps_resumable_done_thread_open_until_iteration_lim
     assert "monitor closed" not in output
 
 
-def test_follow_thread_live_closes_for_unresumable_thread(tmp_path: Path, capsys) -> None:
+def test_follow_thread_live_closes_for_non_active_thread(tmp_path: Path, capsys) -> None:
     runtime_dir = tmp_path / "runtime"
     config_path = _write_runtime_config(runtime_dir)
     task_root = runtime_dir / "tasks"
@@ -529,6 +529,7 @@ def test_follow_thread_live_closes_for_unresumable_thread(tmp_path: Path, capsys
         _thread_state(
             thread_id="thread_001",
             status="done",
+            lifecycle="ended",
             current_task_id="task_done",
             backend_transport="sdk",
             updated_at="2099-03-17T01:00:03",
@@ -557,7 +558,7 @@ def test_follow_thread_live_closes_for_unresumable_thread(tmp_path: Path, capsys
     output = capsys.readouterr().out
     exit_state = json.loads(exit_state_path.read_text(encoding="utf-8"))
     assert exit_code == 0
-    assert "monitor closed: native session context is unavailable." in output
+    assert "monitor closed: session is no longer active." in output
     assert exit_state == {"reason": "inactive", "thread_id": "thread_001"}
 
 

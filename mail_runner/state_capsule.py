@@ -157,3 +157,11 @@ def parse_question_capsule(text: str) -> dict[str, Any] | None:
     if not parsed_blocks:
         return None
     return parsed_blocks[-1]
+
+
+def strip_task_capsules(text: str) -> str:
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n").replace("\ufeff", "")
+    normalized = _CAPSULE_RE.sub("", normalized)
+    normalized = _QUESTION_RE.sub("", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()

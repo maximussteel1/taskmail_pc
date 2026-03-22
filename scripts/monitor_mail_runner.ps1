@@ -12,7 +12,8 @@ param(
     [string]$ReadyFile = "",
     [string]$ExitStatePath = "",
     [switch]$RequestKill,
-    [switch]$ExitWhenThreadNotRunning,
+    [Alias("ExitWhenThreadNotRunning")]
+    [switch]$ExitWhenThreadNotActive,
     [switch]$NoClear
 )
 
@@ -204,7 +205,7 @@ if (-not [string]::IsNullOrWhiteSpace($ThreadId)) {
         "--history-limit",
         [string]$HistoryLimit
     )
-    if ($ExitWhenThreadNotRunning) {
+    if ($ExitWhenThreadNotActive) {
         $followArgs += "--exit-when-inactive"
     }
     if ($Iterations -gt 0) {

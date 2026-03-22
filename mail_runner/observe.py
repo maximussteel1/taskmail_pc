@@ -760,7 +760,7 @@ def _build_parser() -> argparse.ArgumentParser:
     follow_thread_live_parser.add_argument(
         "--exit-when-inactive",
         action="store_true",
-        help="Close once the thread is no longer active/resumable.",
+        help="Close once the thread is no longer active.",
     )
     follow_thread_live_parser.add_argument(
         "--exit-state-path",

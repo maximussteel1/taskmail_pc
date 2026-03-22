@@ -62,6 +62,8 @@ class MonitorWindowManager:
     def on_run_started(self, state: ThreadState, snapshot: TaskSnapshot) -> None:
         if not self.enabled:
             return
+        if state.lifecycle != "active":
+            return
         if not self.script_path.exists():
             LOGGER.warning("Monitor launcher script not found: %s", self.script_path)
             return
@@ -110,7 +112,7 @@ class MonitorWindowManager:
             thread_id,
             "-WindowTitle",
             f"Mail Runner Monitor {thread_id}",
-            "-ExitWhenThreadNotRunning",
+            "-ExitWhenThreadNotActive",
         ]
         if self.config_path is not None:
             command.extend(["-ConfigPath", str(self.config_path)])

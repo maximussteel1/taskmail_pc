@@ -215,6 +215,7 @@ If COS upload fails for an oversized file:
 - inline image preview is controlled per item by `inline: true`
 - the original image remains a normal attachment
 - preview and attachment may reference the same source file in MVP
+- 为避免邮件客户端把同一图片显示成两份附件，inline preview MIME part 不携带附件文件名
 - future optimization may generate compressed preview images, but that is not required for MVP
 - static attached `image/svg+xml` follows the same inline-preview path as other previewable attached images
 - consumer-side body-image matching is based on `cid:` to attachment `content_id`, not filename/order heuristics

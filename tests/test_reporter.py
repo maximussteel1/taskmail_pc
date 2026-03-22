@@ -24,6 +24,7 @@ from mail_runner.reporter import (
     build_status_subject,
     render_status_markdown_to_plain_text,
 )
+from mail_runner.state_capsule import render_question_capsule
 from mail_runner.status import (
     BACKEND_OPENCODE,
     RUN_STATUS_FAILED,
@@ -208,6 +209,70 @@ def test_build_question_mail_includes_question_capsule() -> None:
     assert "Status: QUESTION" in body
     assert "Question: Should I update both files?" in body
     assert "---TASK-QUESTION-BEGIN---" in body
+
+
+def test_build_question_mail_strips_embedded_question_capsule_from_reply() -> None:
+    state = ThreadState(
+        thread_id="thread_001",
+        root_message_id="<root@example.com>",
+        latest_message_id="<question@example.com>",
+        subject_norm="demo",
+        backend=BACKEND_OPENCODE,
+        repo_path="D:\\repo",
+        workdir="src",
+        current_task_id="task_003",
+        last_task_snapshot_file="snapshots/task_003.json",
+        status="awaiting_user_input",
+        history_files=["runs/task_003/result.json"],
+        last_summary="Need input",
+        pending_question_id="question_task_003",
+        pending_question_text="Should I update both files?",
+        pending_choices=["yes", "no"],
+        awaiting_since="2026-03-12T12:15:00",
+        created_at="2026-03-12T12:00:00",
+        updated_at="2026-03-12T12:15:00",
+    )
+    snapshot = TaskSnapshot(
+        task_id="task_003",
+        thread_id="thread_001",
+        backend=BACKEND_OPENCODE,
+        repo_path="D:\\repo",
+        workdir="src",
+        task_text="Inspect",
+        acceptance=[],
+        timeout_minutes=60,
+        mode="analysis_only",
+        attachments=[],
+        created_at="2026-03-12T12:00:00",
+        updated_at="2026-03-12T12:00:00",
+    )
+    captured_reply = "\n".join(
+        [
+            "I need one decision before I continue.",
+            "",
+            render_question_capsule(
+                {
+                    "question_set_id": "question_task_003",
+                    "question_id": "question_task_003",
+                    "question_type": "single_choice",
+                    "required": True,
+                    "question_text": "Should I update both files?",
+                    "choices": ["yes", "no"],
+                    "choice_labels": {},
+                }
+            ),
+        ]
+    )
+
+    body = build_status_mail(
+        MAIL_STATUS_QUESTION,
+        state,
+        task_snapshot=snapshot,
+        captured_reply=captured_reply,
+    )
+
+    assert "Reply:\nI need one decision before I continue." in body
+    assert body.count("---TASK-QUESTION-BEGIN---") == 1
 
 
 def test_build_question_mail_includes_multi_question_template() -> None:

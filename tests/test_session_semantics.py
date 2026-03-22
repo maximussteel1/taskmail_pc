@@ -7,6 +7,7 @@ from mail_runner.session_semantics import (
     effective_thread_status,
     thread_can_attempt_resume,
     thread_can_continue_without_resume,
+    thread_monitor_exit_reason,
     thread_monitor_should_stay_open,
 )
 from mail_runner.thread_store import build_workspace_id, build_workspace_norm
@@ -76,9 +77,15 @@ def test_paused_thread_uses_pre_pause_status_and_requires_explicit_resume() -> N
     assert thread_monitor_should_stay_open(state) is True
 
 
-def test_ended_or_unresumable_thread_does_not_keep_monitor_open() -> None:
+def test_active_done_thread_keeps_monitor_open_without_resume_context() -> None:
+    state = _thread_state(status="done", backend_session_id=None, backend_session_resumable=False)
+
+    assert thread_can_attempt_resume(state) is False
+    assert thread_monitor_should_stay_open(state) is True
+
+
+def test_ended_thread_does_not_keep_monitor_open() -> None:
     ended = _thread_state(status="done", lifecycle="ended", backend_session_id="sdk-thread-001", backend_session_resumable=True)
-    unresumable = _thread_state(status="done", backend_session_id=None, backend_session_resumable=False)
 
     assert thread_monitor_should_stay_open(ended) is False
-    assert thread_monitor_should_stay_open(unresumable) is False
+    assert thread_monitor_exit_reason(ended) == "session is no longer active"

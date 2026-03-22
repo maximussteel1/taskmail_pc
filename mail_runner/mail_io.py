@@ -845,12 +845,13 @@ class MailClient:
             if attachment.inline and html_part is not None and maintype == "image":
                 content_id = attachment.content_id or make_msgid(domain="mail-runner.local").strip("<>")
                 attachment.content_id = content_id
+                # Keep the related preview part filename-free so mail clients do not
+                # surface it as a second attachment alongside the real file attachment.
                 html_part.add_related(
                     payload,
                     maintype=maintype,
                     subtype=subtype,
                     cid=f"<{content_id}>",
-                    filename=filename,
                 )
 
             if attachment.attach:

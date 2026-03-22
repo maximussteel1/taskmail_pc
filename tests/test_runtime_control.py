@@ -128,15 +128,10 @@ def test_runtime_control_main_rejects_non_running_thread(tmp_path: Path, capsys)
     assert list_thread_kill_request_paths(runtime_dir) == []
 
 
-def test_runtime_control_main_queues_close_request_for_resumable_thread(tmp_path: Path, capsys) -> None:
+def test_runtime_control_main_queues_close_request_for_active_nonrunning_thread(tmp_path: Path, capsys) -> None:
     runtime_dir = tmp_path / "runtime"
     task_root = tmp_path / "tasks"
-    _create_thread_state(
-        task_root,
-        status=THREAD_STATUS_DONE,
-        backend_session_id="sdk-thread-001",
-        backend_session_resumable=True,
-    )
+    _create_thread_state(task_root, status=THREAD_STATUS_DONE)
 
     exit_code = main(
         [
@@ -163,7 +158,7 @@ def test_runtime_control_main_queues_close_request_for_resumable_thread(tmp_path
 def test_runtime_control_main_rejects_close_request_for_unmonitorable_thread(tmp_path: Path, capsys) -> None:
     runtime_dir = tmp_path / "runtime"
     task_root = tmp_path / "tasks"
-    _create_thread_state(task_root, status=THREAD_STATUS_DONE)
+    _create_thread_state(task_root, status=THREAD_STATUS_DONE, lifecycle="ended")
 
     exit_code = main(
         [
@@ -293,15 +288,10 @@ def test_process_runtime_thread_close_requests_kills_then_ends_matching_thread(t
     assert state.lifecycle == "ended"
 
 
-def test_process_runtime_thread_close_requests_ends_resumable_nonrunning_thread(tmp_path: Path) -> None:
+def test_process_runtime_thread_close_requests_ends_active_nonrunning_thread(tmp_path: Path) -> None:
     runtime_dir = tmp_path / "runtime"
     task_root = tmp_path / "tasks"
-    _create_thread_state(
-        task_root,
-        status=THREAD_STATUS_DONE,
-        backend_session_id="sdk-thread-001",
-        backend_session_resumable=True,
-    )
+    _create_thread_state(task_root, status=THREAD_STATUS_DONE)
     request_path = write_thread_close_request(
         runtime_dir,
         thread_id="thread_001",

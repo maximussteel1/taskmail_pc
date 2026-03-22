@@ -47,6 +47,16 @@ Current plan documents:
 - `phase3_direct_inbound_mapping_v1.md`: shared Phase 3 first-slice mapping note for active-session direct inbound updates into the existing Android session-detail read side.
 - `phase3_direct_inbound_wire_v1.md`: shared Phase 3 first-slice wire contract for active-session detail subscribe, `session_update`, ordering, and resync.
 - `phase3_direct_inbound_fixture_package_v1.md`: shared Phase 3 representative fixture package note for subscribe identity fallbacks, status snapshots, reconciliation, and resync.
+- `phase3_direct_inbound_closeout_handoff.md`: short repository-side handoff note that closes the Phase 3 direct inbound v1 slice and points the next active cross-repo work at Phase 4 dual-stack parity and primary-path switch.
+- `phase4_dual_stack_parity_plan.md`: repository-side execution plan for the first Phase 4 covered-flow parity pass, mismatch triage, rollback trigger definition, and the first primary-path switch gate.
+- `phase4_dual_stack_parity_checklist.md`: repository-side first validated matrix baseline for the shared Phase 4 parity checklist, currently scoped to `new_task`.
+- `phase4_mismatch_ledger.md`: repository-side mismatch-ledger skeleton plus the first validated repo-side readout for Phase 4.
+- `phase4_rollback_trigger_note.md`: repository-side first validated trigger baseline for the shared Phase 4 rollback trigger note, currently scoped to `new_task`.
+- `phase5_long_term_default_hardening_plan.md`: repository-side pre-freeze execution plan for sequencing the shared Phase 5 documentation set.
+- `phase5_long_term_fallback_note.md`: repository-side first draft baseline for the shared Phase 5 long-term fallback note.
+- `phase5_token_and_reconnect_handling_note.md`: repository-side first draft baseline for the shared Phase 5 token and reconnect handling note.
+- `phase5_remaining_edge_case_ledger.md`: repository-side first draft baseline for the shared Phase 5 remaining edge-case ledger.
+- `phase5_freeze_review_precheck.md`: repository-side precheck note for deciding whether the current Phase 5 draft set is ready to enter shared freeze review preparation without swallowing still-open lines.
 - `outbound_mail_contract_convergence_plan.md`: broader long-term plan for converging outbound task mail onto a neutral internal model, summary-first plain text, fragment-based HTML projection, and dual-format subject compatibility.
 
 Original outbound sequencing was: freeze the consumer-facing contract first, land the narrow `p9_html_mail_projection_plan.md` reading slice against that frozen contract, and only then start the broader `outbound_mail_contract_convergence_plan.md` work.
@@ -71,6 +81,12 @@ As of the 2026-03-21 plaintext cutover probe, that live deployment now matches t
 `http://124.223.41.153:8787/healthz` returns `200 OK` with `tls_enabled = false`, and
 `ws://124.223.41.153:8787/relay` returns `hello_ack` on the live token path. Use
 `docs/plans/phase0_relay_readiness_note.md` as the current repository-side proof package for that baseline.
+
+As of the 2026-03-22 public partial re-probe, `http://124.223.41.153:8787/healthz` still returns `200 OK`, the live
+health payload still reports `tls_enabled = false` and now exposes `taskmail_direct_ingress_enabled = true`, and
+`ws://124.223.41.153:8787/relay` with an invalid token still returns `unauthorized`. The remaining VPS live-acceptance
+gap is therefore no longer basic public reachability, but a fresh valid-token `hello_ack` plus upgraded-path packet /
+SMTP delivery verification.
 
 As of 2026-03-21, the remaining repository-side Phase 0 handoff is also explicit in
 `docs/plans/phase0_direct_connect_handoff.md`. That means repository-side Phase 0 is now closed, and the next active
@@ -102,5 +118,45 @@ As of 2026-03-21, the first representative fixture companion for that Phase 3 sl
 `docs/plans/phase3_direct_inbound_fixture_package_v1.md`. That note freezes the fixture-unit contract, identity
 fallback cases, question/status coverage, reconciliation suppress cases, and the first deterministic manifest both
 repositories should implement against.
+
+As of 2026-03-22, the repository-side Phase 3 closeout handoff is also explicit in
+`docs/plans/phase3_direct_inbound_closeout_handoff.md`. That note reads the current repository slice as a closed first
+inbound-update package, records the paired Android-side Phase 3 freeze / Phase 4 start signal, and shifts the next
+active cross-repo slice to Phase 4 dual-stack parity and primary-path switch rather than further implicit Phase 3 scope
+growth.
+
+As of 2026-03-22, the repository-side Phase 4 execution plan is also explicit in
+`docs/plans/phase4_dual_stack_parity_plan.md`. That note keeps the first covered flow conservative (`new_task` first),
+defines the planned parity checklist / mismatch ledger / rollback trigger outputs, and keeps direct `reply` /
+direct `/status` outside the default implementation queue until a separate cross-repo contract freeze exists.
+
+As of 2026-03-22, the repository-side first evidence baselines for those three shared Phase 4 artifacts also exist in
+`docs/plans/phase4_dual_stack_parity_checklist.md`, `docs/plans/phase4_mismatch_ledger.md`, and
+`docs/plans/phase4_rollback_trigger_note.md`. Those notes keep the shared artifact names aligned with Android, record
+the first repository-side parity / rollback evidence readout, and intentionally keep the mismatch table empty until a
+confirmed cross-repo delta is actually evidenced.
+
+As of 2026-03-22, the repository-side `new_task` outcome normalization seam is also landed in code and tests: accepted,
+fallback-classified rejection, and hard rejection now share one repo-side classifier, accepted-packet failure can
+persist `last_error_code`, Android authority samples now also exist for shared closeout workflow reuse (`thread_097`)
+and `request_id`-first bind (`thread_098`), and `hard_rejection_stop` should now be read as a closed shared negative
+closeout rather than as a standing tail item for that specific `new_task` row. This does not close other open lines
+such as fresh VPS acceptance; it only means that later planning should not keep reopening `hard_rejection_stop` unless
+a fresh regression actually appears on the current build.
+
+As of 2026-03-22, the repository-side Phase 5 documentation-sequencing plan is also explicit in
+`docs/plans/phase5_long_term_default_hardening_plan.md`. That note keeps the current Phase 5 effort at the
+documentation-assembly / pre-freeze stage, defines the fill order for the shared artifacts, and explicitly prevents
+Phase 5 from being read as “Phase 4 already closed”.
+
+As of 2026-03-22, the repository-side Phase 5 shared-artifact homes also exist in
+`docs/plans/phase5_long_term_fallback_note.md`, `docs/plans/phase5_token_and_reconnect_handling_note.md`, and
+`docs/plans/phase5_remaining_edge_case_ledger.md`. All three have now advanced to first draft baselines. None of these
+documents imply that the Phase 4 exit gates are already satisfied or that `direct-default` has already switched.
+
+As of 2026-03-22, the repository-side freeze-review-preparation checkpoint is also explicit in
+`docs/plans/phase5_freeze_review_precheck.md`. That note does not declare Phase 5 frozen and does not authorize
+`direct-default`; it only records that the current draft set now has a reviewable precheck shape while still keeping
+open lines such as fresh VPS acceptance visible.
 
 Layering reference: [document_layering_plan.md](../document_layering_plan.md).

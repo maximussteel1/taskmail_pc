@@ -52,6 +52,7 @@ class AcceptedRelayPacket:
     delivery_status: str = "pending"
     transport_message_id: str | None = None
     delivered_at: str | None = None
+    last_error_code: str | None = None
     last_error_message: str | None = None
     attempt_count: int = 0
 
@@ -69,6 +70,7 @@ class AcceptedRelayPacket:
             raise ValueError("delivery_status must be one of: pending, delivered, failed")
         self.transport_message_id = _require_optional_text(self.transport_message_id, "transport_message_id")
         self.delivered_at = _require_optional_text(self.delivered_at, "delivered_at")
+        self.last_error_code = _require_optional_text(self.last_error_code, "last_error_code")
         self.last_error_message = _require_optional_text(self.last_error_message, "last_error_message")
         if not isinstance(self.attempt_count, int) or self.attempt_count < 0:
             raise ValueError("attempt_count must be a non-negative integer")
@@ -82,6 +84,7 @@ class RelayDeliveryAttempt:
     attempted_at: str
     success: bool
     transport_message_id: str | None = None
+    error_code: str | None = None
     error_message: str | None = None
 
     def __post_init__(self) -> None:
@@ -92,6 +95,7 @@ class RelayDeliveryAttempt:
         if not isinstance(self.success, bool):
             raise ValueError("success must be a bool")
         self.transport_message_id = _require_optional_text(self.transport_message_id, "transport_message_id")
+        self.error_code = _require_optional_text(self.error_code, "error_code")
         self.error_message = _require_optional_text(self.error_message, "error_message")
 
 
@@ -139,6 +143,7 @@ class InMemoryAcceptedPacketStore:
         transport_name: str,
         success: bool,
         transport_message_id: str | None = None,
+        error_code: str | None = None,
         error_message: str | None = None,
     ) -> AcceptedRelayPacket:
         normalized_packet_id = _require_text(packet_id, "packet_id")
@@ -151,6 +156,7 @@ class InMemoryAcceptedPacketStore:
                 attempted_at=attempted_at,
                 success=success,
                 transport_message_id=transport_message_id,
+                error_code=error_code,
                 error_message=error_message,
             )
             packet.attempt_count += 1
@@ -158,9 +164,11 @@ class InMemoryAcceptedPacketStore:
                 packet.delivery_status = "delivered"
                 packet.transport_message_id = _require_optional_text(transport_message_id, "transport_message_id")
                 packet.delivered_at = _require_text(attempted_at, "attempted_at")
+                packet.last_error_code = None
                 packet.last_error_message = None
             else:
                 packet.delivery_status = "failed"
+                packet.last_error_code = _require_optional_text(error_code, "error_code")
                 packet.last_error_message = _require_optional_text(error_message, "error_message")
             self._delivery_attempts.append(attempt)
             return packet
@@ -250,6 +258,7 @@ class PersistentAcceptedPacketStore:
         transport_name: str,
         success: bool,
         transport_message_id: str | None = None,
+        error_code: str | None = None,
         error_message: str | None = None,
     ) -> AcceptedRelayPacket:
         normalized_packet_id = _require_text(packet_id, "packet_id")
@@ -262,6 +271,7 @@ class PersistentAcceptedPacketStore:
                 attempted_at=attempted_at,
                 success=success,
                 transport_message_id=transport_message_id,
+                error_code=error_code,
                 error_message=error_message,
             )
             packet.attempt_count += 1
@@ -269,9 +279,11 @@ class PersistentAcceptedPacketStore:
                 packet.delivery_status = "delivered"
                 packet.transport_message_id = _require_optional_text(transport_message_id, "transport_message_id")
                 packet.delivered_at = _require_text(attempted_at, "attempted_at")
+                packet.last_error_code = None
                 packet.last_error_message = None
             else:
                 packet.delivery_status = "failed"
+                packet.last_error_code = _require_optional_text(error_code, "error_code")
                 packet.last_error_message = _require_optional_text(error_message, "error_message")
             self._save()
             self._append_delivery_attempt(attempt)

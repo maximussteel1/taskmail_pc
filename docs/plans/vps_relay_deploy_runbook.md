@@ -98,6 +98,19 @@ Important freshness note:
 - the verification snapshot above reflects the original Phase C health-check skeleton on `2026-03-20`
 - the newer repository-side Phase D-E path (remote packet endpoint, durable relay history, VPS SMTP delivery, optional TLS) still needs a fresh live verification pass on the inspected VPS after deployment
 
+As of `2026-03-22`, a fresh public partial probe now also reconfirms:
+
+- `http://124.223.41.153:8787/healthz` still returns `200 OK`
+- the live health payload still reports `tls_enabled = false`
+- the live health payload now also exposes `taskmail_direct_ingress_enabled = true`
+- `ws://124.223.41.153:8787/relay` with an invalid token still returns `unauthorized / transport token mismatch`
+
+This `2026-03-22` probe is still intentionally partial:
+
+- it does not yet re-close a fresh valid-token `hello -> hello_ack`
+- it does not yet re-close remote packet acceptance on the current upgraded path
+- it does not yet re-close VPS SMTP delivery on the current upgraded path
+
 ## Phase 3 Task Root Visibility
 
 当前 VPS relay 只能读取它本机可见的 `task_root`。如果远端没有这份状态落盘，`subscribe_session_detail` 会因为无法 resolve `thread_state` / `session_state` 而返回 `session_not_found`。

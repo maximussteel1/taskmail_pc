@@ -169,6 +169,7 @@ Rules:
 - optionally send `text/html` mirror,
 - inline image preview uses `cid:` references in HTML,
 - original files remain normal attachments when attached,
+- 内联预览 MIME part 不应携带附件文件名；避免同一源文件在客户端里显示成两份附件，
 - externally delivered files are not attached and therefore not previewed inline.
 
 ---

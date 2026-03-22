@@ -77,6 +77,16 @@ def test_process_once_runs_new_task_happy_path(tmp_path) -> None:
     assert state["status"] == "done"
     assert state["session_name"] == "Demo task"
     assert (task_root / "runs" / state["current_task_id"] / "result.json").exists()
+    canonical_summary = json.loads(
+        (task_root / "runs" / state["current_task_id"] / "canonical_summary.json").read_text(encoding="utf-8")
+    )
+    assert canonical_summary["thread_id"] == "thread_001"
+    assert canonical_summary["ingress_type"] == "mail"
+    assert canonical_summary["ingress_message_id"] == "<root@example.com>"
+    assert canonical_summary["request_id"] is None
+    assert canonical_summary["last_summary"] == state["last_summary"]
+    assert canonical_summary["terminal_mail_message_id"] == "<sent-3@example.com>"
+    assert canonical_summary["terminal_mail_subject"] == "[DONE][S:thread_001] Demo task"
 
 
 def test_process_once_skips_unmatched_reply_mail(tmp_path) -> None:

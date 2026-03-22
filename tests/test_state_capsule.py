@@ -13,6 +13,7 @@ from mail_runner.state_capsule import (
     render_question_capsule,
     render_question_capsules,
     render_state_capsule,
+    strip_task_capsules,
 )
 
 
@@ -107,3 +108,29 @@ def test_parse_question_capsules_collects_multiple_blocks() -> None:
     assert parsed[0]["question_set_id"] == "phase2"
     assert parsed[0]["choice_labels"]["below"] == "Below"
     assert parse_question_capsule(rendered)["question_id"] == "q_002"
+
+
+def test_strip_task_capsules_removes_state_and_question_blocks() -> None:
+    text = "\n".join(
+        [
+            "Need one decision before I continue.",
+            "",
+            render_state_capsule({"thread_id": "thread_001", "task_id": "task_001"}),
+            "",
+            render_question_capsule(
+                {
+                    "question_set_id": "qs_001",
+                    "question_id": "q_001",
+                    "question_type": "short_text",
+                    "required": True,
+                    "question_text": "Continue?",
+                }
+            ),
+            "",
+            "Reply with yes or no.",
+        ]
+    )
+
+    stripped = strip_task_capsules(text)
+
+    assert stripped == "Need one decision before I continue.\n\nReply with yes or no."

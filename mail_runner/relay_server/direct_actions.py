@@ -18,7 +18,7 @@ from ..runner import SerialTaskRunner
 from ..status import BACKEND_CODEX, BACKEND_OPENCODE
 from .config import RelayServerConfig
 from .packet_store import AcceptedRelayPacket
-from .protocol import RelayPacketMessage
+from .protocol import RelayErrorMessage, RelayPacketAckMessage, RelayPacketMessage
 
 _PHASE2_SCHEMA_VERSION = "phase2-direct-outbound-contract-v1"
 _DIRECT_CHANNEL = "taskmail_android_direct"
@@ -31,6 +31,12 @@ _SAFE_MESSAGE_ID_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _SUPPORTED_BACKENDS = {BACKEND_OPENCODE, BACKEND_CODEX}
 _SUPPORTED_MODES = {"modify", "analysis_only"}
 _SUPPORTED_PERMISSIONS = {"default", "highest"}
+_DIRECT_NEW_TASK_FALLBACK_CLASSIFIED_ERROR_CODES = frozenset({"unsupported_action", "direct_temporarily_unavailable"})
+_DIRECT_NEW_TASK_HARD_REJECTION_ERROR_CODES = frozenset({"invalid_payload", "validation_failed", "unauthorized"})
+
+DIRECT_NEW_TASK_OUTCOME_ACCEPTED = "accepted"
+DIRECT_NEW_TASK_OUTCOME_FALLBACK_CLASSIFIED_REJECTION = "fallback_classified_rejection"
+DIRECT_NEW_TASK_OUTCOME_HARD_REJECTION = "hard_rejection"
 
 
 def _timestamp() -> str:
@@ -116,6 +122,32 @@ def _looks_like_direct_packet(task_run_packet: dict[str, Any], dispatch_metadata
 
 def is_taskmail_direct_packet(message: RelayPacketMessage) -> bool:
     return _looks_like_direct_packet(message.task_run_packet, message.dispatch_metadata)
+
+
+def classify_direct_new_task_error_code(error_code: str | None) -> str | None:
+    normalized = str(error_code or "").strip()
+    if not normalized:
+        return None
+    if normalized in _DIRECT_NEW_TASK_FALLBACK_CLASSIFIED_ERROR_CODES:
+        return DIRECT_NEW_TASK_OUTCOME_FALLBACK_CLASSIFIED_REJECTION
+    if normalized in _DIRECT_NEW_TASK_HARD_REJECTION_ERROR_CODES:
+        return DIRECT_NEW_TASK_OUTCOME_HARD_REJECTION
+    return None
+
+
+def classify_direct_new_task_server_outcome(message: RelayPacketAckMessage | RelayErrorMessage) -> str:
+    if isinstance(message, RelayPacketAckMessage):
+        if message.accepted:
+            return DIRECT_NEW_TASK_OUTCOME_ACCEPTED
+        error_code = message.error_code
+    elif isinstance(message, RelayErrorMessage):
+        error_code = message.code
+    else:
+        raise TypeError("message must be RelayPacketAckMessage or RelayErrorMessage")
+    outcome = classify_direct_new_task_error_code(error_code)
+    if outcome is None:
+        raise ValueError(f"unsupported direct new_task error code: {str(error_code or '').strip() or '<missing>'}")
+    return outcome
 
 
 @dataclass(slots=True)

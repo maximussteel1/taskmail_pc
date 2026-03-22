@@ -146,10 +146,15 @@ def test_send_mail_preserves_html_alternative_and_inline_related_image(monkeypat
     assert html_part is not None
     assert 'article class="task-mail"' in html_part.get_content()
     assert any(part.get("Content-ID") == "<preview-cid>" for part in message.walk())
+    preview_parts = [part for part in message.walk() if part.get("Content-ID") == "<preview-cid>"]
+    assert len(preview_parts) == 1
+    assert preview_parts[0].get_content_disposition() == "inline"
+    assert preview_parts[0].get_filename() is None
     assert any(
         part.get_filename() == "preview.png" and part.get_content_disposition() == "attachment"
         for part in message.walk()
     )
+    assert sum(1 for part in message.walk() if part.get_filename() == "preview.png") == 1
 
 
 def test_fetch_unseen_messages_uses_uid_scan_and_skips_system_mail(monkeypatch, tmp_path) -> None:
@@ -907,3 +912,4 @@ def test_send_mail_supports_html_and_inline_image_attachments(monkeypatch, tmp_p
     assert "<preview-1>" in content_ids
     all_filenames = [part.get_filename() for part in message.iter_attachments()]
     assert "preview.png" in all_filenames
+    assert sum(1 for part in message.walk() if part.get_filename() == "preview.png") == 1

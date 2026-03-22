@@ -8,8 +8,12 @@ from mail_runner.dispatcher import Dispatcher
 from mail_runner.outbound.relay_bootstrap import build_hello_payload
 from mail_runner.relay_server.config import RelayServerConfig
 from mail_runner.relay_server.direct_actions import (
+    DIRECT_NEW_TASK_OUTCOME_ACCEPTED,
+    DIRECT_NEW_TASK_OUTCOME_FALLBACK_CLASSIFIED_REJECTION,
+    DIRECT_NEW_TASK_OUTCOME_HARD_REJECTION,
     RelayTaskMailDirectNewTaskHandler,
     RelayTaskMailDirectNewTaskMailBridge,
+    classify_direct_new_task_server_outcome,
 )
 from mail_runner.relay_server.loopback import LoopbackRelayServer
 from mail_runner.relay_server.protocol import RelayErrorMessage, RelayHelloAckMessage, RelayPacketAckMessage, parse_server_message
@@ -61,10 +65,16 @@ def test_direct_new_task_packet_is_accepted_and_reuses_mail_task_start_path(tmp_
     assert isinstance(parsed, RelayPacketAckMessage)
     assert parsed.accepted is True
     assert parsed.packet_id == "android-taskmail:new-task:req_001"
+    assert classify_direct_new_task_server_outcome(parsed) == DIRECT_NEW_TASK_OUTCOME_ACCEPTED
 
     packet = server.packet_store.get_packet("android-taskmail:new-task:req_001")
     state = load_thread_state("thread_001", task_root)
     raw_mail = json.loads((task_root / "thread_001" / "mail" / "raw_001.json").read_text(encoding="utf-8"))
+    canonical_summary = json.loads(
+        (task_root / "thread_001" / "runs" / state.current_task_id / "canonical_summary.json").read_text(
+            encoding="utf-8"
+        )
+    )
 
     assert packet is not None
     assert packet.delivery_status == "delivered"
@@ -78,6 +88,13 @@ def test_direct_new_task_packet_is_accepted_and_reuses_mail_task_start_path(tmp_
         "[DONE][S:thread_001] Audit the direct-send handoff path",
     ]
     assert all(item["to_addr"] == "user@example.com" for item in mail_client.sent_messages)
+    assert canonical_summary["ingress_type"] == "direct_bridge"
+    assert canonical_summary["ingress_message_id"] == raw_mail["message_id"]
+    assert canonical_summary["request_id"] == "req_001"
+    assert canonical_summary["packet_id"] == "android-taskmail:new-task:req_001"
+    assert canonical_summary["last_summary"] == state.last_summary
+    assert canonical_summary["terminal_mail_message_id"] == "<sent-3@example.com>"
+    assert canonical_summary["terminal_mail_subject"] == "[DONE][S:thread_001] Audit the direct-send handoff path"
 
 
 def test_direct_packet_returns_unsupported_action_for_non_new_task_phase2_payload(tmp_path) -> None:
@@ -101,6 +118,7 @@ def test_direct_packet_returns_unsupported_action_for_non_new_task_phase2_payloa
     parsed = parse_server_message(response)
     assert isinstance(parsed, RelayErrorMessage)
     assert parsed.code == "unsupported_action"
+    assert classify_direct_new_task_server_outcome(parsed) == DIRECT_NEW_TASK_OUTCOME_FALLBACK_CLASSIFIED_REJECTION
     assert server.packet_store.get_packet("android-taskmail:new-task:req_001") is None
 
 
@@ -124,7 +142,47 @@ def test_direct_packet_returns_invalid_payload_for_missing_task_text(tmp_path) -
     parsed = parse_server_message(response)
     assert isinstance(parsed, RelayErrorMessage)
     assert parsed.code == "invalid_payload"
+    assert classify_direct_new_task_server_outcome(parsed) == DIRECT_NEW_TASK_OUTCOME_HARD_REJECTION
     assert server.packet_store.get_packet("android-taskmail:new-task:req_001") is None
+
+
+def test_direct_packet_records_post_accept_fallback_classified_failure_on_packet_store(tmp_path) -> None:
+    task_root = tmp_path / "tasks"
+    server = LoopbackRelayServer(
+        RelayServerConfig(
+            host="127.0.0.1",
+            port=8787,
+            transport_token="relay-secret",
+            state_dir=str(tmp_path / "relay_state"),
+        ),
+        direct_packet_handler=RelayTaskMailDirectNewTaskHandler(
+            config=AppConfig(from_name="Mail Runner", task_root=str(task_root)),
+            task_root=task_root,
+            mail_client=FakeMailClient(),
+            runner=SerialTaskRunner(task_root, Dispatcher(MockAdapter(0), MockAdapter(0))),
+            recipient_addr="user@example.com",
+            background=True,
+        ),
+        clock=lambda: "2026-03-21T12:30:00",
+    )
+    connection_id = _connect(server)
+
+    response = server.handle_client_message(
+        _canonical_direct_packet(),
+        connection_id=connection_id,
+    )
+
+    parsed = parse_server_message(response)
+    packet = server.packet_store.get_packet("android-taskmail:new-task:req_001")
+
+    assert isinstance(parsed, RelayErrorMessage)
+    assert parsed.code == "direct_temporarily_unavailable"
+    assert classify_direct_new_task_server_outcome(parsed) == DIRECT_NEW_TASK_OUTCOME_FALLBACK_CLASSIFIED_REJECTION
+    assert packet is not None
+    assert packet.delivery_status == "failed"
+    assert packet.attempt_count == 1
+    assert packet.last_error_code == "direct_temporarily_unavailable"
+    assert packet.last_error_message == "bot mailbox address is not configured for direct TaskMail acceptance"
 
 
 def test_direct_new_task_bridge_sends_canonical_first_mail_without_system_header(tmp_path) -> None:
@@ -161,6 +219,7 @@ def test_direct_new_task_bridge_sends_canonical_first_mail_without_system_header
 
     assert isinstance(parsed, RelayPacketAckMessage)
     assert parsed.accepted is True
+    assert classify_direct_new_task_server_outcome(parsed) == DIRECT_NEW_TASK_OUTCOME_ACCEPTED
     assert parsed.transport_message_id == "<sent-1@example.com>"
     assert packet is not None
     assert packet.delivery_status == "delivered"

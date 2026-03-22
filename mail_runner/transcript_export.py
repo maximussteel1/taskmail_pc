@@ -9,22 +9,9 @@ from pathlib import Path
 
 from .mail_io import SYSTEM_MESSAGE_HEADER, SYSTEM_MESSAGE_HEADER_VALUE
 from .quote_extractor import extract_reply_delta
-from .state_capsule import (
-    BEGIN_MARKER,
-    END_MARKER,
-    QUESTION_BEGIN_MARKER,
-    QUESTION_END_MARKER,
-)
+from .state_capsule import strip_task_capsules
 from .workspace import WorkspaceManager
 
-_STATE_BLOCK_RE = re.compile(
-    rf"{re.escape(BEGIN_MARKER)}.*?{re.escape(END_MARKER)}",
-    re.DOTALL,
-)
-_QUESTION_BLOCK_RE = re.compile(
-    rf"{re.escape(QUESTION_BEGIN_MARKER)}.*?{re.escape(QUESTION_END_MARKER)}",
-    re.DOTALL,
-)
 _STATUS_RE = re.compile(r"^\[(?P<status>[A-Z]+)\]")
 _RAW_MAIL_RE = re.compile(r"^raw_(?P<index>\d+)\.json$")
 
@@ -53,10 +40,7 @@ def _status_from_subject(subject: str) -> str | None:
 
 
 def _strip_capsules(body_text: str) -> str:
-    text = _normalize_text(body_text)
-    text = _STATE_BLOCK_RE.sub("", text)
-    text = _QUESTION_BLOCK_RE.sub("", text)
-    return text.strip()
+    return strip_task_capsules(_normalize_text(body_text))
 
 
 def _extract_system_text(body_text: str) -> str:

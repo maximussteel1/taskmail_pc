@@ -139,7 +139,7 @@ task.md
 - `enable_web_search: false`
   表示是否给真实后端打开联网搜索能力。`Codex` 会附加 `--search`，`OpenCode` 会注入 `OPENCODE_ENABLE_EXA=1`。
 - `spawn_monitor_windows: false`
-  Windows-only。设为 `true` 后，后台轮询模式会为每个进入 `running` 的 thread 自动拉起一个聚焦监控窗口；窗口复用 `scripts\monitor_mail_runner.ps1`，并会在该 thread 仍处于 active/resumable native session 时持续保留，直到该 session 不再可继续/恢复后才自动关闭。
+  Windows-only。设为 `true` 后，后台轮询模式会为每个进入 `running` 的 thread 自动拉起一个聚焦监控窗口；窗口复用 `scripts\monitor_mail_runner.ps1`，只要该 thread 仍处于 `active` 就持续保留，脱离 `active` 后自动关闭。自动拉起前 controller 还会再检查一次 thread 是否仍为 `active`，避免线程刚结束时窗口一闪而退。
 - `monitor_window_refresh_seconds: 5`
   表示上述聚焦监控窗口的轮询周期（秒）；窗口会按这个周期增量抓取新 transcript turn 和新的 live stream 事件，而不是整屏重绘。
 - `monitor_window_buffer_lines: 1000`
@@ -216,7 +216,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\manage_mail_runner
 - `monitor_mail_runner.cmd` 会弹出独立监控窗口；不带线程号时仍循环显示 `status / running / queue`，聚焦单个 thread 时例如 `.\scripts\monitor_mail_runner.cmd -ThreadId thread_048` 会切到 append-only live follow 视图，不再整屏刷新
 - 在当前低配版里，`Ctrl+C`、直接点窗口右上角 `X`、或关闭 terminal tab/pane，都只会结束监控窗口本身，不会自动结束对应的 running thread
 - 如需从 PC 侧请求结束当前 running thread，必须显式执行 `.\scripts\monitor_mail_runner.cmd -ThreadId thread_048 -RequestKill`
-- 当 `spawn_monitor_windows: true` 时，后台轮询模式还会在 Windows 上为每个进入 `running` 的 thread 自动拉起一个聚焦监控窗口；这些自动窗口会聚焦 `follow-thread-live <thread_id>`，并应用 `monitor_window_buffer_lines` 与 `monitor_window_history_limit`，在对应 session 不再 active/resumable 后自行退出
+- 当 `spawn_monitor_windows: true` 时，后台轮询模式还会在 Windows 上为每个进入 `running` 的 thread 自动拉起一个聚焦监控窗口；这些自动窗口会聚焦 `follow-thread-live <thread_id>`，并应用 `monitor_window_buffer_lines` 与 `monitor_window_history_limit`，只在对应 thread 仍为 `active` 时保留，脱离 `active` 后自行退出
 - `fetch_bot_mails.cmd` 会默认抓取 bot mailbox，并把结果写到 `._tmp_live_mail_runner\recent_bot_100_mails.json`
 - `fetch_user_mails.cmd` 会默认抓取 user mailbox，并把结果写到 `._tmp_live_mail_runner\recent_user_100_mails.json`
 - `restart` 会先停止旧的 mail-runner 进程链，再用最新代码重启后台轮询

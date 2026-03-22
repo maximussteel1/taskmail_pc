@@ -27,6 +27,7 @@ from .state_capsule import (
     QUESTION_END_MARKER,
     render_question_capsules,
     render_state_capsule,
+    strip_task_capsules,
 )
 
 MAIL_STATUS_ACCEPTED = "ACCEPTED"
@@ -241,7 +242,8 @@ def _build_status_markdown(
     summary_override: str | None = None,
 ) -> str:
     state_dict = asdict(state) if isinstance(state, ThreadState) else dict(state)
-    visible_reply = reply_override if reply_override is not None else captured_reply
+    raw_reply = reply_override if reply_override is not None else captured_reply
+    visible_reply = strip_task_capsules(raw_reply) if raw_reply is not None else None
     lines: list[str] = []
     if intro:
         lines.append(intro)

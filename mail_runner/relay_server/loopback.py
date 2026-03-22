@@ -410,6 +410,7 @@ class LoopbackRelayServer:
                     attempted_at=now,
                     transport_name="relay_direct_new_task",
                     success=False,
+                    error_code=exc.code,
                     error_message=exc.message,
                 )
                 return [build_error_message(code=exc.code, message=exc.message, sent_at=now)]
@@ -420,6 +421,7 @@ class LoopbackRelayServer:
                     attempted_at=now,
                     transport_name="relay_direct_new_task",
                     success=False,
+                    error_code="direct_temporarily_unavailable",
                     error_message=message_text,
                 )
                 return [
@@ -435,6 +437,7 @@ class LoopbackRelayServer:
                 transport_name=receipt.transport_name,
                 success=receipt.success,
                 transport_message_id=receipt.transport_message_id,
+                error_code=receipt.error_code,
                 error_message=receipt.error_message,
             )
             if not receipt.success:
@@ -466,6 +469,7 @@ class LoopbackRelayServer:
                 transport_name=receipt.transport_name,
                 success=receipt.success,
                 transport_message_id=receipt.transport_message_id,
+                error_code=receipt.error_code,
                 error_message=receipt.error_message,
             )
             if not receipt.success:
@@ -512,6 +516,7 @@ class LoopbackRelayServer:
                 attempted_at=now,
                 transport_name=transport_name,
                 success=False,
+                error_code="direct_temporarily_unavailable",
                 error_message="session detail subscribe is temporarily unavailable",
             )
             return [
@@ -577,6 +582,7 @@ class LoopbackRelayServer:
                 attempted_at=now,
                 transport_name=transport_name,
                 success=False,
+                error_code=exc.code,
                 error_message=exc.message,
             )
             return [
@@ -596,6 +602,7 @@ class LoopbackRelayServer:
                 attempted_at=now,
                 transport_name=transport_name,
                 success=False,
+                error_code="direct_temporarily_unavailable",
                 error_message=message_text,
             )
             return [

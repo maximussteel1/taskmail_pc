@@ -14,6 +14,7 @@ from ..artifact_resolver import (
     resolve_run_artifacts,
     write_artifact_index,
 )
+from ..canonical_run_summary import write_run_canonical_summary
 from ..config import AppConfig
 from ..external_delivery import prepare_external_deliveries
 from ..mail_io import SYSTEM_MESSAGE_HEADER, SYSTEM_MESSAGE_HEADER_VALUE
@@ -331,6 +332,17 @@ def send_status_update(
                 receipt.transport_name,
                 receipt.error_message,
             )
+        if result is not None:
+            try:
+                write_run_canonical_summary(
+                    task_root,
+                    state,
+                    result,
+                    terminal_mail_message_id=sent_message_id,
+                    terminal_mail_subject=dispatch_request.subject,
+                )
+            except Exception:
+                LOGGER.exception("Unable to write canonical run summary for thread %s", state.thread_id)
         return sent_message_id
     except Exception:
         LOGGER.exception("Unable to send status mail for task %s", state.current_task_id)

@@ -10,7 +10,8 @@ param(
     [string]$ThreadId = "",
     [string]$WindowTitle = "",
     [switch]$RequestKill,
-    [switch]$ExitWhenThreadNotRunning,
+    [Alias("ExitWhenThreadNotRunning")]
+    [switch]$ExitWhenThreadNotActive,
     [switch]$NoClear
 )
 
@@ -35,11 +36,9 @@ function Resolve-FullPath {
 
 function Add-ArgumentPair {
     param(
-        [Parameter(Mandatory = $true)]
         [System.Collections.Generic.List[string]]$Arguments,
         [Parameter(Mandatory = $true)]
         [string]$Name,
-        [Parameter(Mandatory = $true)]
         [string]$Value
     )
 
@@ -48,6 +47,30 @@ function Add-ArgumentPair {
     }
     $Arguments.Add($Name)
     $Arguments.Add($Value)
+}
+
+function Test-ThreadIsActive {
+    param(
+        [string]$ResolvedTaskRoot,
+        [string]$ThreadId
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ResolvedTaskRoot) -or [string]::IsNullOrWhiteSpace($ThreadId)) {
+        return $true
+    }
+
+    $statePath = Join-Path (Join-Path $ResolvedTaskRoot $ThreadId) "thread_state.json"
+    if (-not (Test-Path $statePath)) {
+        return $false
+    }
+
+    try {
+        $state = Get-Content -Encoding utf8 -Raw $statePath | ConvertFrom-Json
+    } catch {
+        return $false
+    }
+
+    return (("" + $state.lifecycle).Trim() -eq "active")
 }
 
 function Start-MonitorWorker {
@@ -120,8 +143,8 @@ Add-ArgumentPair -Arguments $workerArgs -Name "-WindowTitle" -Value $WindowTitle
 if ($RequestKill) {
     $workerArgs.Add("-RequestKill")
 }
-if ($ExitWhenThreadNotRunning) {
-    $workerArgs.Add("-ExitWhenThreadNotRunning")
+if ($ExitWhenThreadNotActive) {
+    $workerArgs.Add("-ExitWhenThreadNotActive")
 }
 if ($NoClear) {
     $workerArgs.Add("-NoClear")
@@ -129,6 +152,10 @@ if ($NoClear) {
 
 if ($RequestKill -or [string]::IsNullOrWhiteSpace($ThreadId)) {
     Start-MonitorWorker -WorkerScriptPath $workerScriptPath -WorkingDirectory $resolvedProjectRoot -WorkerArguments $workerArgs.ToArray()
+    exit 0
+}
+
+if (-not (Test-ThreadIsActive -ResolvedTaskRoot $resolvedTaskRoot -ThreadId $ThreadId)) {
     exit 0
 }
 
