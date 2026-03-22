@@ -7,6 +7,10 @@ import urllib.request
 from mail_runner.relay_server.app import build_health_payload, build_http_server, build_runtime_relay
 from mail_runner.relay_server.config import RelayServerConfig
 from mail_runner.relay_server.direct_actions import RelayTaskMailDirectNewTaskMailBridge
+from mail_runner.relay_server.post_creation_actions import (
+    RelayTaskMailDirectCurrentSessionReplyMailBridge,
+    RelayTaskMailDirectCurrentSessionStatusMailBridge,
+)
 from mail_runner.relay_server.packet_store import InMemoryAcceptedPacketStore
 from mail_runner.relay_server.session_store import InMemorySessionStore
 
@@ -54,11 +58,13 @@ def test_http_server_exposes_healthz_json() -> None:
 
 
 def test_build_runtime_relay_enables_taskmail_direct_bridge_when_configured(tmp_path) -> None:
+    task_root = tmp_path / "tasks"
     config = RelayServerConfig(
         host="127.0.0.1",
         port=8787,
         transport_token="secret-token",
         state_dir=str(tmp_path / "relay_state"),
+        task_root=str(task_root),
         smtp_host="smtp.example.com",
         smtp_user="relay@example.com",
         smtp_password="secret",
@@ -72,6 +78,11 @@ def test_build_runtime_relay_enables_taskmail_direct_bridge_when_configured(tmp_
         packet_store=InMemoryAcceptedPacketStore(),
     )
 
-    assert relay._direct_packet_handler is not None
-    assert isinstance(relay._direct_packet_handler, RelayTaskMailDirectNewTaskMailBridge)
+    assert relay._direct_packet_handler is None
+    assert len(relay._direct_packet_handlers) == 3
+    assert isinstance(relay._direct_packet_handlers[0], RelayTaskMailDirectNewTaskMailBridge)
+    assert isinstance(relay._direct_packet_handlers[1], RelayTaskMailDirectCurrentSessionStatusMailBridge)
+    assert isinstance(relay._direct_packet_handlers[2], RelayTaskMailDirectCurrentSessionReplyMailBridge)
+    assert relay._direct_packet_handlers[1]._task_root == task_root
+    assert relay._direct_packet_handlers[2]._task_root == task_root
 

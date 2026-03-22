@@ -11,7 +11,8 @@ import re
 import secrets
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -86,6 +87,7 @@ _SYNC_REPLY_STATE_FILENAME = "sync_reply_state.json"
 _MAX_TRACKED_SYNC_REPLY_IDS = 100
 _NON_ENDABLE_ACTIVE_THREAD_STATUSES = {THREAD_STATUS_ACCEPTED, THREAD_STATUS_RUNNING}
 _CONFIG_PATH_ENV = "MAIL_RUNNER_CONFIG"
+_LOCAL_TIMEZONE = datetime.now().astimezone().tzinfo or timezone.utc
 
 BOOTSTRAP_MODULES = (
     "mail_runner.config",
@@ -143,6 +145,57 @@ def _import_modules(module_names: Iterable[str]) -> list[str]:
 
 def _timestamp() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
+
+
+def _current_time_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _normalize_mail_datetime(value: datetime | str) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        parsed = None
+        try:
+            parsed = parsedate_to_datetime(text)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            parsed = None
+        if parsed is None:
+            normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+            try:
+                parsed = datetime.fromisoformat(normalized)
+            except ValueError:
+                return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_LOCAL_TIMEZONE)
+    return parsed.astimezone(timezone.utc)
+
+
+def _new_task_mail_skip_reason(envelope: MailEnvelope, config: AppConfig) -> str | None:
+    max_age_minutes = max(0, int(config.new_task_max_age_minutes))
+    if max_age_minutes <= 0:
+        return None
+
+    received_at = _normalize_mail_datetime(envelope.date)
+    if received_at is None:
+        return (
+            "freshness guard requires a parseable Date header "
+            f"(raw_date={envelope.date!r})"
+        )
+
+    age = _current_time_utc() - received_at
+    if age < timedelta(0) or age <= timedelta(minutes=max_age_minutes):
+        return None
+
+    age_minutes = age.total_seconds() / 60.0
+    return (
+        f"received_at={received_at.isoformat()} "
+        f"age_minutes={age_minutes:.1f} "
+        f"limit_minutes={max_age_minutes}"
+    )
 
 
 def _generate_task_id() -> str:
@@ -1897,6 +1950,15 @@ def _process_mail(
         return _handle_project_folder_sync(envelope, config, task_root, mail_client)
 
     if subject_info["is_new_task"] and not envelope.in_reply_to and not envelope.references:
+        skip_reason = _new_task_mail_skip_reason(envelope, config)
+        if skip_reason:
+            LOGGER.warning(
+                "Ignoring new task mail outside freshness window. message_id=%s subject=%s detail=%s",
+                envelope.message_id,
+                envelope.subject,
+                skip_reason,
+            )
+            return False
         return _process_new_task_mail(
             envelope,
             subject_info,

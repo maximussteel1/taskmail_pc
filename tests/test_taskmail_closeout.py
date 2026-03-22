@@ -4,6 +4,7 @@ import json
 
 from mail_runner.mail_io import SYSTEM_MESSAGE_HEADER, SYSTEM_MESSAGE_HEADER_VALUE
 from mail_runner.relay_server.packet_store import PersistentAcceptedPacketStore
+from mail_runner.session_action_closeout import write_session_action_closeout
 from mail_runner.taskmail_closeout import build_taskmail_daily_closeout_bundle, write_taskmail_daily_closeout_bundle
 from mail_runner.thread_store import create_thread, save_raw_mail
 from mail_runner.workspace import WorkspaceManager
@@ -15,6 +16,8 @@ def _create_thread_with_canonical_run(
     *,
     terminal_mail_message_id: str | None = "<done@example.com>",
     terminal_mail_subject: str | None = "[DONE][S:thread_001] Demo task",
+    action_type: str | None = None,
+    target_session_identity: dict[str, str] | None = None,
 ) -> tuple:
     task_root = tmp_path / "tasks"
     state = create_thread(
@@ -62,6 +65,8 @@ def _create_thread_with_canonical_run(
             "ingress_message_id": "<ingress@example.com>",
             "request_id": "req_001",
             "packet_id": "android-taskmail:new-task:req_001",
+            "action_type": action_type,
+            "target_session_identity": target_session_identity,
             "last_summary": "PHASE5_BIND_001",
             "terminal_mail_message_id": terminal_mail_message_id,
             "terminal_mail_subject": terminal_mail_subject,
@@ -110,6 +115,31 @@ def _write_outbound_attempts(task_root, attempts: list[dict]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         for item in attempts:
             handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
+def _write_status_session_action_closeout(
+    task_root,
+    *,
+    request_id: str = "req_002",
+    ingress_message_id: str = "<status-bridge@example.com>",
+    terminal_mail_subject: str = "[STATUS][S:session_001] Demo task",
+    last_summary: str = "Still running.",
+) -> None:
+    write_session_action_closeout(
+        task_root,
+        thread_id="thread_001",
+        action_type="status",
+        request_id=request_id,
+        ingress_message_id=ingress_message_id,
+        packet_id=f"android-taskmail:session-action:{request_id}",
+        terminal_mail_subject=terminal_mail_subject,
+        last_summary=last_summary,
+        target_session_identity={
+            "workspace_id": "workspace_demo",
+            "session_id": "session_001",
+            "thread_id": "thread_001",
+        },
+    )
 
 
 def test_build_taskmail_daily_closeout_bundle_prefers_request_id_bind(tmp_path) -> None:
@@ -204,6 +234,29 @@ def test_build_taskmail_daily_closeout_bundle_prefers_request_id_bind(tmp_path) 
     assert bundle["same_run_bind"]["can_promote_to_mismatch_candidate"] is True
 
 
+def test_build_taskmail_daily_closeout_bundle_preserves_post_creation_identity_from_canonical_summary(tmp_path) -> None:
+    task_root, _ = _create_thread_with_canonical_run(
+        tmp_path,
+        action_type="reply",
+        target_session_identity={
+            "workspace_id": "workspace_demo",
+            "session_id": "session_001",
+            "thread_id": "thread_001",
+        },
+    )
+    _save_system_mail(task_root, message_id="<done@example.com>", subject="[DONE][S:thread_001] Demo task")
+
+    bundle = build_taskmail_daily_closeout_bundle("thread_001", task_root)
+
+    assert bundle["pc_canonical_outcome"]["source"] == "canonical_summary"
+    assert bundle["pc_canonical_outcome"]["action_type"] == "reply"
+    assert bundle["pc_canonical_outcome"]["target_session_identity"] == {
+        "workspace_id": "workspace_demo",
+        "session_id": "session_001",
+        "thread_id": "thread_001",
+    }
+
+
 def test_build_taskmail_daily_closeout_bundle_falls_back_to_terminal_subject_without_fixed_raw_number(tmp_path) -> None:
     task_root, _ = _create_thread_with_canonical_run(
         tmp_path,
@@ -271,6 +324,92 @@ def test_build_taskmail_daily_closeout_bundle_falls_back_when_canonical_summary_
     assert bundle["pc_terminal_mail"]["resolution"] == "thread_state.latest_message_id"
     assert bundle["pc_supporting_evidence"]["pc_ingress_mail"]["resolution"] == "ingress_message_id"
     assert bundle["pc_supporting_evidence"]["pc_ingress_mail"]["message_id"] == "<root@example.com>"
+
+
+def test_build_taskmail_daily_closeout_bundle_reads_session_action_closeout_when_run_summary_is_missing(tmp_path) -> None:
+    task_root = tmp_path / "tasks"
+    create_thread(
+        thread_id="thread_001",
+        root_message_id="<root@example.com>",
+        latest_message_id="<status@example.com>",
+        subject_norm="demo task",
+        backend="codex",
+        repo_path="E:\\projects\\android_task_manager",
+        workdir="feature/taskmail/internal",
+        current_task_id="task_001",
+        last_task_snapshot_file="snapshots/task_001.json",
+        task_root=task_root,
+        status="running",
+        history_files=["runs/task_001/result.json"],
+        last_summary="Still running.",
+        created_at="2026-03-22T12:00:00",
+        updated_at="2026-03-22T12:05:00",
+    )
+    save_raw_mail(
+        "thread_001",
+        {
+            "message_id": "<status-bridge@example.com>",
+            "subject": "Re: [S:session_001] Demo task",
+            "from_addr": "user@example.com",
+            "to_addr": "runner@example.com",
+            "date": "2026-03-22T12:04:58",
+            "raw_headers": {
+                "Subject": "Re: [S:session_001] Demo task",
+                "X-TaskMail-Direct": "1",
+                "X-TaskMail-Relay-Request-Id": "req_002",
+                "X-TaskMail-Relay-Packet-Id": "android-taskmail:session-action:req_002",
+            },
+        },
+        task_root,
+    )
+    _save_system_mail(task_root, message_id="<status@example.com>", subject="[STATUS][S:session_001] Demo task")
+    _write_status_session_action_closeout(task_root)
+    android_records_path = _write_android_send_records(
+        tmp_path,
+        [
+            {
+                "recordedAt": 1711111111002,
+                "senderAccountId": "acc-001",
+                "backend": "codex",
+                "repoPath": "E:\\projects\\android_task_manager",
+                "workdir": "feature/taskmail/internal",
+                "evidence": {
+                    "bootstrapStatus": "hello_ack",
+                    "outcome": "DirectAccepted",
+                    "switchGate": "KeepDirectDefault",
+                    "requestId": "req_002",
+                    "receiptId": "relay-receipt:req_002",
+                    "transportMessageId": "<status-bridge@example.com>",
+                },
+            }
+        ],
+    )
+
+    bundle = build_taskmail_daily_closeout_bundle(
+        "thread_001",
+        task_root,
+        android_send_records_path=android_records_path,
+        sender_account_id="acc-001",
+        android_last_summary="Still running.",
+    )
+
+    assert bundle["bundle_presence"]["pc_canonical_outcome"] is True
+    assert bundle["bundle_presence"]["pc_session_action_closeout"] is True
+    assert bundle["pc_canonical_outcome"]["source"] == "session_action_closeout"
+    assert bundle["pc_canonical_outcome"]["action_type"] == "status"
+    assert bundle["pc_canonical_outcome"]["target_session_identity"] == {
+        "workspace_id": "workspace_demo",
+        "session_id": "session_001",
+        "thread_id": "thread_001",
+    }
+    assert bundle["pc_terminal_mail"]["resolution"] == "terminal_mail_subject"
+    assert bundle["pc_supporting_evidence"]["session_action_closeout"]["resolution"] == "latest_generated_at"
+    assert bundle["same_run_bind"]["effective_bind_level"] == "request_id"
+    assert bundle["same_run_bind"]["matched_fields"] == [
+        "request_id",
+        "transport_message_id",
+        "last_summary",
+    ]
 
 
 def test_build_taskmail_daily_closeout_bundle_keeps_weak_summary_bind_separate_from_strong_bind(tmp_path) -> None:
@@ -462,6 +601,54 @@ def test_build_taskmail_daily_closeout_bundle_prefers_nearest_fallback_record_ov
     assert bundle["same_run_bind"]["mismatched_fields"] == []
     assert bundle["same_run_bind"]["notes"] == ["android_transport_message_id_missing"]
     assert bundle["same_run_bind"]["strong_bind"] is False
+
+
+def test_build_taskmail_daily_closeout_bundle_selects_session_action_android_record_by_target_identity(tmp_path) -> None:
+    task_root, state = _create_thread_with_canonical_run(tmp_path)
+    _save_system_mail(task_root, message_id="<done@example.com>", subject="[DONE][S:thread_001] Demo task")
+    android_records_path = _write_android_send_records(
+        tmp_path,
+        [
+            {
+                "recordedAt": 1774202785612,
+                "actionType": "Reply",
+                "target": {
+                    "workspaceId": state.workspace_id,
+                    "sessionId": state.session_id or state.thread_id,
+                    "threadId": state.thread_id,
+                },
+                "evidence": {
+                    "bootstrapStatus": "hello_ack",
+                    "outcome": "MailFallbackSucceeded",
+                    "switchGate": "FallbackRequired",
+                    "fallbackReason": "only phase2-direct-outbound-contract-v1 is supported for direct TaskMail actions",
+                },
+            }
+        ],
+    )
+
+    bundle = build_taskmail_daily_closeout_bundle(
+        "thread_001",
+        task_root,
+        android_send_records_path=android_records_path,
+        android_last_summary="PHASE5_BIND_001",
+    )
+
+    assert bundle["bundle_presence"]["android_latest_send_evidence"] is True
+    assert bundle["android_latest_send_evidence"]["selection"] == "target_time"
+    assert bundle["android_latest_send_evidence"]["action_type"] == "reply"
+    assert bundle["android_latest_send_evidence"]["target_session_identity"] == {
+        "workspace_id": state.workspace_id,
+        "session_id": state.session_id or state.thread_id,
+        "thread_id": state.thread_id,
+    }
+    assert bundle["android_latest_send_evidence"]["outcome"] == "MailFallbackSucceeded"
+    assert bundle["same_run_bind"]["effective_bind_level"] == "last_summary"
+    assert bundle["same_run_bind"]["matched_fields"] == ["last_summary"]
+    assert bundle["same_run_bind"]["notes"] == [
+        "android_request_id_missing",
+        "android_transport_message_id_missing",
+    ]
 
 
 def test_write_taskmail_daily_closeout_bundle_uses_run_artifact_path_by_default(tmp_path) -> None:

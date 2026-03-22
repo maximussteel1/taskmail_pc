@@ -9,6 +9,7 @@ from typing import Any
 
 from .mail_io import SYSTEM_MESSAGE_HEADER, SYSTEM_MESSAGE_HEADER_VALUE
 from .models import RunResult, ThreadState
+from .session_action_closeout import ACTION_TYPE_HEADER, target_session_identity_from_headers
 from .workspace import WorkspaceManager
 
 _RAW_MAIL_RE = re.compile(r"^raw_(?P<index>\d+)\.json$")
@@ -27,6 +28,13 @@ def _raw_index(raw_path: Path) -> int:
     if not match:
         raise ValueError(f"Unsupported raw mail filename: {raw_path.name}")
     return int(match.group("index"))
+
+
+def _normalized_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _iter_user_mail_payloads(task_root: str | Path, thread_id: str) -> list[dict[str, Any]]:
@@ -51,14 +59,7 @@ def _select_ingress_payload(task_root: str | Path, state: ThreadState) -> dict[s
     payloads = _iter_user_mail_payloads(task_root, state.thread_id)
     if not payloads:
         return None
-
-    preferred_root_message_id = str(state.root_message_id or "").strip()
-    if preferred_root_message_id:
-        for payload in payloads:
-            message_id = str(payload.get("message_id") or "").strip()
-            if message_id == preferred_root_message_id:
-                return payload
-    return payloads[0]
+    return payloads[-1]
 
 
 def build_run_canonical_summary(
@@ -80,6 +81,8 @@ def build_run_canonical_summary(
     ingress_message_id = None
     if isinstance(ingress_payload, dict):
         ingress_message_id = str(ingress_payload.get("message_id") or "").strip() or None
+    action_type = _normalized_text(ingress_headers.get(ACTION_TYPE_HEADER))
+    target_session_identity = target_session_identity_from_headers(ingress_headers)
 
     return {
         "version": 1,
@@ -90,6 +93,8 @@ def build_run_canonical_summary(
         "ingress_message_id": ingress_message_id,
         "request_id": request_id,
         "packet_id": packet_id,
+        "action_type": action_type,
+        "target_session_identity": target_session_identity,
         "last_summary": state.last_summary,
         "terminal_mail_message_id": terminal_mail_message_id,
         "terminal_mail_subject": terminal_mail_subject,

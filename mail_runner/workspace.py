@@ -53,12 +53,22 @@ class WorkspaceManager:
     def mail_dir(self, thread_id: str) -> Path:
         return self.thread_dir(thread_id) / "mail"
 
+    def session_actions_dir(self, thread_id: str) -> Path:
+        return self.thread_dir(thread_id) / "session_actions"
+
+    def session_action_dir(self, thread_id: str, request_id: str) -> Path:
+        return self.session_actions_dir(thread_id) / request_id
+
+    def session_action_file_path(self, thread_id: str, request_id: str, filename: str) -> Path:
+        return self.session_action_dir(thread_id, request_id) / filename
+
     def ensure_thread_layout(self, thread_id: str) -> Path:
         thread_dir = self.thread_dir(thread_id)
         self.ensure_layout()
         self.snapshots_dir(thread_id).mkdir(parents=True, exist_ok=True)
         self.runs_dir(thread_id).mkdir(parents=True, exist_ok=True)
         self.mail_dir(thread_id).mkdir(parents=True, exist_ok=True)
+        self.session_actions_dir(thread_id).mkdir(parents=True, exist_ok=True)
         return thread_dir
 
     def ensure_workspace_layout(self, workspace_id: str) -> Path:

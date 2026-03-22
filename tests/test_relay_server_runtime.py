@@ -10,20 +10,26 @@ from mail_runner.models import ThreadState
 from mail_runner.outbound.contract import OutboundDispatchRequest, TaskRunPacket, TransportReceipt
 from mail_runner.outbound.relay_bootstrap import build_hello_payload
 from mail_runner.outbound.relay_transport import RelayTransport
-from mail_runner.relay_server.app import start_relay_server
+from mail_runner.relay_server.app import build_runtime_relay, start_relay_server
 from mail_runner.relay_server.config import RelayServerConfig
 from mail_runner.relay_server.direct_actions import RelayTaskMailDirectNewTaskMailBridge
 from mail_runner.relay_server.loopback import LoopbackRelayServer
 from mail_runner.relay_server.packet_store import PersistentAcceptedPacketStore
+from mail_runner.relay_server.post_creation_actions import (
+    RelayTaskMailDirectCurrentSessionReplyMailBridge,
+    RelayTaskMailDirectCurrentSessionStatusMailBridge,
+)
 from mail_runner.relay_server.phase3_subscription import ThreadStorePhase3SessionDetailProvider
 from mail_runner.relay_server.protocol import (
+    RelayErrorMessage,
     RelayHelloAckMessage,
     RelayPacketAckMessage,
     RelaySessionUpdateMessage,
     parse_server_message,
 )
 from mail_runner.relay_server.session_store import PersistentSessionStore
-from mail_runner.thread_store import build_workspace_id, build_workspace_norm, save_thread_state
+from mail_runner.status import THREAD_STATUS_PAUSED
+from mail_runner.thread_store import build_workspace_id, build_workspace_norm, load_thread_state, save_thread_state
 
 
 def test_relay_transport_sends_packet_to_websocket_runtime_and_healthz(tmp_path) -> None:
@@ -32,6 +38,18 @@ def test_relay_transport_sends_packet_to_websocket_runtime_and_healthz(tmp_path)
 
 def test_taskmail_direct_new_task_packet_reaches_websocket_runtime(tmp_path) -> None:
     asyncio.run(_run_taskmail_direct_runtime_test(tmp_path))
+
+
+def test_taskmail_direct_current_session_status_packet_reaches_websocket_runtime(tmp_path) -> None:
+    asyncio.run(_run_taskmail_direct_status_runtime_test(tmp_path))
+
+
+def test_taskmail_direct_current_session_reply_packet_reaches_websocket_runtime(tmp_path) -> None:
+    asyncio.run(_run_taskmail_direct_reply_runtime_test(tmp_path))
+
+
+def test_runtime_relay_hard_stops_direct_reply_for_paused_session_when_task_root_is_configured(tmp_path) -> None:
+    asyncio.run(_run_runtime_direct_reply_paused_hard_stop_test(tmp_path))
 
 
 def test_phase3_subscribe_packet_reaches_websocket_runtime_and_emits_snapshot(tmp_path) -> None:
@@ -175,6 +193,291 @@ async def _run_taskmail_direct_runtime_test(tmp_path) -> None:
             assert stored_packet is not None
             assert stored_packet.delivery_status == "delivered"
             assert fake_mail_client.calls[0]["to_addr"] == "bot@example.com"
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def _run_taskmail_direct_status_runtime_test(tmp_path) -> None:
+    state_dir = tmp_path / "relay_state"
+    task_root = tmp_path / "tasks"
+    thread_state = _build_thread_state()
+    thread_state.status = "running"
+    thread_state.last_summary = "Still running."
+    thread_state.updated_at = "2026-03-22T12:29:00"
+    thread_state.last_progress_at = thread_state.updated_at
+    save_thread_state(thread_state, task_root)
+    config = RelayServerConfig(
+        host="127.0.0.1",
+        port=0,
+        transport_token="relay-secret",
+        state_dir=str(state_dir),
+        task_root=str(task_root),
+        smtp_host="smtp.example.com",
+        smtp_user="relay@example.com",
+        smtp_password="secret",
+        from_addr="relay@example.com",
+        taskmail_bot_mailbox_addr="bot@example.com",
+        taskmail_direct_from_addr="taskmail-user@example.com",
+    )
+    session_store = PersistentSessionStore(state_dir)
+    packet_store = PersistentAcceptedPacketStore(state_dir)
+    relay = build_runtime_relay(
+        config,
+        session_store=session_store,
+        packet_store=packet_store,
+    )
+    relay._clock = lambda: "2026-03-22T12:30:00"
+    fake_mail_client = _FakeMailClient()
+    status_handler = relay._direct_packet_handlers[1]
+    status_handler._mail_client = fake_mail_client
+    server = await start_relay_server(
+        config,
+        relay=relay,
+        session_store=session_store,
+        packet_store=packet_store,
+    )
+    try:
+        host, port = server.sockets[0].getsockname()[:2]
+        async with websockets.connect(
+            f"ws://{host}:{port}/relay",
+            open_timeout=15,
+            close_timeout=15,
+            extra_headers={"Authorization": "Bearer relay-secret"},
+            max_size=32 * 1024 * 1024,
+        ) as websocket:
+            await websocket.send(
+                json.dumps(
+                    build_hello_payload(
+                        client_id="android-taskmail",
+                        client_version="0.1.0",
+                        transport_token="relay-secret",
+                    ),
+                    ensure_ascii=False,
+                )
+            )
+            hello_ack = parse_server_message(json.loads(await websocket.recv()))
+            assert isinstance(hello_ack, RelayHelloAckMessage)
+
+            await websocket.send(
+                json.dumps(
+                    _post_creation_status_packet(
+                        workspace_id=thread_state.workspace_id,
+                        session_id=thread_state.session_id or thread_state.thread_id,
+                        thread_id=thread_state.thread_id,
+                    ),
+                    ensure_ascii=False,
+                )
+            )
+            packet_ack = parse_server_message(json.loads(await websocket.recv()))
+            stored_packet = packet_store.get_packet("android-taskmail:session-action:req_001")
+            closeout_payload = json.loads(
+                (
+                    task_root
+                    / "thread_001"
+                    / "session_actions"
+                    / "req_001"
+                    / "session_action_closeout.json"
+                ).read_text(encoding="utf-8")
+            )
+
+            assert isinstance(packet_ack, RelayPacketAckMessage)
+            assert packet_ack.accepted is True
+            assert packet_ack.transport_message_id == "<direct-bridge-1@example.com>"
+            assert stored_packet is not None
+            assert stored_packet.delivery_status == "delivered"
+            assert fake_mail_client.calls[0]["to_addr"] == "bot@example.com"
+            assert fake_mail_client.calls[0]["subject"] == "Re: [S:session_001] Phase 3 detail bridge"
+            assert "/status" in fake_mail_client.calls[0]["body"]
+            assert fake_mail_client.calls[0]["headers"]["X-TaskMail-Action-Type"] == "status"
+            assert fake_mail_client.calls[0]["headers"]["X-TaskMail-Target-Workspace-Id"] == thread_state.workspace_id
+            assert fake_mail_client.calls[0]["headers"]["X-TaskMail-Target-Session-Id"] == "session_001"
+            assert fake_mail_client.calls[0]["headers"]["X-TaskMail-Target-Thread-Id"] == "thread_001"
+            assert closeout_payload["action_type"] == "status"
+            assert closeout_payload["request_id"] == "req_001"
+            assert closeout_payload["ingress_message_id"] == "<direct-bridge-1@example.com>"
+            assert closeout_payload["terminal_mail_subject"] == "[STATUS][S:session_001] Phase 3 detail bridge"
+            assert closeout_payload["target_session_identity"] == {
+                "workspace_id": thread_state.workspace_id,
+                "session_id": "session_001",
+                "thread_id": "thread_001",
+            }
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def _run_taskmail_direct_reply_runtime_test(tmp_path) -> None:
+    state_dir = tmp_path / "relay_state"
+    task_root = tmp_path / "tasks"
+    thread_state = _build_thread_state()
+    thread_state.status = "done"
+    thread_state.last_summary = "Completed."
+    thread_state.updated_at = "2026-03-23T09:38:00"
+    thread_state.last_progress_at = thread_state.updated_at
+    save_thread_state(thread_state, task_root)
+    config = RelayServerConfig(
+        host="127.0.0.1",
+        port=0,
+        transport_token="relay-secret",
+        state_dir=str(state_dir),
+        task_root=str(task_root),
+        smtp_host="smtp.example.com",
+        smtp_user="relay@example.com",
+        smtp_password="secret",
+        from_addr="relay@example.com",
+        taskmail_bot_mailbox_addr="bot@example.com",
+        taskmail_direct_from_addr="taskmail-user@example.com",
+    )
+    session_store = PersistentSessionStore(state_dir)
+    packet_store = PersistentAcceptedPacketStore(state_dir)
+    relay = build_runtime_relay(
+        config,
+        session_store=session_store,
+        packet_store=packet_store,
+    )
+    relay._clock = lambda: "2026-03-23T09:40:00"
+    fake_mail_client = _FakeMailClient()
+    reply_handler = relay._direct_packet_handlers[2]
+    reply_handler._mail_client = fake_mail_client
+    server = await start_relay_server(
+        config,
+        relay=relay,
+        session_store=session_store,
+        packet_store=packet_store,
+    )
+    try:
+        host, port = server.sockets[0].getsockname()[:2]
+        async with websockets.connect(
+            f"ws://{host}:{port}/relay",
+            open_timeout=15,
+            close_timeout=15,
+            extra_headers={"Authorization": "Bearer relay-secret"},
+            max_size=32 * 1024 * 1024,
+        ) as websocket:
+            await websocket.send(
+                json.dumps(
+                    build_hello_payload(
+                        client_id="android-taskmail",
+                        client_version="0.1.0",
+                        transport_token="relay-secret",
+                    ),
+                    ensure_ascii=False,
+                )
+            )
+            hello_ack = parse_server_message(json.loads(await websocket.recv()))
+            assert isinstance(hello_ack, RelayHelloAckMessage)
+
+            await websocket.send(
+                json.dumps(
+                    _post_creation_reply_packet(
+                        workspace_id=thread_state.workspace_id,
+                        session_id=thread_state.session_id or thread_state.thread_id,
+                        thread_id=thread_state.thread_id,
+                        reply_text="Please continue with the cleanup.",
+                    ),
+                    ensure_ascii=False,
+                )
+            )
+            packet_ack = parse_server_message(json.loads(await websocket.recv()))
+            stored_packet = packet_store.get_packet("android-taskmail:session-action:req_001")
+
+            assert isinstance(packet_ack, RelayPacketAckMessage)
+            assert packet_ack.accepted is True
+            assert packet_ack.transport_message_id == "<direct-bridge-1@example.com>"
+            assert stored_packet is not None
+            assert stored_packet.delivery_status == "delivered"
+            assert fake_mail_client.calls[0]["to_addr"] == "bot@example.com"
+            assert fake_mail_client.calls[0]["subject"] == "Re: [S:session_001] Phase 3 detail bridge"
+            assert "Please continue with the cleanup." in fake_mail_client.calls[0]["body"]
+            assert fake_mail_client.calls[0]["in_reply_to"] == "<latest@example.com>"
+            assert fake_mail_client.calls[0]["references"] == ["<root@example.com>", "<latest@example.com>"]
+            assert fake_mail_client.calls[0]["headers"]["X-TaskMail-Action-Type"] == "reply"
+            assert fake_mail_client.calls[0]["headers"]["X-TaskMail-Target-Workspace-Id"] == thread_state.workspace_id
+            assert fake_mail_client.calls[0]["headers"]["X-TaskMail-Target-Session-Id"] == "session_001"
+            assert fake_mail_client.calls[0]["headers"]["X-TaskMail-Target-Thread-Id"] == "thread_001"
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def _run_runtime_direct_reply_paused_hard_stop_test(tmp_path) -> None:
+    state_dir = tmp_path / "relay_state"
+    task_root = tmp_path / "tasks"
+    thread_state = _build_thread_state()
+    thread_state.status = THREAD_STATUS_PAUSED
+    thread_state.paused_from_status = "done"
+    thread_state.updated_at = "2026-03-23T10:05:00"
+    thread_state.last_progress_at = thread_state.updated_at
+    save_thread_state(thread_state, task_root)
+    config = RelayServerConfig(
+        host="127.0.0.1",
+        port=0,
+        transport_token="relay-secret",
+        state_dir=str(state_dir),
+        task_root=str(task_root),
+        smtp_host="smtp.example.com",
+        smtp_user="relay@example.com",
+        smtp_password="secret",
+        from_addr="relay@example.com",
+        taskmail_bot_mailbox_addr="bot@example.com",
+        taskmail_direct_from_addr="taskmail-user@example.com",
+    )
+    session_store = PersistentSessionStore(state_dir)
+    packet_store = PersistentAcceptedPacketStore(state_dir)
+    relay = build_runtime_relay(
+        config,
+        session_store=session_store,
+        packet_store=packet_store,
+    )
+    fake_mail_client = _FakeMailClient()
+    reply_handler = relay._direct_packet_handlers[2]
+    reply_handler._mail_client = fake_mail_client
+    server = await start_relay_server(
+        config,
+        relay=relay,
+        session_store=session_store,
+        packet_store=packet_store,
+    )
+    try:
+        host, port = server.sockets[0].getsockname()[:2]
+        async with websockets.connect(
+            f"ws://{host}:{port}/relay",
+            open_timeout=15,
+            close_timeout=15,
+            extra_headers={"Authorization": "Bearer relay-secret"},
+            max_size=32 * 1024 * 1024,
+        ) as websocket:
+            await websocket.send(
+                json.dumps(
+                    build_hello_payload(
+                        client_id="android-taskmail",
+                        client_version="0.1.0",
+                        transport_token="relay-secret",
+                    ),
+                    ensure_ascii=False,
+                )
+            )
+            hello_ack = parse_server_message(json.loads(await websocket.recv()))
+            assert isinstance(hello_ack, RelayHelloAckMessage)
+
+            await websocket.send(
+                json.dumps(
+                    _post_creation_reply_packet(
+                        workspace_id=thread_state.workspace_id,
+                        session_id=thread_state.session_id or thread_state.thread_id,
+                        thread_id=thread_state.thread_id,
+                        reply_text="Please continue with the cleanup.",
+                    ),
+                    ensure_ascii=False,
+                )
+            )
+            error = parse_server_message(json.loads(await websocket.recv()))
+
+            assert isinstance(error, RelayErrorMessage)
+            assert error.code == "validation_failed"
+            assert packet_store.get_packet("android-taskmail:session-action:req_001") is None
+            assert fake_mail_client.calls == []
     finally:
         server.close()
         await server.wait_closed()
@@ -440,3 +743,55 @@ def _phase3_subscribe_packet() -> dict[str, object]:
         },
         "sent_at": "2026-03-21T22:33:01",
     }
+
+
+def _post_creation_status_packet(*, workspace_id: str, session_id: str, thread_id: str | None) -> dict[str, object]:
+    target: dict[str, object] = {
+        "scope": "current_session",
+        "workspace_id": workspace_id,
+        "session_id": session_id,
+    }
+    if thread_id is not None:
+        target["thread_id"] = thread_id
+    return {
+        "message_type": "packet",
+        "packet_id": "android-taskmail:session-action:req_001",
+        "client_trace_id": "req_001",
+        "task_run_packet": {
+            "schema_version": "post-creation-session-action-contract-v1",
+            "action": "status",
+            "request_id": "req_001",
+            "origin": {
+                "client": "android_taskmail",
+            },
+            "target": target,
+            "status": {},
+        },
+        "dispatch_metadata": {
+            "channel": "taskmail_android_direct",
+            "schema_version": "post-creation-session-action-contract-v1",
+            "action": "status",
+            "fallback_policy": "mail",
+        },
+        "sent_at": "2026-03-22T12:30:00",
+    }
+
+
+def _post_creation_reply_packet(
+    *,
+    workspace_id: str,
+    session_id: str,
+    thread_id: str | None,
+    reply_text: str,
+) -> dict[str, object]:
+    packet = _post_creation_status_packet(
+        workspace_id=workspace_id,
+        session_id=session_id,
+        thread_id=thread_id,
+    )
+    packet["task_run_packet"]["action"] = "reply"
+    packet["task_run_packet"]["reply"] = {"reply_text": reply_text}
+    packet["task_run_packet"].pop("status", None)
+    packet["dispatch_metadata"]["action"] = "reply"
+    packet["sent_at"] = "2026-03-23T09:40:00"
+    return packet

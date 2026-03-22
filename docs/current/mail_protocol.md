@@ -140,6 +140,9 @@ Current optional direct TaskMail active-detail sidecar boundary:
 当前规则：
 
 - 新任务邮件仍然是创建 fresh `thread/session` 的唯一正式入口
+- 可配置 `new_task_max_age_minutes` 首封时效保护；当该值大于 `0` 时，只接受 `Date` 位于当前 runner 时间窗口内的非 reply `[OC]` / `[CX]` 首封任务
+- 若首封任务超出该时窗，或 `Date` 无法解析，则直接忽略，不创建 thread/session，也不触发 backend run
+- 上述时效保护只作用于首封新任务，不作用于 reply continuation、`[SYNC]` 或 direct `[KILL]`
 - 缺少 `Workdir` 时允许为空
 - 缺少 `Timeout` 时使用默认值
 - 缺少 `Mode` 时默认 `modify`

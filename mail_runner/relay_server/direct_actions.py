@@ -108,14 +108,18 @@ def _looks_like_direct_packet(task_run_packet: dict[str, Any], dispatch_metadata
     task_schema = str(task_run_packet.get("schema_version") or "").strip()
     dispatch_schema = str(dispatch_metadata.get("schema_version") or "").strip()
     channel = str(dispatch_metadata.get("channel") or "").strip()
-    action = str(task_run_packet.get("action") or dispatch_metadata.get("action") or "").strip()
+    task_action = str(task_run_packet.get("action") or "").strip().lower()
+    dispatch_action = str(dispatch_metadata.get("action") or "").strip().lower()
+    if task_action and dispatch_action and task_action != dispatch_action:
+        return False
+    action = task_action or dispatch_action
     return any(
         item
         for item in (
             task_schema == _PHASE2_SCHEMA_VERSION,
             dispatch_schema == _PHASE2_SCHEMA_VERSION,
-            channel == _DIRECT_CHANNEL,
             action == _DIRECT_ACTION_NEW_TASK,
+            channel == _DIRECT_CHANNEL and action == _DIRECT_ACTION_NEW_TASK,
         )
     )
 
@@ -176,6 +180,8 @@ class RelayDirectActionError(Exception):
 
 
 class RelayDirectPacketHandler(Protocol):
+    transport_name: str
+
     def matches(self, message: RelayPacketMessage) -> bool: ...
 
     def validate_packet(self, message: RelayPacketMessage) -> None: ...
@@ -185,6 +191,8 @@ class RelayDirectPacketHandler(Protocol):
 
 class RelayTaskMailDirectNewTaskHandler:
     """Accepts the first direct Android TaskMail new_task packet and reuses the mail-side task start path."""
+
+    transport_name = _DIRECT_TRANSPORT_NAME
 
     def __init__(
         self,
@@ -279,6 +287,8 @@ class RelayTaskMailDirectNewTaskHandler:
 
 class RelayTaskMailDirectNewTaskMailBridge:
     """Bridges accepted direct new_task packets back into the current bot-mailbox ingress path."""
+
+    transport_name = "relay_direct_mail_bridge"
 
     def __init__(self, config: RelayServerConfig, *, mail_client: MailClient | None = None) -> None:
         self._config = config

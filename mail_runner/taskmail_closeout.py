@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from .mail_io import SYSTEM_MESSAGE_HEADER, SYSTEM_MESSAGE_HEADER_VALUE
+from .session_action_closeout import (
+    ACTION_TYPE_HEADER,
+    SESSION_ACTION_CLOSEOUT_FILENAME,
+    target_session_identity_from_headers,
+)
 from .thread_store import load_thread_state
 from .workspace import WorkspaceManager
 
@@ -37,6 +42,13 @@ def _normalized_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _normalized_action_type(value: Any) -> str | None:
+    text = _normalized_text(value)
+    if text is None:
+        return None
+    return text.lower()
 
 
 def _raw_mail_items(task_root: str | Path, thread_id: str) -> list[tuple[Path, dict[str, Any]]]:
@@ -118,15 +130,84 @@ def _jsonl_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _session_action_closeout_items(task_root: str | Path, thread_id: str) -> list[tuple[Path, dict[str, Any]]]:
+    workspace = WorkspaceManager(task_root)
+    root = workspace.session_actions_dir(thread_id)
+    if not root.exists():
+        return []
+
+    items: list[tuple[Path, dict[str, Any]]] = []
+    for payload_path in root.glob(f"*/{SESSION_ACTION_CLOSEOUT_FILENAME}"):
+        payload = workspace.load_json(payload_path)
+        if isinstance(payload, dict):
+            items.append((payload_path, payload))
+    return sorted(
+        items,
+        key=lambda item: (
+            _normalized_text(item[1].get("generated_at")) or "",
+            str(item[0]),
+        ),
+        reverse=True,
+    )
+
+
+def _select_session_action_closeout_item(
+    task_root: str | Path,
+    thread_id: str,
+    *,
+    request_id: str | None,
+) -> tuple[Path | None, dict[str, Any] | None, str]:
+    items = _session_action_closeout_items(task_root, thread_id)
+    if not items:
+        return None, None, "not_found"
+
+    normalized_request_id = _normalized_text(request_id)
+    if normalized_request_id is not None:
+        for payload_path, payload in items:
+            if _normalized_text(payload.get("request_id")) == normalized_request_id:
+                return payload_path, payload, "request_id"
+
+    return items[0][0], items[0][1], "latest_generated_at"
+
+
 def _bundle_anchor_from_thread_state(state: Any) -> dict[str, Any]:
     return {
         "ingress_type": None,
         "request_id": None,
         "ingress_message_id": _normalized_text(state.root_message_id),
         "packet_id": None,
+        "action_type": None,
+        "target_session_identity": None,
         "last_summary": _normalized_text(state.last_summary),
         "terminal_mail_message_id": _normalized_text(state.latest_message_id),
         "terminal_mail_subject": None,
+    }
+
+
+def _normalized_target_session_identity(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    payload = {
+        "workspace_id": _normalized_text(value.get("workspace_id")),
+        "session_id": _normalized_text(value.get("session_id")),
+        "thread_id": _normalized_text(value.get("thread_id")),
+    }
+    if all(item is None for item in payload.values()):
+        return None
+    return {key: item for key, item in payload.items() if item is not None}
+
+
+def _bundle_anchor_from_session_action_closeout(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ingress_type": _normalized_text(payload.get("ingress_type")),
+        "request_id": _normalized_text(payload.get("request_id")),
+        "ingress_message_id": _normalized_text(payload.get("ingress_message_id")),
+        "packet_id": _normalized_text(payload.get("packet_id")),
+        "action_type": _normalized_text(payload.get("action_type")),
+        "target_session_identity": _normalized_target_session_identity(payload.get("target_session_identity")),
+        "last_summary": _normalized_text(payload.get("last_summary")),
+        "terminal_mail_message_id": _normalized_text(payload.get("terminal_mail_message_id")),
+        "terminal_mail_subject": _normalized_text(payload.get("terminal_mail_subject")),
     }
 
 
@@ -213,12 +294,23 @@ def load_android_taskmail_send_records(path: str | Path) -> list[dict[str, Any]]
         evidence = payload.get("evidence") or {}
         if not isinstance(evidence, dict):
             evidence = {}
+        target = payload.get("target") or {}
+        if not isinstance(target, dict):
+            target = {}
         recorded_at = payload.get("recordedAt")
         if not isinstance(recorded_at, int):
             recorded_at = 0
         records.append(
             {
                 "recorded_at": recorded_at,
+                "action_type": _normalized_action_type(payload.get("actionType")),
+                "target_session_identity": _normalized_target_session_identity(
+                    {
+                        "workspace_id": target.get("workspaceId"),
+                        "session_id": target.get("sessionId"),
+                        "thread_id": target.get("threadId"),
+                    }
+                ),
                 "sender_account_id": _normalized_text(payload.get("senderAccountId")),
                 "repo_path": _normalized_text(payload.get("repoPath")),
                 "workdir": _normalized_text(payload.get("workdir")),
@@ -271,6 +363,22 @@ def _android_send_outcome_family(record: dict[str, Any]) -> str | None:
     return None
 
 
+def _target_session_identity_matches(
+    record: dict[str, Any],
+    target_session_identity: dict[str, str] | None,
+) -> bool:
+    normalized_target = _normalized_target_session_identity(target_session_identity)
+    record_target = _normalized_target_session_identity(record.get("target_session_identity"))
+    if normalized_target is None or record_target is None:
+        return False
+
+    for key, expected_value in normalized_target.items():
+        if record_target.get(key) != expected_value:
+            return False
+
+    return True
+
+
 def _expected_android_send_outcome_family(ingress_type: str | None) -> str | None:
     normalized_ingress_type = _normalized_text(ingress_type)
     if normalized_ingress_type == "direct_bridge":
@@ -313,6 +421,8 @@ def select_android_taskmail_send_record(
     *,
     request_id: str | None,
     ingress_message_id: str | None,
+    action_type: str | None,
+    target_session_identity: dict[str, str] | None,
     ingress_type: str | None,
     sender_account_id: str | None,
     repo_path: str | None,
@@ -321,7 +431,9 @@ def select_android_taskmail_send_record(
 ) -> tuple[dict[str, Any] | None, str]:
     candidates = list(records)
     if sender_account_id is not None:
-        candidates = [item for item in candidates if item.get("sender_account_id") == sender_account_id]
+        sender_matches = [item for item in candidates if item.get("sender_account_id") == sender_account_id]
+        if sender_matches:
+            candidates = sender_matches
     if not candidates:
         return None, "not_found"
 
@@ -358,6 +470,44 @@ def select_android_taskmail_send_record(
     ]
     anchor_recorded_at = _parse_iso_timestamp_to_epoch_millis(anchor_timestamp)
     expected_outcome_family = _expected_android_send_outcome_family(ingress_type)
+    normalized_action_type = _normalized_action_type(action_type)
+    normalized_target_session_identity = _normalized_target_session_identity(target_session_identity)
+
+    if normalized_target_session_identity is not None:
+        target_matches = [
+            item
+            for item in candidates
+            if _target_session_identity_matches(item, normalized_target_session_identity)
+        ]
+        if normalized_action_type is not None:
+            target_matches = [
+                item
+                for item in target_matches
+                if _normalized_action_type(item.get("action_type")) == normalized_action_type
+            ]
+        if expected_outcome_family is not None:
+            target_outcome_matches = [
+                item
+                for item in target_matches
+                if _android_send_outcome_family(item) == expected_outcome_family
+            ]
+            best_target_outcome_match = _select_best_android_record(
+                target_outcome_matches,
+                repo_path=repo_path,
+                workdir=workdir,
+                anchor_recorded_at=anchor_recorded_at,
+            )
+            if best_target_outcome_match is not None:
+                return best_target_outcome_match, "target_outcome_time"
+
+        if target_matches:
+            best_target_match = _select_best_android_record(
+                target_matches,
+                repo_path=repo_path,
+                workdir=workdir,
+                anchor_recorded_at=anchor_recorded_at,
+            )
+            return best_target_match, "target_time"
 
     if expected_outcome_family is not None:
         workspace_outcome_matches = [
@@ -599,6 +749,43 @@ def _relay_packet_store_evidence(
     }
 
 
+def _thread_state_target_session_identity(state: Any) -> dict[str, str] | None:
+    return _normalized_target_session_identity(
+        {
+            "workspace_id": getattr(state, "workspace_id", None),
+            "session_id": getattr(state, "session_id", None) or getattr(state, "thread_id", None),
+            "thread_id": getattr(state, "thread_id", None),
+        }
+    )
+
+
+def _session_action_closeout_evidence(
+    thread_root: Path,
+    payload_path: Path | None,
+    payload: dict[str, Any] | None,
+    *,
+    resolution: str,
+) -> dict[str, Any] | None:
+    if payload_path is None and payload is None:
+        return None
+    return {
+        "resolution": resolution,
+        "path": str(payload_path) if payload_path is not None else None,
+        "thread_relative_path": _relative_path(thread_root, payload_path),
+        "action_type": _normalized_text(payload.get("action_type")) if payload is not None else None,
+        "request_id": _normalized_text(payload.get("request_id")) if payload is not None else None,
+        "packet_id": _normalized_text(payload.get("packet_id")) if payload is not None else None,
+        "ingress_message_id": _normalized_text(payload.get("ingress_message_id")) if payload is not None else None,
+        "terminal_mail_subject": _normalized_text(payload.get("terminal_mail_subject")) if payload is not None else None,
+        "last_summary": _normalized_text(payload.get("last_summary")) if payload is not None else None,
+        "target_session_identity": (
+            _normalized_target_session_identity(payload.get("target_session_identity"))
+            if payload is not None
+            else None
+        ),
+    }
+
+
 def default_taskmail_daily_closeout_bundle_path(
     task_root: str | Path,
     thread_id: str,
@@ -624,11 +811,32 @@ def build_taskmail_daily_closeout_bundle(
     run_dir = workspace.run_dir(thread_id, resolved_task_id)
     canonical_summary_path = workspace.run_file_path(thread_id, resolved_task_id, "canonical_summary.json")
     canonical_summary_present = canonical_summary_path.exists()
-    canonical_summary = (
-        workspace.load_json(canonical_summary_path)
-        if canonical_summary_present
-        else _bundle_anchor_from_thread_state(state)
-    )
+    session_action_closeout_path = None
+    session_action_closeout_payload = None
+    session_action_closeout_resolution = "not_found"
+    if canonical_summary_present:
+        canonical_summary = workspace.load_json(canonical_summary_path)
+        canonical_outcome_source = "canonical_summary"
+        canonical_outcome_path = canonical_summary_path
+        canonical_outcome_resolution = "canonical_summary"
+    else:
+        session_action_closeout_path, session_action_closeout_payload, session_action_closeout_resolution = (
+            _select_session_action_closeout_item(
+                workspace.task_root,
+                thread_id,
+                request_id=None,
+            )
+        )
+        if session_action_closeout_payload is not None:
+            canonical_summary = _bundle_anchor_from_session_action_closeout(session_action_closeout_payload)
+            canonical_outcome_source = "session_action_closeout"
+            canonical_outcome_path = session_action_closeout_path
+            canonical_outcome_resolution = session_action_closeout_resolution
+        else:
+            canonical_summary = _bundle_anchor_from_thread_state(state)
+            canonical_outcome_source = "thread_state_fallback"
+            canonical_outcome_path = None
+            canonical_outcome_resolution = "thread_state_fallback"
 
     ingress_mail_path, ingress_mail_payload, ingress_mail_resolution = _select_ingress_mail_item(
         workspace.task_root,
@@ -642,6 +850,14 @@ def build_taskmail_daily_closeout_bundle(
             canonical_summary["request_id"] = _payload_request_id(ingress_mail_payload)
         if _normalized_text(canonical_summary.get("packet_id")) is None:
             canonical_summary["packet_id"] = _payload_packet_id(ingress_mail_payload)
+        if _normalized_text(canonical_summary.get("action_type")) is None:
+            canonical_summary["action_type"] = _normalized_text(
+                _payload_headers(ingress_mail_payload).get(ACTION_TYPE_HEADER)
+            )
+        if _normalized_target_session_identity(canonical_summary.get("target_session_identity")) is None:
+            canonical_summary["target_session_identity"] = target_session_identity_from_headers(
+                _payload_headers(ingress_mail_payload)
+            )
         if _normalized_text(canonical_summary.get("ingress_type")) is None:
             canonical_summary["ingress_type"] = (
                 "direct_bridge" if _payload_direct_header(ingress_mail_payload) == "1" else "mail"
@@ -652,7 +868,11 @@ def build_taskmail_daily_closeout_bundle(
         thread_id,
         terminal_message_id=_normalized_text(canonical_summary.get("terminal_mail_message_id")),
         terminal_subject=_normalized_text(canonical_summary.get("terminal_mail_subject")),
-        message_id_source="terminal_mail_message_id" if canonical_summary_present else "thread_state.latest_message_id",
+        message_id_source=(
+            "terminal_mail_message_id"
+            if canonical_outcome_source in {"canonical_summary", "session_action_closeout"}
+            else "thread_state.latest_message_id"
+        ),
     )
     if terminal_mail_payload is not None and _normalized_text(canonical_summary.get("terminal_mail_subject")) is None:
         canonical_summary["terminal_mail_subject"] = _payload_subject(terminal_mail_payload)
@@ -667,6 +887,11 @@ def build_taskmail_daily_closeout_bundle(
             android_records,
             request_id=_normalized_text(canonical_summary.get("request_id")),
             ingress_message_id=_normalized_text(canonical_summary.get("ingress_message_id")),
+            action_type=_normalized_text(canonical_summary.get("action_type")),
+            target_session_identity=(
+                _normalized_target_session_identity(canonical_summary.get("target_session_identity"))
+                or _thread_state_target_session_identity(state)
+            ),
             ingress_type=_normalized_text(canonical_summary.get("ingress_type")),
             sender_account_id=_normalized_text(sender_account_id),
             repo_path=_normalized_text(state.repo_path),
@@ -694,25 +919,27 @@ def build_taskmail_daily_closeout_bundle(
             "thread_relative_path": _relative_path(workspace.thread_dir(thread_id), run_dir),
         },
         "bundle_presence": {
-            "pc_canonical_outcome": canonical_summary_present,
+            "pc_canonical_outcome": canonical_outcome_source != "thread_state_fallback",
             "pc_terminal_mail": terminal_mail_payload is not None,
             "android_latest_send_evidence": android_record is not None,
             "android_terminal_summary": _normalized_text(android_last_summary) is not None,
             "pc_outbound_delivery_attempts": outbound_delivery_attempts is not None,
             "pc_relay_packet_store": relay_packet_store is not None,
+            "pc_session_action_closeout": session_action_closeout_payload is not None,
         },
         "pc_canonical_outcome": {
-            "source": "canonical_summary" if canonical_summary_present else "thread_state_fallback",
-            "path": str(canonical_summary_path) if canonical_summary_present else None,
-            "thread_relative_path": (
-                _relative_path(workspace.thread_dir(thread_id), canonical_summary_path)
-                if canonical_summary_present
-                else None
-            ),
+            "source": canonical_outcome_source,
+            "resolution": canonical_outcome_resolution,
+            "path": str(canonical_outcome_path) if canonical_outcome_path is not None else None,
+            "thread_relative_path": _relative_path(workspace.thread_dir(thread_id), canonical_outcome_path),
             "ingress_type": _normalized_text(canonical_summary.get("ingress_type")),
             "request_id": _normalized_text(canonical_summary.get("request_id")),
             "ingress_message_id": _normalized_text(canonical_summary.get("ingress_message_id")),
             "packet_id": _normalized_text(canonical_summary.get("packet_id")),
+            "action_type": _normalized_text(canonical_summary.get("action_type")),
+            "target_session_identity": _normalized_target_session_identity(
+                canonical_summary.get("target_session_identity")
+            ),
             "last_summary": _normalized_text(canonical_summary.get("last_summary")),
             "terminal_mail_message_id": _normalized_text(canonical_summary.get("terminal_mail_message_id")),
             "terminal_mail_subject": _normalized_text(canonical_summary.get("terminal_mail_subject")),
@@ -730,6 +957,12 @@ def build_taskmail_daily_closeout_bundle(
         "android_latest_send_evidence": {
             "source_path": str(android_send_records_path) if android_send_records_path is not None else None,
             "selection": android_record_selection,
+            "action_type": _normalized_action_type(android_record.get("action_type")) if android_record is not None else None,
+            "target_session_identity": (
+                _normalized_target_session_identity(android_record.get("target_session_identity"))
+                if android_record is not None
+                else None
+            ),
             "sender_account_id": android_record.get("sender_account_id") if android_record is not None else None,
             "recorded_at": android_record.get("recorded_at") if android_record is not None else None,
             "repo_path": android_record.get("repo_path") if android_record is not None else None,
@@ -763,6 +996,12 @@ def build_taskmail_daily_closeout_bundle(
                 ingress_mail_path,
                 ingress_mail_payload,
                 resolution=ingress_mail_resolution,
+            ),
+            "session_action_closeout": _session_action_closeout_evidence(
+                thread_root,
+                session_action_closeout_path,
+                session_action_closeout_payload,
+                resolution=session_action_closeout_resolution,
             ),
             "outbound_delivery_attempts": outbound_delivery_attempts,
             "relay_packet_store": relay_packet_store,

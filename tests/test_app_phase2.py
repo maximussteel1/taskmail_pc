@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from mail_runner.adapters.base import WorkerAdapter
@@ -109,6 +110,65 @@ def test_process_once_skips_unmatched_reply_mail(tmp_path) -> None:
 
     assert stats == {"fetched": 1, "processed": 0, "skipped": 1, "failed": 0}
     assert client.sent_messages == []
+
+
+def test_process_once_skips_stale_new_task_mail_when_freshness_guard_enabled(tmp_path, monkeypatch) -> None:
+    envelope = MailEnvelope(
+        message_id="<stale-root@example.com>",
+        subject="[OC] Demo task",
+        from_addr="user@example.com",
+        to_addr="user@example.com",
+        date="2026-03-12T12:10:00+00:00",
+        body_text="Repo: D:\\repo\nTask:\nRefactor the module.\n",
+        raw_headers={"Subject": "[OC] Demo task"},
+    )
+    client = FakeMailClient([envelope])
+    dispatcher = Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0))
+    config = AppConfig(
+        from_addr="user@example.com",
+        from_name="Mail Runner",
+        task_root="tasks",
+        new_task_max_age_minutes=60,
+    )
+    monkeypatch.setattr(
+        "mail_runner.app._current_time_utc",
+        lambda: datetime(2026, 3, 12, 13, 11, 0, tzinfo=timezone.utc),
+    )
+
+    stats = process_once(config, base_dir=tmp_path, mail_client=client, dispatcher=dispatcher)
+
+    assert stats == {"fetched": 1, "processed": 0, "skipped": 1, "failed": 0}
+    assert client.sent_messages == []
+    assert not (tmp_path / "tasks" / "thread_001").exists()
+
+
+def test_process_once_accepts_fresh_new_task_mail_when_freshness_guard_enabled(tmp_path, monkeypatch) -> None:
+    envelope = MailEnvelope(
+        message_id="<fresh-root@example.com>",
+        subject="[OC] Demo task",
+        from_addr="user@example.com",
+        to_addr="user@example.com",
+        date="2026-03-12T12:10:00+00:00",
+        body_text="Repo: D:\\repo\nTask:\nRefactor the module.\n",
+        raw_headers={"Subject": "[OC] Demo task"},
+    )
+    client = FakeMailClient([envelope])
+    dispatcher = Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0))
+    config = AppConfig(
+        from_addr="user@example.com",
+        from_name="Mail Runner",
+        task_root="tasks",
+        new_task_max_age_minutes=60,
+    )
+    monkeypatch.setattr(
+        "mail_runner.app._current_time_utc",
+        lambda: datetime(2026, 3, 12, 13, 0, 0, tzinfo=timezone.utc),
+    )
+
+    stats = process_once(config, base_dir=tmp_path, mail_client=client, dispatcher=dispatcher)
+
+    assert stats == {"fetched": 1, "processed": 1, "skipped": 0, "failed": 0}
+    assert (tmp_path / "tasks" / "thread_001" / "thread_state.json").exists()
 
 
 def test_process_once_handles_project_folder_sync_without_creating_task(tmp_path) -> None:

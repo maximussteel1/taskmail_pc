@@ -21,6 +21,16 @@ def _write_runtime_config(runtime_dir: Path) -> Path:
     return config_path
 
 
+def _write_running_host_state(runtime_dir: Path, config_path: Path) -> None:
+    HostStateStore(runtime_dir).write(
+        status=HOST_STATUS_RUNNING,
+        pid=os.getpid(),
+        started_at="2099-03-17T00:50:00",
+        config_path=str(config_path),
+        runtime_dir=str(runtime_dir),
+    )
+
+
 def _thread_state(
     *,
     thread_id: str,
@@ -130,6 +140,7 @@ def test_status_reports_host_and_runtime_counts(tmp_path: Path, capsys) -> None:
 def test_list_running_shows_running_sessions(tmp_path: Path, capsys) -> None:
     runtime_dir = tmp_path / "runtime"
     config_path = _write_runtime_config(runtime_dir)
+    _write_running_host_state(runtime_dir, config_path)
     task_root = runtime_dir / "tasks"
     save_thread_state(
         _thread_state(
@@ -150,7 +161,7 @@ def test_list_running_shows_running_sessions(tmp_path: Path, capsys) -> None:
         task_root,
     )
 
-    exit_code = main(["--config", str(config_path), "list-running"])
+    exit_code = main(["--config", str(config_path), "--runtime-dir", str(runtime_dir), "list-running"])
 
     output = capsys.readouterr().out
     assert exit_code == 0
@@ -171,7 +182,7 @@ def test_list_running_hides_ended_sessions(tmp_path: Path, capsys) -> None:
     ended.lifecycle = "ended"
     save_thread_state(ended, task_root)
 
-    exit_code = main(["--config", str(config_path), "list-running"])
+    exit_code = main(["--config", str(config_path), "--runtime-dir", str(runtime_dir), "list-running"])
 
     output = capsys.readouterr().out
     assert exit_code == 0
@@ -202,7 +213,7 @@ def test_list_queue_shows_queued_sessions_and_follow_up_items(tmp_path: Path, ca
         task_root,
     )
 
-    exit_code = main(["--config", str(config_path), "list-queue"])
+    exit_code = main(["--config", str(config_path), "--runtime-dir", str(runtime_dir), "list-queue"])
 
     output = capsys.readouterr().out
     assert exit_code == 0
@@ -246,7 +257,7 @@ def test_show_thread_reports_latest_result_details(tmp_path: Path, capsys) -> No
         ),
     )
 
-    exit_code = main(["--config", str(config_path), "show-thread", "thread_001"])
+    exit_code = main(["--config", str(config_path), "--runtime-dir", str(runtime_dir), "show-thread", "thread_001"])
 
     output = capsys.readouterr().out
     assert exit_code == 0
@@ -266,6 +277,7 @@ def test_show_thread_reports_latest_result_details(tmp_path: Path, capsys) -> No
 def test_show_thread_live_merges_transcript_and_live_stream(tmp_path: Path, capsys) -> None:
     runtime_dir = tmp_path / "runtime"
     config_path = _write_runtime_config(runtime_dir)
+    _write_running_host_state(runtime_dir, config_path)
     task_root = runtime_dir / "tasks"
     workspace = WorkspaceManager(task_root)
     thread_state = _thread_state(
@@ -343,7 +355,7 @@ def test_show_thread_live_merges_transcript_and_live_stream(tmp_path: Path, caps
         encoding="utf-8",
     )
 
-    exit_code = main(["--config", str(config_path), "show-thread-live", "thread_001"])
+    exit_code = main(["--config", str(config_path), "--runtime-dir", str(runtime_dir), "show-thread-live", "thread_001"])
 
     output = capsys.readouterr().out
     assert exit_code == 0
@@ -385,7 +397,7 @@ def test_show_thread_live_handles_missing_stream_log(tmp_path: Path, capsys) -> 
         task_root,
     )
 
-    exit_code = main(["--config", str(config_path), "show-thread-live", "thread_001"])
+    exit_code = main(["--config", str(config_path), "--runtime-dir", str(runtime_dir), "show-thread-live", "thread_001"])
 
     output = capsys.readouterr().out
     assert exit_code == 0
@@ -605,7 +617,7 @@ def test_show_thread_returns_nonzero_for_missing_thread(tmp_path: Path, capsys) 
     runtime_dir = tmp_path / "runtime"
     config_path = _write_runtime_config(runtime_dir)
 
-    exit_code = main(["--config", str(config_path), "show-thread", "thread_999"])
+    exit_code = main(["--config", str(config_path), "--runtime-dir", str(runtime_dir), "show-thread", "thread_999"])
 
     output = capsys.readouterr().out
     assert exit_code == 1

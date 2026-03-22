@@ -39,7 +39,8 @@
 - Android 正式 flow 上当前唯一已经完成 direct closeout 的 direct business slice 仍是 `new_task`
 - `new_task` 的 repo-side outcome normalization 已落地：accepted / fallback-classified rejection / hard rejection 有统一 classifier，accepted packet 后续失败也会持久化 `last_error_code`
 - 与这层实现直接相关的 targeted tests 和 full suite 已通过，当前仓库没有新增 repo-side mismatch signal
-- `reply`、`/status`、更广的 direct read-side transport 仍缺跨仓库 contract freeze
+- `reply`、`/status` 的单独跨仓库 contract freeze 现在可以存在于 planning 层，但它仍不改变当前 Layer 1，也不自动把
+  这些 flow 纳入本轮 Phase 4 covered flow
 
 因此，Phase 4 不应被理解为“全量 direct 化”，而应读作“先围绕已闭环 flow 建立 parity、rollback 与 primary-path switch 的可信度”。
 

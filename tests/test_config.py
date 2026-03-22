@@ -14,6 +14,7 @@ def test_load_config_uses_defaults_when_file_is_missing(tmp_path: Path) -> None:
     assert config.imap_receive_mode == "auto"
     assert config.imap_idle_renew_seconds == 1500
     assert config.default_timeout_minutes == 60
+    assert config.new_task_max_age_minutes == 0
     assert config.max_active_sessions == 4
     assert config.max_active_sessions_per_workspace == 2
     assert config.task_root == "tasks"
@@ -43,6 +44,7 @@ def test_load_config_reads_yaml_values_and_ignores_removed_keys(tmp_path: Path) 
                 "imap_receive_mode: idle",
                 "imap_idle_renew_seconds: 900",
                 "task_root: runtime_tasks",
+                "new_task_max_age_minutes: 75",
                 "max_active_sessions: 4",
                 "max_active_sessions_per_workspace: 2",
                 "auto_create_workdir: true",
@@ -74,6 +76,7 @@ def test_load_config_reads_yaml_values_and_ignores_removed_keys(tmp_path: Path) 
     assert config.poll_seconds == 45
     assert config.imap_receive_mode == "idle"
     assert config.imap_idle_renew_seconds == 900
+    assert config.new_task_max_age_minutes == 75
     assert config.max_active_sessions == 4
     assert config.max_active_sessions_per_workspace == 2
     assert config.task_root == "runtime_tasks"
@@ -103,6 +106,7 @@ def test_environment_variables_override_yaml(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.setenv("MAIL_RUNNER_POLL_SECONDS", "90")
     monkeypatch.setenv("MAIL_RUNNER_IMAP_RECEIVE_MODE", "poll")
     monkeypatch.setenv("MAIL_RUNNER_IMAP_IDLE_RENEW_SECONDS", "600")
+    monkeypatch.setenv("MAIL_RUNNER_NEW_TASK_MAX_AGE_MINUTES", "120")
     monkeypatch.setenv("MAIL_RUNNER_MAX_ACTIVE_SESSIONS", "3")
     monkeypatch.setenv("MAIL_RUNNER_MAX_ACTIVE_SESSIONS_PER_WORKSPACE", "2")
     monkeypatch.setenv("MAIL_RUNNER_FROM_NAME", "Integration Runner")
@@ -119,6 +123,7 @@ def test_environment_variables_override_yaml(tmp_path: Path, monkeypatch) -> Non
     assert config.poll_seconds == 90
     assert config.imap_receive_mode == "poll"
     assert config.imap_idle_renew_seconds == 600
+    assert config.new_task_max_age_minutes == 120
     assert config.max_active_sessions == 3
     assert config.max_active_sessions_per_workspace == 2
     assert config.from_name == "Integration Runner"

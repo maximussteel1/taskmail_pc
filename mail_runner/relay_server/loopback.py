@@ -13,6 +13,7 @@ from .auth import token_fingerprint, validate_transport_token
 from .config import RelayServerConfig
 from .direct_actions import RelayDirectActionError, RelayDirectPacketHandler, is_taskmail_direct_packet
 from .packet_store import InMemoryAcceptedPacketStore
+from .post_creation_actions import is_taskmail_post_creation_packet
 from .phase3_emitter import (
     build_phase3_session_snapshot_update,
     build_phase3_state_transition_update,
@@ -59,6 +60,7 @@ class LoopbackRelayServer:
         packet_store: InMemoryAcceptedPacketStore | None = None,
         delivery_callback: Callable[[Any], TransportReceipt] | None = None,
         direct_packet_handler: RelayDirectPacketHandler | None = None,
+        direct_packet_handlers: list[RelayDirectPacketHandler] | tuple[RelayDirectPacketHandler, ...] | None = None,
         phase3_session_detail_provider: Phase3SessionDetailProvider | None = None,
         heartbeat_seconds: int = _DEFAULT_HEARTBEAT_SECONDS,
         phase3_broadcast_interval_seconds: float = _DEFAULT_PHASE3_BROADCAST_INTERVAL_SECONDS,
@@ -75,7 +77,13 @@ class LoopbackRelayServer:
         self._session_store = session_store or InMemorySessionStore()
         self._packet_store = packet_store or InMemoryAcceptedPacketStore()
         self._delivery_callback = delivery_callback
+        resolved_direct_handlers: list[RelayDirectPacketHandler] = []
+        if direct_packet_handler is not None:
+            resolved_direct_handlers.append(direct_packet_handler)
+        if direct_packet_handlers is not None:
+            resolved_direct_handlers.extend(item for item in direct_packet_handlers if item is not None)
         self._direct_packet_handler = direct_packet_handler
+        self._direct_packet_handlers = tuple(resolved_direct_handlers)
         self._phase3_session_detail_provider = phase3_session_detail_provider or ThreadStorePhase3SessionDetailProvider()
         self._heartbeat_seconds = heartbeat_seconds
         self._phase3_broadcast_interval_seconds = float(phase3_broadcast_interval_seconds)
@@ -408,7 +416,7 @@ class LoopbackRelayServer:
                 self._packet_store.mark_delivery_result(
                     accepted_packet.packet_id,
                     attempted_at=now,
-                    transport_name="relay_direct_new_task",
+                    transport_name=getattr(direct_packet_handler, "transport_name", "relay_direct_taskmail_action"),
                     success=False,
                     error_code=exc.code,
                     error_message=exc.message,
@@ -419,7 +427,7 @@ class LoopbackRelayServer:
                 self._packet_store.mark_delivery_result(
                     accepted_packet.packet_id,
                     attempted_at=now,
-                    transport_name="relay_direct_new_task",
+                    transport_name=getattr(direct_packet_handler, "transport_name", "relay_direct_taskmail_action"),
                     success=False,
                     error_code="direct_temporarily_unavailable",
                     error_message=message_text,
@@ -722,9 +730,10 @@ class LoopbackRelayServer:
         return new_items
 
     def _resolve_direct_packet_handler(self, message: RelayPacketMessage) -> RelayDirectPacketHandler | None:
-        if self._direct_packet_handler is not None and self._direct_packet_handler.matches(message):
-            return self._direct_packet_handler
-        if is_taskmail_direct_packet(message):
+        for handler in self._direct_packet_handlers:
+            if handler.matches(message):
+                return handler
+        if is_taskmail_direct_packet(message) or is_taskmail_post_creation_packet(message):
             raise RelayDirectActionError("unsupported_action", "direct TaskMail action is not available on this relay")
         return None
 

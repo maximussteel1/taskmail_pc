@@ -21,6 +21,7 @@ _INT_FIELDS = {
     "poll_seconds",
     "imap_idle_renew_seconds",
     "default_timeout_minutes",
+    "new_task_max_age_minutes",
     "max_active_sessions",
     "max_active_sessions_per_workspace",
     "monitor_window_refresh_seconds",
@@ -68,6 +69,7 @@ class AppConfig:
     poll_seconds: int = 30
     task_root: str = "tasks"
     default_timeout_minutes: int = 60
+    new_task_max_age_minutes: int = 0
     max_active_sessions: int = 4
     max_active_sessions_per_workspace: int = 2
     auto_create_workdir: bool = False

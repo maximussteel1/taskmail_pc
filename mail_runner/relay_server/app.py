@@ -20,6 +20,10 @@ from .delivery import RelayPacketDeliverer
 from .direct_actions import RelayTaskMailDirectNewTaskMailBridge
 from .loopback import LoopbackRelayServer
 from .packet_store import InMemoryAcceptedPacketStore, PersistentAcceptedPacketStore
+from .post_creation_actions import (
+    RelayTaskMailDirectCurrentSessionReplyMailBridge,
+    RelayTaskMailDirectCurrentSessionStatusMailBridge,
+)
 from .session_store import InMemorySessionStore, PersistentSessionStore
 
 LOGGER = logging.getLogger(__name__)
@@ -71,15 +75,19 @@ def build_runtime_relay(
     packet_store,
 ) -> LoopbackRelayServer:
     deliverer = RelayPacketDeliverer(config)
-    direct_packet_handler = None
+    direct_packet_handlers: list[Any] = []
     if config.taskmail_direct_ingress_enabled:
-        direct_packet_handler = RelayTaskMailDirectNewTaskMailBridge(config)
+        direct_packet_handlers = [
+            RelayTaskMailDirectNewTaskMailBridge(config),
+            RelayTaskMailDirectCurrentSessionStatusMailBridge(config, task_root=config.task_root or None),
+            RelayTaskMailDirectCurrentSessionReplyMailBridge(config, task_root=config.task_root or None),
+        ]
     return LoopbackRelayServer(
         config,
         session_store=session_store,
         packet_store=packet_store,
         delivery_callback=deliverer.deliver,
-        direct_packet_handler=direct_packet_handler,
+        direct_packet_handlers=direct_packet_handlers,
     )
 
 

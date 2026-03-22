@@ -18,6 +18,10 @@
   - The Android/Thunderbird-facing outbound consumer contract remains frozen, but `P9` itself is not the current active implementation slice while that freeze is in effect.
   - The current active repo-side next step for this area is `docs/plans/pc_outbound_layering_refactor_plan.md`: split the outbound path into render / packet / transport layers without changing the Android-facing contract.
   - Broader renderer and outbound-model convergence remains staged later in `docs/plans/outbound_mail_contract_convergence_plan.md`.
+- Current repository priority order:
+  1. 现阶段最高优先级是当前 `VPS 直连` 主线，优先继续推进 live acceptance、direct-connect 可用性与既有 Android/PC/VPS 计划线。
+  2. 第二优先级是 `HTML 解析 / HTML reading scope`，继续按当前 consumer contract 冻结边界推进，不扩张到 broader convergence。
+  3. 第三优先级才是 `VPS ingress truth v1`，即把 ingress / lease / canonical binding truth 迁入 VPS，但保持 execution truth 留在 PC；该方向当前已形成设计文档，暂不抢占前两条主线。
 - Merged inputs:
   - `docs/archive/thread_management_user_rules_legacy.md`
   - `docs/archive/thread_management_state_model_plan_legacy.md`
@@ -34,6 +38,7 @@
 4. Android 与 PC 两个项目继续并行推进，但不修改当前通讯协议。
 5. 如需重启 P9，先补 Android/Thunderbird 验收与 closeout，再决定是否继续。
 6. neutral outbound model、summary-first plain text、subject-shape cutover 仍保持后置，不因 P9 冻结而自动提前启动。
+7. `VPS ingress truth v1` 已纳入后续开发计划，但当前排位在 `VPS 直连` 与 `HTML 解析` 之后；只有前两条主线达到可接受收口后，才进入该项实施。
 
 ## Current Outbound Sequencing
 
@@ -43,6 +48,31 @@
 - `docs/plans/pc_outbound_layering_refactor_plan.md` is the active repository-side implementation plan while P9 remains frozen; it changes internal PC boundaries only and leaves the Android-facing contract untouched.
 - `docs/plans/outbound_mail_contract_convergence_plan.md` remains the post-P9 path for neutral outbound models, summary-first plain text, fragment-wrapper cleanup, and subject-shape compatibility work; it is not auto-promoted just because P9 is frozen.
 - Subject-shape cutover, internal `TaskRunPacket` / neutral-model shape, and other broader convergence items remain explicitly off the current path.
+
+## Current Top Priority Order
+
+当前后续开发顺序明确收口为：
+
+1. `VPS 直连`
+   - 以当前 Android / PC / VPS direct-connect 主线为最高优先级
+   - 继续围绕现有 relay / parity / live acceptance / fallback 边界推进
+   - 相关计划：
+     - `docs/plans/android_pc_vps_coordinated_execution_plan.md`
+     - `docs/plans/phase4_dual_stack_parity_plan.md`
+     - `docs/plans/phase5_long_term_default_hardening_plan.md`
+2. `HTML 解析`
+   - 保持 `text/plain` reply/parsing truth 不变
+   - 继续推进 HTML reading / parsing 相关工作，但不把 broader convergence 抢到前面
+   - 相关计划：
+     - `docs/plans/p9_html_mail_projection_plan.md`
+     - `docs/plans/android_consumer_contract_alignment_plan.md`
+     - `docs/plans/android_consumer_protocol_freeze_note.md`
+3. `VPS ingress truth v1`
+   - 已纳入后续开发计划
+   - 当前定位为中优先级、排在前两条主线之后
+   - 相关计划：
+     - `docs/plans/vps_ingress_truth_v1_checklist.md`
+     - `docs/plans/vps_ingress_truth_v1_execution_order.md`
 
 ## Constraints
 

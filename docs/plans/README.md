@@ -20,7 +20,15 @@ Current plan documents:
 - `vps_relay_bootstrap_plan.md`: narrow repository-side bootstrap plan for the first VPS relay/control-plane workstream behind the completed outbound layering seam.
 - `vps_relay_deploy_runbook.md`: concrete Phase C deployment/runbook for the current lightweight relay skeleton on the inspected Ubuntu VPS.
 - `vps_environment_baseline.md`: inspected Ubuntu VPS baseline for the first relay deployment path.
+- `vps_ingress_truth_v1_checklist.md`: Chinese design checklist for moving ingress / lease / canonical binding truth into VPS while keeping execution truth on the PC.
+- `vps_ingress_truth_v1_execution_order.md`: implementation-order companion for the ingress-truth v1 checklist, including first-batch module split and repo-internal relay action suggestions.
 - `coding_backlog.md`: canonical next-phase development backlog for the current repository.
+
+Current priority reading:
+
+- highest: current Android / PC / VPS `VPS 直连` mainline
+- second: `HTML 解析 / HTML reading` related work under the frozen consumer contract
+- then: `VPS ingress truth v1`
 - `codex_sdk_continuous_session_plan.md`: detailed P1 implementation plan for Codex SDK continuous sessions.
 - `codex_sdk_capability_probe.md`: capability probe notes for SDK and MCP integration boundaries before P1.
 - `p3_streaming_session_window_plan.md`: detailed P3 implementation plan for the first streaming, timestamped, PC-side session window on the `codex + sdk` path.
@@ -43,6 +51,9 @@ Current plan documents:
 - `phase0_direct_connect_handoff.md`: short repository-side handoff note that closes Phase 0 planning freeze and points Phase 1 at bootstrap promotion with mail fallback preserved.
 - `phase1_direct_connect_bootstrap.md`: repository-side Phase 1 bootstrap/seam/failure note that defines the reusable relay bootstrap probe boundary and current fallback taxonomy.
 - `phase2_direct_outbound_contract_v1.md`: shared Phase 2 contract freeze for the first direct outbound `new task` slice over the existing relay transport wrapper.
+- `post_creation_session_action_contract_v1.md`: shared contract freeze for the first direct post-creation session actions, currently limited to current-session plain `reply` and current-session `/status` in planning only.
+- `post_creation_session_action_execution_plan.md`: 仓库侧执行计划，按 `/status -> reply` 的顺序落地 post-creation direct action，并先补齐 resolver、bridge seam、classification、closeout。
+- `post_creation_session_action_closeout_handoff.md`: 仓库侧 closeout handoff，收口第一轮 post-creation 实现切片，固定 live `/status` 与 live `reply` 的证据采集、bind 判读与 Layer 1 升级门槛。
 - `phase2_direct_outbound_closeout_handoff.md`: short repository-side handoff note that closes the Phase 2 direct-outbound v1 slice and points the next session at the Phase 3 direct inbound update bridge.
 - `phase3_direct_inbound_mapping_v1.md`: shared Phase 3 first-slice mapping note for active-session direct inbound updates into the existing Android session-detail read side.
 - `phase3_direct_inbound_wire_v1.md`: shared Phase 3 first-slice wire contract for active-session detail subscribe, `session_update`, ordering, and resync.
@@ -128,7 +139,24 @@ growth.
 As of 2026-03-22, the repository-side Phase 4 execution plan is also explicit in
 `docs/plans/phase4_dual_stack_parity_plan.md`. That note keeps the first covered flow conservative (`new_task` first),
 defines the planned parity checklist / mismatch ledger / rollback trigger outputs, and keeps direct `reply` /
-direct `/status` outside the default implementation queue until a separate cross-repo contract freeze exists.
+direct `/status` outside the Phase 4 covered flow even though a separate planning-layer contract freeze can now exist.
+
+As of 2026-03-22, the first shared post-creation session-action contract artifact also exists in
+`docs/plans/post_creation_session_action_contract_v1.md`. That note freezes only the planning-layer scope, target
+identity, bridge semantics, classification, and closeout anchors for current-session plain `reply` and current-session
+`/status`; it does not change current Layer 1 behavior and does not by itself authorize direct-default or implementation
+promotion.
+
+As of 2026-03-22, the repository-side implementation follow-up for that shared contract is also explicit in
+`docs/plans/post_creation_session_action_execution_plan.md`. That note keeps the first repository execution order
+conservative (`/status` first, `reply` second), recommends reusing the current canonical mail ingress through a
+server-side bridge seam, and keeps Layer 1 unchanged until code, tests, and closeout evidence are all in place.
+
+As of 2026-03-23, the repository-side closeout handoff for that post-creation slice is also explicit in
+`docs/plans/post_creation_session_action_closeout_handoff.md`. That note reads the first repository coding slice as
+landed, fixes the next live-evidence pair to current-session direct `/status` plus current-session plain direct
+`reply`, and keeps the next decision focused on closeout evidence and possible Layer 1 upgrade rather than further
+implicit scope growth.
 
 As of 2026-03-22, the repository-side first evidence baselines for those three shared Phase 4 artifacts also exist in
 `docs/plans/phase4_dual_stack_parity_checklist.md`, `docs/plans/phase4_mismatch_ledger.md`, and

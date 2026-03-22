@@ -11,6 +11,10 @@ smtp_password: your_smtp_password
 poll_seconds: 30
 task_root: tasks
 default_timeout_minutes: 60
+# Optional first-mail freshness guard for non-reply [OC]/[CX] task ingress.
+# 0 disables the guard. A positive value only accepts new-task mail whose Date
+# header is within that many minutes of current runner time.
+new_task_max_age_minutes: 0
 max_active_sessions: 4
 max_active_sessions_per_workspace: 2
 auto_create_workdir: false

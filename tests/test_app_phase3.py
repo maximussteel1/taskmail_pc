@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from mail_runner.adapters.mock_adapter import MockAdapter
 from mail_runner.app import (
@@ -313,6 +314,38 @@ def test_process_once_handles_status_query_reply(tmp_path) -> None:
     assert "\nSummary: Mock run completed successfully.\n" not in client.sent_messages[0]["body"]
     snapshots = list((tmp_path / "tasks" / "thread_001" / "snapshots").glob("*.json"))
     assert len(snapshots) == 1
+
+
+def test_process_once_reply_bypasses_new_task_freshness_guard(tmp_path, monkeypatch) -> None:
+    dispatcher = Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0))
+    _setup_existing_thread(tmp_path / "tasks", dispatcher)
+    envelope = MailEnvelope(
+        message_id="<reply-status-stale@example.com>",
+        subject="Re: [DONE] Demo task",
+        from_addr="user@example.com",
+        to_addr="user@example.com",
+        date="2026-03-12T12:10:00+00:00",
+        in_reply_to="<done@example.com>",
+        references=["<root@example.com>", "<done@example.com>"],
+        body_text="/status",
+        raw_headers={"Subject": "Re: [DONE] Demo task"},
+    )
+    client = FakeMailClient([envelope])
+    config = AppConfig(
+        from_addr="user@example.com",
+        from_name="Mail Runner",
+        task_root="tasks",
+        new_task_max_age_minutes=60,
+    )
+    monkeypatch.setattr(
+        "mail_runner.app._current_time_utc",
+        lambda: datetime(2026, 3, 13, 12, 10, 0, tzinfo=timezone.utc),
+    )
+
+    stats = process_once(config, base_dir=tmp_path, mail_client=client, dispatcher=dispatcher)
+
+    assert stats == {"fetched": 1, "processed": 1, "skipped": 0, "failed": 0}
+    assert [item["subject"] for item in client.sent_messages] == ["[STATUS][S:thread_001] demo task"]
 
 
 def test_handle_existing_action_status_query_for_running_thread_uses_live_assistant_output(tmp_path) -> None:

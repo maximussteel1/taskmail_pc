@@ -5,7 +5,8 @@ import pytest
 from mail_runner.relay_server.config import RelayServerConfig, load_relay_server_config
 
 
-def test_load_relay_server_config_reads_explicit_values() -> None:
+def test_load_relay_server_config_reads_explicit_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MAIL_RUNNER_TASK_ROOT", raising=False)
     config = load_relay_server_config(
         host="0.0.0.0",
         port=9797,
@@ -19,6 +20,7 @@ def test_load_relay_server_config_reads_explicit_values() -> None:
         port=9797,
         transport_token="relay-secret",
         state_dir="relay_state",
+        task_root="",
         smtp_host="",
         smtp_port=465,
         smtp_user="",
@@ -33,6 +35,7 @@ def test_load_relay_server_config_reads_explicit_values() -> None:
 
 
 def test_load_relay_server_config_reads_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MAIL_RUNNER_TASK_ROOT", raising=False)
     monkeypatch.setenv("MAIL_RELAY_HOST", "127.0.0.2")
     monkeypatch.setenv("MAIL_RELAY_PORT", "9898")
     monkeypatch.setenv("MAIL_RELAY_TOKEN", "env-token")
@@ -46,6 +49,7 @@ def test_load_relay_server_config_reads_environment(monkeypatch: pytest.MonkeyPa
         port=9898,
         transport_token="env-token",
         state_dir="relay_state",
+        task_root="",
         smtp_host="",
         smtp_port=465,
         smtp_user="",
@@ -60,6 +64,7 @@ def test_load_relay_server_config_reads_environment(monkeypatch: pytest.MonkeyPa
 
 
 def test_load_relay_server_config_reads_taskmail_direct_bridge_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MAIL_RUNNER_TASK_ROOT", raising=False)
     monkeypatch.setenv("MAIL_RELAY_TOKEN", "env-token")
     monkeypatch.setenv("MAIL_RELAY_TASKMAIL_BOT_MAILBOX_ADDR", "bot@example.com")
     monkeypatch.setenv("MAIL_RELAY_TASKMAIL_DIRECT_FROM_NAME", "TaskMail Bridge")
@@ -79,6 +84,15 @@ def test_load_relay_server_config_reads_taskmail_direct_bridge_values(monkeypatc
     assert config.taskmail_direct_smtp_user == "taskmail-user@example.com"
     assert config.taskmail_direct_smtp_password == "user-secret"
     assert config.taskmail_direct_ingress_enabled is True
+
+
+def test_load_relay_server_config_reads_task_root_from_mail_runner_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAIL_RELAY_TOKEN", "env-token")
+    monkeypatch.setenv("MAIL_RUNNER_TASK_ROOT", "/srv/mail-runner/tasks")
+
+    config = load_relay_server_config()
+
+    assert config.task_root == "/srv/mail-runner/tasks"
 
 
 def test_relay_server_config_rejects_missing_transport_token() -> None:
