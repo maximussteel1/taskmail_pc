@@ -45,6 +45,7 @@ Notes:
 - 如果要让 Phase 3 `subscribe_session_detail` / `session_update` 看到真实 live task store，还需要给 relay 提供可见的 `task_root`：
   - deploy 时传 `--task-root /opt/mail_runner_relay/shared/task_root`
   - 这会在远端 env 中写入 `MAIL_RUNNER_TASK_ROOT`
+  - 这里必须指向 relay 实际可见、且同时包含 `_scheduler/` 与 `thread_*/` 的 shared task root；不要指向 runner runtime root，也不要指向只有 `state/` 的 relay 工作目录
 - To enable the current Phase 2 v1 direct TaskMail `new_task` ingress, also pass:
   - `--taskmail-bot-mailbox-addr <bot-mailbox-addr>`
   - `--taskmail-direct-from-addr <user-mailbox-addr>`
@@ -128,7 +129,7 @@ This `2026-03-22` probe is still intentionally partial:
   ...
 ```
 
-2. 把本地 live task store 同步到这个远端目录：
+2. 把本地 live task store 同步到这个远端 shared task root：
 
 ```powershell
 .\.venv\Scripts\python.exe .\scripts\sync_relay_task_root.py `
@@ -139,7 +140,7 @@ This `2026-03-22` probe is still intentionally partial:
   --remote-task-root /opt/mail_runner_relay/shared/task_root
 ```
 
-3. 如果要支撑 smoke 期间持续变化的 live state，可以把同步脚本跑成轮询模式：
+3. 如果要支撑 smoke 期间持续变化的 live state，不要依赖人工补一次快照；把同步脚本跑成轮询模式，让 `_scheduler/` 与 `thread_*/` 持续跟进：
 
 ```powershell
 .\.venv\Scripts\python.exe .\scripts\sync_relay_task_root.py `
@@ -163,12 +164,18 @@ This `2026-03-22` probe is still intentionally partial:
 - `packet_count`
 - `tls_enabled`
 - `taskmail_direct_ingress_enabled`
+- `task_root.configured_path`
+- `task_root.exists`
+- `task_root.is_dir`
+- `task_root.scheduler_present`
+- `task_root.thread_count`
 - `auth.transport_token_id`
 
 For the current Phase 2 v1 Android `new_task` smoke path, operator preflight should explicitly confirm:
 
 - `taskmail_direct_ingress_enabled=true` when Android is expected to use direct first-send
 - `tls_enabled=true` only when the Android client is configured to use TLS for the same relay endpoint
+- `task_root.scheduler_present=true` 且 `task_root.thread_count > 0` when the relay is expected to resolve current-session actions against the shared task root
 - health passing alone is not enough; direct-ingress-disabled health should be treated as a mail-fallback scenario, not
   a direct-send-ready relay
 

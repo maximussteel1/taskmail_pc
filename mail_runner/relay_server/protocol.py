@@ -7,6 +7,8 @@ from typing import Any
 
 
 _PHASE3_SCHEMA_VERSION = "phase3-direct-inbound-wire-v1"
+_BOOTSTRAP_SCHEMA_VERSION = "taskmail-bootstrap-control-contract-v2"
+_BOOTSTRAP_ACTION_SYNC_PROJECT_FOLDERS = "sync_project_folders"
 _PHASE3_STATUSES = {"queued", "running", "awaiting_user_input", "paused", "done", "failed", "killed"}
 _PHASE3_LIFECYCLE_STATES = {"active", "ended"}
 _PHASE3_PAUSED_FROM_STATUSES = {"queued", "awaiting_user_input", "done", "failed", "killed"}
@@ -85,6 +87,12 @@ def _require_optional_literal(value: Any, field_name: str, allowed: set[str]) ->
     if value is None:
         return None
     return _require_literal(value, field_name, allowed)
+
+
+def _require_bool(value: Any, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ProtocolValidationError(f"{field_name} must be a bool")
+    return value
 
 
 @dataclass(slots=True)
@@ -193,6 +201,49 @@ class RelayErrorMessage:
         self.code = _require_text(self.code, "code")
         self.message = _require_text(self.message, "message")
         self.sent_at = _require_text(self.sent_at, "sent_at")
+
+
+def _validate_project_sync_entries(value: Any, field_name: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ProtocolValidationError(f"{field_name} must be a list[dict]")
+    entries: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        entry = _require_mapping(item, f"{field_name}[{index}]")
+        entry["name"] = _require_text(entry.get("name"), f"{field_name}[{index}].name")
+        entry["path"] = _require_text(entry.get("path"), f"{field_name}[{index}].path")
+        entries.append(entry)
+    return entries
+
+
+def _validate_project_sync_roots(value: Any, field_name: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ProtocolValidationError(f"{field_name} must be a list[dict]")
+    roots: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        root = _require_mapping(item, f"{field_name}[{index}]")
+        root["root_path"] = _require_text(root.get("root_path"), f"{field_name}[{index}].root_path")
+        root["available"] = _require_bool(root.get("available"), f"{field_name}[{index}].available")
+        root["error"] = _require_optional_text(root.get("error"), f"{field_name}[{index}].error")
+        root["entries"] = _validate_project_sync_entries(root.get("entries"), f"{field_name}[{index}].entries")
+        if root["available"] is False and root["error"] is None:
+            raise ProtocolValidationError(f"{field_name}[{index}].error is required when available=false")
+        if root["available"] is False and root["entries"]:
+            raise ProtocolValidationError(f"{field_name}[{index}].entries must be empty when available=false")
+        roots.append(root)
+    return roots
+
+
+def _validate_sync_project_folders_result(value: Any, field_name: str) -> dict[str, Any]:
+    data = _require_mapping(value, field_name)
+    data["summary_text"] = _require_text(data.get("summary_text"), f"{field_name}.summary_text")
+    data["scanned_at"] = _require_text(data.get("scanned_at"), f"{field_name}.scanned_at")
+    for fixed_false_field in ("task_created", "thread_created", "session_created"):
+        data[fixed_false_field] = _require_bool(data.get(fixed_false_field), f"{field_name}.{fixed_false_field}")
+        if data[fixed_false_field] is not False:
+            raise ProtocolValidationError(f"{field_name}.{fixed_false_field} must be false")
+    data["roots"] = _validate_project_sync_roots(data.get("roots"), f"{field_name}.roots")
+    data["canonical_body_text"] = _require_text(data.get("canonical_body_text"), f"{field_name}.canonical_body_text")
+    return data
 
 
 def _validate_question_state(value: Any, field_name: str) -> dict[str, Any] | None:
@@ -401,7 +452,45 @@ class RelaySessionUpdateMessage:
                 raise ProtocolValidationError("session_snapshot must be omitted for session_delta messages")
 
 
-RelayServerMessage = RelayHelloAckMessage | RelayPacketAckMessage | RelayErrorMessage | RelaySessionUpdateMessage
+@dataclass(slots=True)
+class RelayBootstrapResultMessage:
+    message_type: str
+    schema_version: str
+    action: str
+    request_id: str
+    packet_id: str
+    receipt_id: str
+    result_id: str
+    sent_at: str
+    sync_project_folders_result: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        if self.message_type != "bootstrap_result":
+            raise ProtocolValidationError("bootstrap_result messages must use message_type='bootstrap_result'")
+        self.schema_version = _require_text(self.schema_version, "schema_version")
+        if self.schema_version != _BOOTSTRAP_SCHEMA_VERSION:
+            raise ProtocolValidationError(f"schema_version must be {_BOOTSTRAP_SCHEMA_VERSION}")
+        self.action = _require_text(self.action, "action")
+        if self.action != _BOOTSTRAP_ACTION_SYNC_PROJECT_FOLDERS:
+            raise ProtocolValidationError(f"action must be {_BOOTSTRAP_ACTION_SYNC_PROJECT_FOLDERS}")
+        self.request_id = _require_text(self.request_id, "request_id")
+        self.packet_id = _require_text(self.packet_id, "packet_id")
+        self.receipt_id = _require_text(self.receipt_id, "receipt_id")
+        self.result_id = _require_text(self.result_id, "result_id")
+        self.sent_at = _require_text(self.sent_at, "sent_at")
+        self.sync_project_folders_result = _validate_sync_project_folders_result(
+            self.sync_project_folders_result,
+            "sync_project_folders_result",
+        )
+
+
+RelayServerMessage = (
+    RelayHelloAckMessage
+    | RelayPacketAckMessage
+    | RelayErrorMessage
+    | RelaySessionUpdateMessage
+    | RelayBootstrapResultMessage
+)
 
 
 def parse_client_message(payload: dict[str, Any]) -> RelayClientMessage:
@@ -423,6 +512,8 @@ def parse_server_message(payload: dict[str, Any]) -> RelayServerMessage:
         return RelayHelloAckMessage(**data)
     if message_type == "packet_ack":
         return RelayPacketAckMessage(**data)
+    if message_type == "bootstrap_result":
+        return RelayBootstrapResultMessage(**data)
     if message_type == "session_update":
         return RelaySessionUpdateMessage(**data)
     if message_type == "error":
@@ -476,6 +567,30 @@ def build_error_message(*, code: str, message: str, sent_at: str) -> dict[str, A
         "message": _require_text(message, "message"),
         "sent_at": _require_text(sent_at, "sent_at"),
     }
+
+
+def build_bootstrap_result(
+    *,
+    request_id: str,
+    packet_id: str,
+    receipt_id: str,
+    result_id: str,
+    sent_at: str,
+    sync_project_folders_result: dict[str, Any],
+) -> dict[str, Any]:
+    payload = {
+        "message_type": "bootstrap_result",
+        "schema_version": _BOOTSTRAP_SCHEMA_VERSION,
+        "action": _BOOTSTRAP_ACTION_SYNC_PROJECT_FOLDERS,
+        "request_id": _require_text(request_id, "request_id"),
+        "packet_id": _require_text(packet_id, "packet_id"),
+        "receipt_id": _require_text(receipt_id, "receipt_id"),
+        "result_id": _require_text(result_id, "result_id"),
+        "sent_at": _require_text(sent_at, "sent_at"),
+        "sync_project_folders_result": _require_mapping(sync_project_folders_result, "sync_project_folders_result"),
+    }
+    RelayBootstrapResultMessage(**payload)
+    return payload
 
 
 def build_session_update(

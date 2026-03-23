@@ -6,11 +6,13 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 import yaml
 
 from .config import AppConfig, PROJECT_ROOT
+from .file_surface import derive_file_surface_url, upload_artifact_to_file_surface
 from .models import ExternalDelivery, OutgoingAttachment, RunArtifact, RunResult
 
 _LOCAL_COS_CONFIG_PATH = PROJECT_ROOT / "mail_config.cos.local.yaml"
@@ -124,21 +126,48 @@ def _build_object_key(
     return candidate
 
 
+def _resolve_file_surface_url(config: AppConfig) -> str | None:
+    if str(config.outbound_transport or "").strip().lower() != "relay":
+        return None
+    if not str(config.relay_transport_token or "").strip():
+        return None
+    relay_url = str(config.relay_url or "").strip()
+    if not relay_url:
+        return None
+    try:
+        return derive_file_surface_url(relay_url)
+    except ValueError:
+        return None
+
+
+def _absolute_file_surface_url(file_surface_url: str, location: str) -> str:
+    parsed_location = urlsplit(str(location or "").strip())
+    if parsed_location.scheme and parsed_location.netloc:
+        return urlunsplit(parsed_location)
+    parsed_surface = urlsplit(file_surface_url)
+    normalized_path = str(location or "").strip() or parsed_surface.path
+    return urlunsplit((parsed_surface.scheme, parsed_surface.netloc, normalized_path, "", ""))
+
+
 def prepare_external_deliveries(
     config: AppConfig,
     *,
     artifacts: list[RunArtifact],
     attachments: list[OutgoingAttachment],
     result: RunResult | None,
+    task_root: str | Path | None = None,
     cos_client_factory: CosClientFactory | None = None,
 ) -> tuple[list[RunArtifact], list[OutgoingAttachment], list[ExternalDelivery], list[str]]:
     if result is None or not artifacts or not attachments:
         return list(artifacts), list(attachments), [], []
 
     settings = _resolve_cos_settings(config)
+    file_surface_url = _resolve_file_surface_url(config)
+    resolved_task_root = Path(task_root) if task_root is not None else None
     threshold_bytes = max(int(config.external_delivery_threshold_mb), 0) * 1024 * 1024
     if settings is None:
-        return list(artifacts), list(attachments), [], []
+        if file_surface_url is None or resolved_task_root is None:
+            return list(artifacts), list(attachments), [], []
 
     attachment_map = {
         _artifact_attachment_key(item.path, item.name or Path(item.path).name): item for item in attachments
@@ -165,48 +194,98 @@ def prepare_external_deliveries(
             effective_artifacts.append(artifact)
             continue
 
-        object_key = _build_object_key(
-            object_prefix=settings["object_prefix"],
-            result=result,
-            artifact=artifact,
-            used_keys=used_object_keys,
-        )
+        if settings is not None:
+            object_key = _build_object_key(
+                object_prefix=settings["object_prefix"],
+                result=result,
+                artifact=artifact,
+                used_keys=used_object_keys,
+            )
+            try:
+                if cos_client is None:
+                    cos_client = (cos_client_factory or _build_cos_client)(settings)
+                cos_client.upload_file(
+                    Bucket=settings["bucket"],
+                    Key=object_key,
+                    LocalFilePath=str(artifact_path),
+                    EnableMD5=True,
+                )
+                download_url = cos_client.get_presigned_download_url(
+                    Bucket=settings["bucket"],
+                    Key=object_key,
+                    Expired=int(config.cos_presign_expire_seconds),
+                )
+                expires_at = (
+                    datetime.now(timezone.utc) + timedelta(seconds=int(config.cos_presign_expire_seconds))
+                ).replace(microsecond=0)
+                deliveries.append(
+                    ExternalDelivery(
+                        artifact_id=artifact.artifact_id,
+                        name=artifact.name,
+                        provider="cos",
+                        url=str(download_url),
+                        expires_at=expires_at.isoformat(),
+                        object_key=object_key,
+                        size_bytes=artifact_path.stat().st_size,
+                        content_type=artifact.content_type,
+                        bucket=settings["bucket"],
+                        path=str(artifact_path),
+                    )
+                )
+                externalized_keys.add(attachment_key)
+                effective_artifacts.append(replace(artifact, inline_preview=False))
+                _, object_name_notice = _external_object_name(artifact.name)
+                if object_name_notice:
+                    notices.append(object_name_notice)
+            except Exception as exc:
+                externalized_keys.add(attachment_key)
+                effective_artifacts.append(replace(artifact, inline_preview=False))
+                notices.append(
+                    f"External delivery failed for {artifact.name}: {exc}. "
+                    "The file was not attached to avoid mail size limits."
+                )
+            continue
+
         try:
-            if cos_client is None:
-                cos_client = (cos_client_factory or _build_cos_client)(settings)
-            cos_client.upload_file(
-                Bucket=settings["bucket"],
-                Key=object_key,
-                LocalFilePath=str(artifact_path),
-                EnableMD5=True,
+            upload_result = upload_artifact_to_file_surface(
+                resolved_task_root,
+                result,
+                artifact,
+                file_surface_url=file_surface_url,
+                transport_token=config.relay_transport_token,
+                role="attachment",
+                timeout_seconds=config.relay_timeout_seconds,
+                verify_tls=config.relay_verify_tls,
+                ca_file=config.relay_ca_file or None,
+                trace_id=result.task_id,
             )
-            download_url = cos_client.get_presigned_download_url(
-                Bucket=settings["bucket"],
-                Key=object_key,
-                Expired=int(config.cos_presign_expire_seconds),
+            artifact_descriptor = (
+                upload_result.descriptor.get("artifact")
+                if isinstance(upload_result.descriptor, dict)
+                else None
             )
-            expires_at = (
-                datetime.now(timezone.utc) + timedelta(seconds=int(config.cos_presign_expire_seconds))
-            ).replace(microsecond=0)
+            if not upload_result.success or not isinstance(artifact_descriptor, dict):
+                raise RuntimeError(upload_result.error_message or upload_result.error_code or "upload failed")
+            file_id = str(artifact_descriptor.get("file_id") or "").strip()
+            download_url = str(artifact_descriptor.get("download_url") or "").strip()
+            if not file_id or not download_url:
+                raise RuntimeError("upload response missing file_id or download_url")
             deliveries.append(
                 ExternalDelivery(
                     artifact_id=artifact.artifact_id,
                     name=artifact.name,
-                    provider="cos",
-                    url=str(download_url),
-                    expires_at=expires_at.isoformat(),
-                    object_key=object_key,
+                    provider="file_surface",
+                    url=_absolute_file_surface_url(file_surface_url, download_url),
+                    expires_at=str(upload_result.descriptor.get("stored_at") or "not_applicable"),
+                    object_key=file_id,
                     size_bytes=artifact_path.stat().st_size,
                     content_type=artifact.content_type,
-                    bucket=settings["bucket"],
+                    bucket="relay-file-surface",
                     path=str(artifact_path),
                 )
             )
             externalized_keys.add(attachment_key)
             effective_artifacts.append(replace(artifact, inline_preview=False))
-            _, object_name_notice = _external_object_name(artifact.name)
-            if object_name_notice:
-                notices.append(object_name_notice)
         except Exception as exc:
             externalized_keys.add(attachment_key)
             effective_artifacts.append(replace(artifact, inline_preview=False))

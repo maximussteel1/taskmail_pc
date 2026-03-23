@@ -9,7 +9,7 @@ from typing import Any
 
 from .mail_io import SYSTEM_MESSAGE_HEADER, SYSTEM_MESSAGE_HEADER_VALUE
 from .models import RunResult, ThreadState
-from .session_action_closeout import ACTION_TYPE_HEADER, target_session_identity_from_headers
+from .session_action_closeout import ACTION_TYPE_HEADER, RECEIPT_ID_HEADER, target_session_identity_from_headers
 from .workspace import WorkspaceManager
 
 _RAW_MAIL_RE = re.compile(r"^raw_(?P<index>\d+)\.json$")
@@ -77,6 +77,7 @@ def build_run_canonical_summary(
 
     request_id = str(ingress_headers.get(_REQUEST_ID_HEADER) or "").strip() or None
     packet_id = str(ingress_headers.get(_PACKET_ID_HEADER) or "").strip() or None
+    receipt_id = str(ingress_headers.get(RECEIPT_ID_HEADER) or "").strip() or None
     is_direct_bridge = str(ingress_headers.get(_DIRECT_HEADER) or "").strip() == "1"
     ingress_message_id = None
     if isinstance(ingress_payload, dict):
@@ -93,6 +94,7 @@ def build_run_canonical_summary(
         "ingress_message_id": ingress_message_id,
         "request_id": request_id,
         "packet_id": packet_id,
+        "receipt_id": receipt_id,
         "action_type": action_type,
         "target_session_identity": target_session_identity,
         "last_summary": state.last_summary,

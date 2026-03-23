@@ -200,6 +200,7 @@ task.md
 .\scripts\fetch_user_mails.cmd
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\manage_mail_runner.ps1 status
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\manage_mail_runner.ps1 stop
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\safe_shutdown_mail_runner.ps1 -ConfigPath .\_tmp_live_mail_runner\mail_config.loop_30s.yaml -RuntimeDir .\_tmp_live_mail_runner
 ```
 
 脚本默认行为：
@@ -209,6 +210,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\manage_mail_runner
 - `scripts\manage_mail_runner.ps1` 的 `status / stop / restart` 会优先通过 `Win32_Process` 识别当前 `mail_runner.host` 和同配置下残留的 legacy `mail_runner.app --loop`；如果当前 shell 无法读取 `Win32_Process`，则会回退到 `host_state.json + loop.pid` 做稳定管理
 - `scripts\manage_mail_runner.ps1` 在 `start / restart` 时会额外等待 host 进入稳定存活窗口，不再只因为 `host_state.json` 刚写出就判定启动成功；若 `stop / start` 失败，错误里会附带 `host_state`、`loop.pid` 和最近日志 tail 便于排障
 - `scripts\manage_mail_runner.ps1 detach-restart` 现在会先安排一个外部 detached launcher，再由该 launcher 执行真正的 `restart`；邮件里的 `/restart-runner` 会走这条受控路径，避免任务内联 `restart` 直接把承载自己的 host 杀掉
+- `scripts\safe_shutdown_mail_runner.ps1` 会把“跨电脑 handoff 停服”固化成一个安全流程：要求显式 `ConfigPath` / `RuntimeDir`，按同一份 config 解析 `task_root`，拒绝在 `thread_state.json` 仍有 `accepted/running` 时执行强制 shutdown，停服后再复核 `status` 并检查同 task root 下的 tracked Codex sidecars
 - 运行态 pid、stdout/stderr 和辅助脚本都落在 `._tmp_live_mail_runner\`
 - `loop.pid` 现在会记录 launcher/host 两个 pid，便于在受限 shell 下稳定 `stop / restart`
 - `status` 会先显示 `host_state.json`，再显示当前进程信息；拿不到完整命令行时会退回到 pid 文件 / host state 的有限视图

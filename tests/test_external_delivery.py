@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import json
 import sys
+import threading
 from types import SimpleNamespace
 from pathlib import Path
 
 from mail_runner.config import AppConfig
+from mail_runner.file_surface import ARTIFACT_FILE_BINDING_INDEX_FILENAME
 from mail_runner.external_delivery import _build_cos_client, prepare_external_deliveries
 from mail_runner.models import OutgoingAttachment, RunArtifact, RunResult
+from mail_runner.relay_server.app import build_http_server
+from mail_runner.relay_server.config import RelayServerConfig
+from mail_runner.relay_server.session_store import InMemorySessionStore
 from mail_runner.status import BACKEND_OPENCODE, RUN_STATUS_SUCCESS
 
 
@@ -231,3 +237,141 @@ def test_prepare_external_deliveries_renames_apk_object_key_for_cos_default_doma
     assert len(notices) == 1
     assert "blocks direct APK distribution" in notices[0]
     assert "rename the downloaded file back to app.apk" in notices[0]
+
+
+def test_prepare_external_deliveries_externalizes_oversized_artifact_to_relay_file_surface(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact_path = tmp_path / "preview.png"
+    artifact_path.write_bytes(b"\x89PNG\r\n\x1a\nrelay-surface")
+    artifact = RunArtifact(
+        artifact_id="artifact-preview",
+        path=str(artifact_path),
+        name="preview.png",
+        kind="image",
+        content_type="image/png",
+        source="directory_fallback",
+        attach=True,
+        inline_preview=True,
+        caption="Preview image",
+    )
+    attachment = OutgoingAttachment(
+        path=str(artifact_path),
+        name="preview.png",
+        content_type="image/png",
+        attach=True,
+        inline=True,
+        caption="Preview image",
+    )
+    config = RelayServerConfig(
+        host="127.0.0.1",
+        port=0,
+        transport_token="relay-secret",
+        state_dir=str(tmp_path / "relay_state"),
+    )
+    server = build_http_server(config, session_store=InMemorySessionStore())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setattr("mail_runner.external_delivery._load_local_cos_config", lambda: {})
+        host, port = server.server_address[:2]
+        effective_artifacts, remaining_attachments, deliveries, notices = prepare_external_deliveries(
+            AppConfig(
+                outbound_transport="relay",
+                relay_url=f"ws://{host}:{port}/relay",
+                relay_transport_token="relay-secret",
+                relay_timeout_seconds=5,
+                external_delivery_threshold_mb=0,
+            ),
+            artifacts=[artifact],
+            attachments=[attachment],
+            result=_result(),
+            task_root=tmp_path / "tasks",
+        )
+
+        assert remaining_attachments == []
+        assert notices == []
+        assert len(deliveries) == 1
+        assert deliveries[0].provider == "file_surface"
+        assert deliveries[0].url.startswith(f"http://{host}:{port}/v1/files/")
+        assert deliveries[0].object_key.startswith("file_")
+        assert effective_artifacts[0].inline_preview is False
+
+        sidecar_path = tmp_path / "tasks" / "thread_001" / "runs" / "task_001" / "artifacts" / ARTIFACT_FILE_BINDING_INDEX_FILENAME
+        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        binding = payload["items"][0]["bindings"][0]
+        assert binding["status"] == "uploaded"
+        assert binding["file_id"] == deliveries[0].object_key
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_prepare_external_deliveries_records_relay_file_surface_failure_without_attaching_file(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact_path = tmp_path / "report.txt"
+    artifact_path.write_text("relay-surface failure", encoding="utf-8")
+    artifact = RunArtifact(
+        artifact_id="artifact-report",
+        path=str(artifact_path),
+        name="report.txt",
+        kind="file",
+        content_type="text/plain",
+        source="directory_fallback",
+        attach=True,
+        inline_preview=False,
+        caption="Run report",
+    )
+    attachment = OutgoingAttachment(
+        path=str(artifact_path),
+        name="report.txt",
+        content_type="text/plain",
+        attach=True,
+        inline=False,
+        caption="Run report",
+    )
+    config = RelayServerConfig(
+        host="127.0.0.1",
+        port=0,
+        transport_token="relay-secret",
+        state_dir=str(tmp_path / "relay_state"),
+    )
+    server = build_http_server(config, session_store=InMemorySessionStore())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setattr("mail_runner.external_delivery._load_local_cos_config", lambda: {})
+        host, port = server.server_address[:2]
+        effective_artifacts, remaining_attachments, deliveries, notices = prepare_external_deliveries(
+            AppConfig(
+                outbound_transport="relay",
+                relay_url=f"ws://{host}:{port}/relay",
+                relay_transport_token="wrong-secret",
+                relay_timeout_seconds=5,
+                external_delivery_threshold_mb=0,
+            ),
+            artifacts=[artifact],
+            attachments=[attachment],
+            result=_result(),
+            task_root=tmp_path / "tasks",
+        )
+
+        assert remaining_attachments == []
+        assert deliveries == []
+        assert len(notices) == 1
+        assert "transport token mismatch" in notices[0]
+        assert effective_artifacts[0].inline_preview is False
+
+        sidecar_path = tmp_path / "tasks" / "thread_001" / "runs" / "task_001" / "artifacts" / ARTIFACT_FILE_BINDING_INDEX_FILENAME
+        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        binding = payload["items"][0]["bindings"][0]
+        assert binding["status"] == "failed"
+        assert binding["error_code"] == "unauthorized"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

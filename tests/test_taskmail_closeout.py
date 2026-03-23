@@ -16,6 +16,7 @@ def _create_thread_with_canonical_run(
     *,
     terminal_mail_message_id: str | None = "<done@example.com>",
     terminal_mail_subject: str | None = "[DONE][S:thread_001] Demo task",
+    receipt_id: str | None = "relay-receipt:req_001",
     action_type: str | None = None,
     target_session_identity: dict[str, str] | None = None,
 ) -> tuple:
@@ -49,6 +50,7 @@ def _create_thread_with_canonical_run(
                 "Subject": "[CX] Demo task",
                 "X-TaskMail-Direct": "1",
                 "X-TaskMail-Relay-Request-Id": "req_001",
+                **({"X-TaskMail-Relay-Receipt-Id": receipt_id} if receipt_id is not None else {}),
             },
         },
         task_root,
@@ -65,6 +67,7 @@ def _create_thread_with_canonical_run(
             "ingress_message_id": "<ingress@example.com>",
             "request_id": "req_001",
             "packet_id": "android-taskmail:new-task:req_001",
+            "receipt_id": receipt_id,
             "action_type": action_type,
             "target_session_identity": target_session_identity,
             "last_summary": "PHASE5_BIND_001",
@@ -122,6 +125,7 @@ def _write_status_session_action_closeout(
     *,
     request_id: str = "req_002",
     ingress_message_id: str = "<status-bridge@example.com>",
+    receipt_id: str | None = "relay-receipt:req_002",
     terminal_mail_subject: str = "[STATUS][S:session_001] Demo task",
     last_summary: str = "Still running.",
 ) -> None:
@@ -132,7 +136,37 @@ def _write_status_session_action_closeout(
         request_id=request_id,
         ingress_message_id=ingress_message_id,
         packet_id=f"android-taskmail:session-action:{request_id}",
+        receipt_id=receipt_id,
         terminal_mail_subject=terminal_mail_subject,
+        last_summary=last_summary,
+        target_session_identity={
+            "workspace_id": "workspace_demo",
+            "session_id": "session_001",
+            "thread_id": "thread_001",
+        },
+    )
+
+
+def _write_reply_session_action_closeout(
+    task_root,
+    *,
+    request_id: str = "req_001",
+    ingress_message_id: str = "<ingress@example.com>",
+    receipt_id: str | None = "relay-receipt:req_001",
+    terminal_mail_message_id: str | None = "<done@example.com>",
+    terminal_mail_subject: str = "[DONE][S:thread_001] Demo task",
+    last_summary: str = "PHASE5_BIND_001",
+) -> None:
+    write_session_action_closeout(
+        task_root,
+        thread_id="thread_001",
+        action_type="reply",
+        request_id=request_id,
+        ingress_message_id=ingress_message_id,
+        packet_id=f"android-taskmail:session-action:{request_id}",
+        receipt_id=receipt_id,
+        terminal_mail_subject=terminal_mail_subject,
+        terminal_mail_message_id=terminal_mail_message_id,
         last_summary=last_summary,
         target_session_identity={
             "workspace_id": "workspace_demo",
@@ -250,11 +284,35 @@ def test_build_taskmail_daily_closeout_bundle_preserves_post_creation_identity_f
 
     assert bundle["pc_canonical_outcome"]["source"] == "canonical_summary"
     assert bundle["pc_canonical_outcome"]["action_type"] == "reply"
+    assert bundle["pc_canonical_outcome"]["receipt_id"] == "relay-receipt:req_001"
     assert bundle["pc_canonical_outcome"]["target_session_identity"] == {
         "workspace_id": "workspace_demo",
         "session_id": "session_001",
         "thread_id": "thread_001",
     }
+
+
+def test_build_taskmail_daily_closeout_bundle_prefers_session_action_closeout_for_direct_reply(tmp_path) -> None:
+    task_root, _ = _create_thread_with_canonical_run(
+        tmp_path,
+        action_type="reply",
+        target_session_identity={
+            "workspace_id": "workspace_demo",
+            "session_id": "session_001",
+            "thread_id": "thread_001",
+        },
+    )
+    _save_system_mail(task_root, message_id="<done@example.com>", subject="[DONE][S:thread_001] Demo task")
+    _write_reply_session_action_closeout(task_root)
+
+    bundle = build_taskmail_daily_closeout_bundle("thread_001", task_root)
+
+    assert bundle["bundle_presence"]["pc_session_action_closeout"] is True
+    assert bundle["pc_canonical_outcome"]["source"] == "session_action_closeout"
+    assert bundle["pc_canonical_outcome"]["action_type"] == "reply"
+    assert bundle["pc_canonical_outcome"]["request_id"] == "req_001"
+    assert bundle["pc_canonical_outcome"]["receipt_id"] == "relay-receipt:req_001"
+    assert bundle["pc_supporting_evidence"]["session_action_closeout"]["resolution"] == "request_id"
 
 
 def test_build_taskmail_daily_closeout_bundle_falls_back_to_terminal_subject_without_fixed_raw_number(tmp_path) -> None:
@@ -397,6 +455,7 @@ def test_build_taskmail_daily_closeout_bundle_reads_session_action_closeout_when
     assert bundle["bundle_presence"]["pc_session_action_closeout"] is True
     assert bundle["pc_canonical_outcome"]["source"] == "session_action_closeout"
     assert bundle["pc_canonical_outcome"]["action_type"] == "status"
+    assert bundle["pc_canonical_outcome"]["receipt_id"] == "relay-receipt:req_002"
     assert bundle["pc_canonical_outcome"]["target_session_identity"] == {
         "workspace_id": "workspace_demo",
         "session_id": "session_001",

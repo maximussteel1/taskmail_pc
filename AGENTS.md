@@ -77,3 +77,36 @@ future platform ideas.
   affects shared runtime paths.
 - For documentation-only changes, tests are optional unless examples or command
   paths were altered.
+
+## Service Maintenance
+
+- For local Windows service maintenance, prefer the relay-enabled config
+  `.\mail_config.bot.relay.local.yaml` with runtime dir
+  `.\_tmp_live_mail_runner`.
+- Treat `.\_tmp_live_mail_runner\host_state.json` as the first liveness truth
+  for the hosted runner. Treat `.\_tmp_live_mail_runner\loop.pid` as a
+  supporting hint, not a stronger truth source than `host_state.json`.
+- If maintenance output disagrees, verify the host by checking the PID recorded
+  in `host_state.json` and then reading recent `.\_tmp_live_mail_runner\loop.stderr.log`
+  lines before assuming the runner is down.
+- In agent or other non-interactive shells, `start` / `restart` may time out
+  even after the detached host is already alive. After a timeout, check
+  `host_state.json`, then run `scripts\manage_mail_runner.ps1 status`, before
+  attempting another restart.
+- Use `scripts\manage_mail_runner.ps1` for start/stop/restart/status rather
+  than inventing ad-hoc launch commands. The script now prefers runtime
+  metadata over CIM/WMI process scans and uses an external detached PowerShell
+  launcher so service starts survive non-interactive shells used by coding
+  agents.
+- 对 relay-enabled 配置，`scripts\manage_mail_runner.ps1` 现在还会管理一个
+  `sync_relay_task_root.py --repeat-seconds 2` companion，默认使用仓库根目录
+  `work_bot.pem`，把本地 authoritative `task_root` 持续同步到 VPS relay 可见的
+  `/opt/mail_runner_relay/shared/task_root`。
+- 如果 `status` 显示 host 在跑但 `Relay task-root sync` companion 缺失，
+  不要先回头怀疑 Android direct lane；先修复 companion 或 task-root 可见性，
+  否则 `current-session` direct `reply` / `/status` 可能继续报 locator
+  resolution failure。
+- On this machine, do not switch the detached launcher back to
+  `Register-ScheduledTask` for routine maintenance. In agent/elevated shells it
+  can hang before the host starts. The maintained path is hidden
+  `Start-Process powershell.exe ...` plus `host_state.json` verification.

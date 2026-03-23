@@ -20,6 +20,7 @@ from ..external_delivery import prepare_external_deliveries
 from ..mail_io import SYSTEM_MESSAGE_HEADER, SYSTEM_MESSAGE_HEADER_VALUE
 from ..mail_retention import is_prunable_thread_status_subject
 from ..models import OutgoingAttachment, RunResult, TaskSnapshot, ThreadState
+from ..session_action_closeout import upsert_session_action_closeout
 from ..status import RUN_STATUS_AWAITING_USER_INPUT, RUN_STATUS_SUCCESS
 from ..thread_store import save_raw_mail, save_thread_state
 from .contract import OutboundDispatchRequest, TransportReceipt
@@ -176,6 +177,55 @@ def _load_captured_reply(task_root: Path, result: RunResult | None) -> str | Non
     return None
 
 
+def _maybe_upsert_direct_post_creation_closeout_from_summary(
+    task_root: Path,
+    state: ThreadState,
+    *,
+    summary_path: Path,
+) -> None:
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception:
+        LOGGER.exception("Unable to read canonical run summary for post-creation closeout. thread=%s", state.thread_id)
+        return
+
+    if not isinstance(payload, dict):
+        return
+
+    if str(payload.get("ingress_type") or "").strip() != "direct_bridge":
+        return
+
+    action_type = str(payload.get("action_type") or "").strip().lower()
+    request_id = str(payload.get("request_id") or "").strip()
+    if action_type not in {"reply", "status"} or not request_id:
+        return
+
+    target_session_identity = payload.get("target_session_identity")
+    if not isinstance(target_session_identity, dict):
+        target_session_identity = None
+
+    try:
+        upsert_session_action_closeout(
+            task_root,
+            thread_id=state.thread_id,
+            action_type=action_type,
+            request_id=request_id,
+            ingress_message_id=str(payload.get("ingress_message_id") or "").strip() or None,
+            packet_id=str(payload.get("packet_id") or "").strip() or None,
+            receipt_id=str(payload.get("receipt_id") or "").strip() or None,
+            terminal_mail_subject=str(payload.get("terminal_mail_subject") or "").strip() or None,
+            terminal_mail_message_id=str(payload.get("terminal_mail_message_id") or "").strip() or None,
+            last_summary=str(payload.get("last_summary") or "").strip() or None,
+            target_session_identity=target_session_identity,
+        )
+    except Exception:
+        LOGGER.exception(
+            "Unable to upsert direct post-creation closeout from canonical summary. thread=%s request_id=%s",
+            state.thread_id,
+            request_id,
+        )
+
+
 def _build_dispatcher_for_transport(config: AppConfig, mail_client: Any, *, transport_name: str):
     return build_dispatcher(
         transport_name=transport_name,
@@ -252,6 +302,7 @@ def send_status_update(
             artifacts=resolved_artifacts,
             attachments=resolved_attachments,
             result=result,
+            task_root=task_root,
         )
         effective_notices = [*skipped_attachments, *delivery_notices]
         rendered_mail = render_status_mail(
@@ -334,12 +385,17 @@ def send_status_update(
             )
         if result is not None:
             try:
-                write_run_canonical_summary(
+                summary_path = write_run_canonical_summary(
                     task_root,
                     state,
                     result,
                     terminal_mail_message_id=sent_message_id,
                     terminal_mail_subject=dispatch_request.subject,
+                )
+                _maybe_upsert_direct_post_creation_closeout_from_summary(
+                    task_root,
+                    state,
+                    summary_path=summary_path,
                 )
             except Exception:
                 LOGGER.exception("Unable to write canonical run summary for thread %s", state.thread_id)

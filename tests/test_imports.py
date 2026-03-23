@@ -21,6 +21,7 @@ MODULES = [
     "mail_runner.stream_events",
     "mail_runner.mail_attachments",
     "mail_runner.artifact_resolver",
+    "mail_runner.file_surface",
     "mail_runner.external_delivery",
     "mail_runner.health_semantics",
     "mail_runner.parser",

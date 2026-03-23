@@ -15,6 +15,15 @@ Current plan documents:
 - `artifact_markdown_rendering_plan.md`: Markdown-first artifact rendering and inline-image layering plan.
 - `backend_permission_control_plan.md`: `Permission` field semantics and backend projection plan.
 - `project_folder_sync_entry_plan.md`: first-mail project-folder sync entry plan.
+- `project_folder_sync_relay_single_account_plan.md`: earlier bridge-only `[SYNC]` relay alternative, now superseded by the v2 bootstrap roundtrip contract.
+- `taskmail_bootstrap_control_contract_v2.md`: shared contract freeze for direct `[SYNC]` request, `packet_ack`, direct `bootstrap_result`, replay, and fallback semantics without rewriting current Layer 1 behavior yet.
+- `taskmail_android_pc_control_artifact_companion_note_v0.1.md`: repository-side companion note that acknowledges the shared Android-PC `WebSocket + HTTP` transport shell and freezes the repo-side baseline for upload size, artifact hosting, replay ownership, and auth path.
+- `taskmail_transport_probe_payload_companion_note_v0.1.md`: repository-side companion note that acknowledges the shared `transport_probe` payload, deterministic mail mapping, timeline fields, and probe file-plane baseline.
+- `taskmail_control_plane_repo_responsibility_note_v0.1.md`: repo-side minimal responsibility note for the vNext `/control` endpoint, including admission, accepted/replay authority, and message-set boundaries.
+- `taskmail_file_surface_repo_responsibility_note_v0.1.md`: repo-side minimal responsibility note for the vNext `/v1/files` surface, including upload/download semantics, `artifact_id -> file_id` layering, and file-truth boundaries.
+- `taskmail_artifact_fileid_mapping_sidecar_note_v0.1.md`: repo-side sidecar note for persisting `artifact_id -> file_id` bindings without polluting the local `artifact_index.json` truth layer.
+- `taskmail_relay_accepted_result_replay_evidence_note_v0.1.md`: repo-side evidence note that records what `packets.json`, `delivery_attempts.jsonl`, `server_messages`, and current tests already prove about accepted/result replay continuity.
+- `taskmail_transport_token_reconnect_upload_error_companion_note_v0.1.md`: repo-side companion note that freezes the first auth/reconnect baseline for `/control` + `/v1/files` and the minimum machine-readable upload error shape.
 - `pc_background_hardening_plan.md`: near-term hardening order for the repository as a long-running PC-side background process.
 - `pc_service_hosting_plan.md`: concrete service-hosting plan centered on Windows Task Scheduler plus `mail_runner.host`.
 - `vps_relay_bootstrap_plan.md`: narrow repository-side bootstrap plan for the first VPS relay/control-plane workstream behind the completed outbound layering seam.
@@ -157,6 +166,45 @@ As of 2026-03-23, the repository-side closeout handoff for that post-creation sl
 landed, fixes the next live-evidence pair to current-session direct `/status` plus current-session plain direct
 `reply`, and keeps the next decision focused on closeout evidence and possible Layer 1 upgrade rather than further
 implicit scope growth.
+
+As of 2026-03-23, the first shared bootstrap roundtrip contract artifact is also explicit in
+`docs/plans/taskmail_bootstrap_control_contract_v2.md`. That note intentionally does not overload the current
+bridge-to-mail `taskmail-bootstrap-control-contract-v1` reading; instead it freezes the next-step `[SYNC]` direct
+roundtrip contract as `v2`, with explicit `packet_ack`, direct `bootstrap_result`, replay, and fallback rules while
+keeping `docs/current/*` unchanged until code and closeout evidence land.
+
+As of 2026-03-23, the repository-side companion note for the next shared Android-PC control/file split is also explicit
+in `docs/plans/taskmail_android_pc_control_artifact_companion_note_v0.1.md`. That note does not change current
+repository behavior; it records that the repository planning layer now acknowledges the shared `/control` +
+`/v1/files` shell, shared correlation keys, harness-first sequencing, and a first repo-side baseline for upload size,
+artifact hosting responsibility, replay ownership, and auth path.
+
+As of 2026-03-23, those repo-side baselines are also split into two narrower implementation notes:
+
+- `docs/plans/taskmail_control_plane_repo_responsibility_note_v0.1.md`
+- `docs/plans/taskmail_file_surface_repo_responsibility_note_v0.1.md`
+
+These two notes still do not claim current behavior has changed; they only compress the next `/control` and `/v1/files`
+implementation responsibilities into repository-scoped language so later patches do not have to rediscover the same
+boundary decisions.
+
+As of 2026-03-23, the repository also has two narrower follow-up notes for the remaining transport/file seams:
+
+- `docs/plans/taskmail_artifact_fileid_mapping_sidecar_note_v0.1.md`
+- `docs/plans/taskmail_relay_accepted_result_replay_evidence_note_v0.1.md`
+
+The former freezes how repo-local `artifact_id` truth should project into transport-facing `file_id` bindings, while the
+later records the current relay-side machine-readable evidence baseline for `accepted` continuity and bootstrap-v2
+`result_id` replay continuity.
+
+As of 2026-03-23, the repository also has a narrower companion note for the remaining auth/reconnect/upload-error seam:
+
+- `docs/plans/taskmail_transport_token_reconnect_upload_error_companion_note_v0.1.md`
+
+That note does not change current behavior either. It freezes the repo-side reading that `/control` and `/v1/files`
+share one Bearer transport token, that reconnect is “new connection + new `hello_ack` + old logical request identity”,
+and that `/v1/files` failures must surface as machine-readable JSON errors rather than as silent fallback or silent
+truncation.
 
 As of 2026-03-22, the repository-side first evidence baselines for those three shared Phase 4 artifacts also exist in
 `docs/plans/phase4_dual_stack_parity_checklist.md`, `docs/plans/phase4_mismatch_ledger.md`, and

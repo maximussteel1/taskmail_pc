@@ -38,6 +38,7 @@ Current outbound delivery now supports two transport modes:
 
 - `email`: the PC sends the user-facing status mail directly, which remains the default behavior
 - `relay`: the PC sends one outbound packet to the VPS relay, the VPS persists relay/session continuity for restart recovery, and the VPS sends the user-facing status mail via its own SMTP path
+- relay bootstrap and `healthz` probing now use a direct HTTP client path and do not inherit ambient `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` environment variables from the host process
 
 Current relay boundary:
 
@@ -94,6 +95,11 @@ Current optional direct TaskMail active-detail sidecar boundary:
 - 该动作不创建 task
 - 该动作不创建 runnable thread/session
 - 该动作不触发 Codex / OpenCode backend run
+- 当 relay operator 显式开启 TaskMail direct ingress 时，Android 可通过 `/relay` 提交 bootstrap `sync_project_folders` packet
+- `taskmail-bootstrap-control-contract-v1` 仍表示 bridge-to-mail：relay 接受后把请求桥接回 canonical `[SYNC]` mail ingress，最终结果仍是邮箱中的 `[SYNC] Project Folder List`
+- `taskmail-bootstrap-control-contract-v2` 表示 direct request + direct result：当前 relay runtime 在具备本地 PC truth 时会直接返回 `packet_ack + bootstrap_result`
+- current repo 中，runtime 以已配置 `task_root` 作为本地 truth 可用的运行时信号；v2 handler 读取 runner config 中的 `project_sync_roots`，而不是扫描 relay/VPS 自己的临时目录
+- accepted v2 path 不会额外生成 `[SYNC] Project Folder List` 回复邮件
 
 当前返回内容：
 
@@ -101,12 +107,15 @@ Current optional direct TaskMail active-detail sidecar boundary:
 - 不递归
 - 不列文件
 - 某个根路径不可用时，单独报告该根的错误状态，而不是整次失败
+- v2 `bootstrap_result.sync_project_folders_result.canonical_body_text` 与 canonical `[SYNC] Project Folder List` 正文保持同一业务语义
 
 当前边界：
 
 - `[SYNC]` 回复邮件不携带 task 专用 `state capsule`
 - `[SYNC]` 回复邮件不携带 `question capsule`
 - live mailbox 中，system 生成的 `[SYNC] Project Folder List` 回复全局只保留最新一封；发送新的 `[SYNC]` 回复后，runtime 会删除更早的 `[SYNC]` 系统回复
+- direct `bootstrap_result` 不是 status mail；它同样不携带 `state capsule` / `question capsule`，也不进入 thread/session projection
+- accepted v2 direct path 不参与 `[SYNC]` 邮件保留与清理，因为这一路径不再产出 `[SYNC]` 回复邮件
 - 用户若要真正发任务，仍需另起 `[OC]` 或 `[CX]` 邮件
 
 ### 3.2 New Task Mail

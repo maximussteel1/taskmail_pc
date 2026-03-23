@@ -20,6 +20,7 @@ from mail_runner.mail_io import SYSTEM_MESSAGE_HEADER, SYSTEM_MESSAGE_HEADER_VAL
 from mail_runner.models import MailEnvelope, ParsedMailAction, RunResult, TaskSnapshot
 from mail_runner.runtime_control import list_runner_restart_request_paths, write_runner_restart_request
 from mail_runner.runner import SerialTaskRunner
+from mail_runner.state_capsule import render_state_capsule
 from mail_runner.status import BACKEND_CODEX, BACKEND_OPENCODE, RUN_STATUS_KILLED, THREAD_STATUS_FAILED
 from mail_runner.thread_store import create_thread, load_session_state, load_thread_state, save_raw_mail, save_thread_state
 from mail_runner.workspace import WorkspaceManager
@@ -289,6 +290,66 @@ def _setup_running_thread_with_tool_only_events(task_root) -> None:
     )
 
 
+def _direct_post_creation_headers(
+    *,
+    state,
+    action_type: str,
+    request_id: str,
+    receipt_id: str,
+) -> dict[str, str]:
+    return {
+        "Subject": f"Re: [S:{state.session_id or state.thread_id}] {state.session_name or state.subject_norm or state.thread_id}",
+        "X-TaskMail-Direct": "1",
+        "X-TaskMail-Relay-Request-Id": request_id,
+        "X-TaskMail-Relay-Packet-Id": f"android-taskmail:session-action:{request_id}",
+        "X-TaskMail-Relay-Receipt-Id": receipt_id,
+        "X-TaskMail-Action-Type": action_type,
+        "X-TaskMail-Target-Workspace-Id": state.workspace_id,
+        "X-TaskMail-Target-Session-Id": state.session_id or state.thread_id,
+        "X-TaskMail-Target-Thread-Id": state.thread_id,
+    }
+
+
+def _direct_status_envelope(state, *, request_id: str, receipt_id: str) -> MailEnvelope:
+    subject = f"Re: [S:{state.session_id or state.thread_id}] {state.session_name or state.subject_norm or state.thread_id}"
+    return MailEnvelope(
+        message_id=f"<direct-status-{request_id}@example.com>",
+        subject=subject,
+        from_addr="user@example.com",
+        to_addr="bot@example.com",
+        date="2026-03-23T10:20:00",
+        in_reply_to=state.latest_message_id,
+        references=[state.root_message_id, state.latest_message_id],
+        body_text=f"/status\n\n{render_state_capsule(state)}\n",
+        raw_headers=_direct_post_creation_headers(
+            state=state,
+            action_type="status",
+            request_id=request_id,
+            receipt_id=receipt_id,
+        ),
+    )
+
+
+def _direct_reply_envelope(state, *, request_id: str, receipt_id: str, reply_text: str) -> MailEnvelope:
+    subject = f"Re: [S:{state.session_id or state.thread_id}] {state.session_name or state.subject_norm or state.thread_id}"
+    return MailEnvelope(
+        message_id=f"<direct-reply-{request_id}@example.com>",
+        subject=subject,
+        from_addr="user@example.com",
+        to_addr="bot@example.com",
+        date="2026-03-23T10:21:00",
+        in_reply_to=state.latest_message_id,
+        references=[state.root_message_id, state.latest_message_id],
+        body_text=f"{reply_text}\n\n{render_state_capsule(state)}\n",
+        raw_headers=_direct_post_creation_headers(
+            state=state,
+            action_type="reply",
+            request_id=request_id,
+            receipt_id=receipt_id,
+        ),
+    )
+
+
 def test_process_once_handles_status_query_reply(tmp_path) -> None:
     dispatcher = Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0))
     _setup_existing_thread(tmp_path / "tasks", dispatcher)
@@ -314,6 +375,93 @@ def test_process_once_handles_status_query_reply(tmp_path) -> None:
     assert "\nSummary: Mock run completed successfully.\n" not in client.sent_messages[0]["body"]
     snapshots = list((tmp_path / "tasks" / "thread_001" / "snapshots").glob("*.json"))
     assert len(snapshots) == 1
+
+
+def test_process_once_writes_direct_post_creation_status_closeout_on_local_task_root(tmp_path) -> None:
+    dispatcher = Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0))
+    task_root = tmp_path / "tasks"
+    _setup_existing_thread(task_root, dispatcher)
+    state = load_thread_state("thread_001", task_root)
+    envelope = _direct_status_envelope(
+        state,
+        request_id="req_status_001",
+        receipt_id="relay-receipt:req_status_001",
+    )
+    client = FakeMailClient([envelope])
+    config = AppConfig(from_addr="user@example.com", from_name="Mail Runner", task_root="tasks")
+
+    stats = process_once(config, base_dir=tmp_path, mail_client=client, dispatcher=dispatcher)
+    closeout_payload = json.loads(
+        (
+            task_root
+            / "thread_001"
+            / "session_actions"
+            / "req_status_001"
+            / "session_action_closeout.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert stats == {"fetched": 1, "processed": 1, "skipped": 0, "failed": 0}
+    assert [item["subject"] for item in client.sent_messages] == ["[STATUS][S:thread_001] demo task"]
+    assert closeout_payload["action_type"] == "status"
+    assert closeout_payload["request_id"] == "req_status_001"
+    assert closeout_payload["receipt_id"] == "relay-receipt:req_status_001"
+    assert closeout_payload["ingress_message_id"] == "<direct-status-req_status_001@example.com>"
+    assert closeout_payload["terminal_mail_message_id"] == "<sent-1@example.com>"
+    assert closeout_payload["terminal_mail_subject"] == "[STATUS][S:thread_001] demo task"
+    assert closeout_payload["target_session_identity"] == {
+        "workspace_id": state.workspace_id,
+        "session_id": state.session_id,
+        "thread_id": state.thread_id,
+    }
+
+
+def test_process_once_writes_direct_post_creation_reply_closeout_on_local_task_root(tmp_path) -> None:
+    adapter = RecordingAdapter()
+    dispatcher = Dispatcher(adapter, adapter)
+    task_root = tmp_path / "tasks"
+    _setup_existing_thread(task_root, dispatcher)
+    state = load_thread_state("thread_001", task_root)
+    envelope = _direct_reply_envelope(
+        state,
+        request_id="req_reply_001",
+        receipt_id="relay-receipt:req_reply_001",
+        reply_text="Please continue with the cleanup.",
+    )
+    client = FakeMailClient([envelope])
+    config = AppConfig(from_addr="user@example.com", from_name="Mail Runner", task_root="tasks")
+
+    stats = process_once(config, base_dir=tmp_path, mail_client=client, dispatcher=dispatcher)
+    updated_state = load_thread_state("thread_001", task_root)
+    closeout_payload = json.loads(
+        (
+            task_root
+            / "thread_001"
+            / "session_actions"
+            / "req_reply_001"
+            / "session_action_closeout.json"
+        ).read_text(encoding="utf-8")
+    )
+    canonical_summary = json.loads(
+        (task_root / "thread_001" / "runs" / updated_state.current_task_id / "canonical_summary.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert stats == {"fetched": 1, "processed": 1, "skipped": 0, "failed": 0}
+    assert [item["subject"] for item in client.sent_messages] == [
+        "[ACCEPTED][S:thread_001] demo task",
+        "[RUNNING][S:thread_001] demo task",
+        "[DONE][S:thread_001] demo task",
+    ]
+    assert adapter.snapshots[-1].run_mode == "resume"
+    assert closeout_payload["action_type"] == "reply"
+    assert closeout_payload["request_id"] == "req_reply_001"
+    assert closeout_payload["receipt_id"] == "relay-receipt:req_reply_001"
+    assert closeout_payload["ingress_message_id"] == "<direct-reply-req_reply_001@example.com>"
+    assert closeout_payload["terminal_mail_message_id"] == "<sent-3@example.com>"
+    assert closeout_payload["terminal_mail_subject"] == "[DONE][S:thread_001] demo task"
+    assert canonical_summary["receipt_id"] == "relay-receipt:req_reply_001"
 
 
 def test_process_once_reply_bypasses_new_task_freshness_guard(tmp_path, monkeypatch) -> None:

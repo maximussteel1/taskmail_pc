@@ -4,6 +4,12 @@ param(
     [string]$ConfigPath = "",
     [string]$ProjectRoot = "",
     [string]$RuntimeDir = "",
+    [string]$RelaySyncHost = "",
+    [string]$RelaySyncUser = "",
+    [string]$RelaySyncKeyPath = "",
+    [string]$RelaySyncRemoteTaskRoot = "",
+    [double]$RelaySyncRepeatSeconds = 2.0,
+    [switch]$DisableRelayTaskRootSync,
     [switch]$NoPopup
 )
 
@@ -118,6 +124,305 @@ function Save-PidRecord {
     $payload | ConvertTo-Json | Set-Content -Encoding utf8 -Path $PidFile
 }
 
+function Get-FirstNonEmptyText {
+    param(
+        [string[]]$Candidates
+    )
+
+    foreach ($candidate in $Candidates) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+            return $candidate.Trim()
+        }
+    }
+
+    return ""
+}
+
+function Get-YamlScalarValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$Key,
+        [string]$DefaultValue = ""
+    )
+
+    if (-not (Test-Path $Path)) {
+        return $DefaultValue
+    }
+
+    $pattern = '^\s*' + [regex]::Escape($Key) + '\s*:\s*(.*)$'
+    foreach ($line in Get-Content -Encoding utf8 $Path) {
+        if ($line -notmatch $pattern) {
+            continue
+        }
+
+        $value = $Matches[1].Trim()
+        if ([string]::IsNullOrWhiteSpace($value)) {
+            return $DefaultValue
+        }
+
+        if (
+            (($value.StartsWith("'")) -and ($value.EndsWith("'"))) `
+                -or (($value.StartsWith('"')) -and ($value.EndsWith('"')))
+        ) {
+            return $value.Substring(1, $value.Length - 2)
+        }
+
+        $commentIndex = $value.IndexOf(" #")
+        if ($commentIndex -ge 0) {
+            $value = $value.Substring(0, $commentIndex).TrimEnd()
+        }
+        return $value
+    }
+
+    return $DefaultValue
+}
+
+function Get-UriHost {
+    param(
+        [string]$UriText
+    )
+
+    if ([string]::IsNullOrWhiteSpace($UriText)) {
+        return ""
+    }
+
+    try {
+        return ([System.Uri]$UriText).Host
+    } catch {
+        return ""
+    }
+}
+
+function Get-RelayTaskRootSyncSettings {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedProjectRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedConfigPath,
+        [string]$RelaySyncHost = "",
+        [string]$RelaySyncUser = "",
+        [string]$RelaySyncKeyPath = "",
+        [string]$RelaySyncRemoteTaskRoot = "",
+        [double]$RelaySyncRepeatSeconds = 2.0,
+        [switch]$DisableRelayTaskRootSync
+    )
+
+    $outboundTransport = (Get-YamlScalarValue -Path $ResolvedConfigPath -Key "outbound_transport" -DefaultValue "email").ToLowerInvariant()
+    $relayUrl = Get-YamlScalarValue -Path $ResolvedConfigPath -Key "relay_url"
+    $taskRootText = Get-YamlScalarValue -Path $ResolvedConfigPath -Key "task_root" -DefaultValue "tasks"
+    $resolvedLocalTaskRoot = Resolve-FullPath -BaseDir $ResolvedProjectRoot -PathText $taskRootText
+    $resolvedHost = Get-FirstNonEmptyText @(
+        $RelaySyncHost,
+        $env:MAIL_RUNNER_RELAY_SYNC_HOST,
+        (Get-UriHost -UriText $relayUrl)
+    )
+    $resolvedUser = Get-FirstNonEmptyText @(
+        $RelaySyncUser,
+        $env:MAIL_RUNNER_RELAY_SYNC_USER,
+        "ubuntu"
+    )
+    $resolvedRemoteTaskRoot = Get-FirstNonEmptyText @(
+        $RelaySyncRemoteTaskRoot,
+        $env:MAIL_RUNNER_RELAY_SYNC_REMOTE_TASK_ROOT,
+        "/opt/mail_runner_relay/shared/task_root"
+    )
+    $resolvedKeyPathText = Get-FirstNonEmptyText @(
+        $RelaySyncKeyPath,
+        $env:MAIL_RUNNER_RELAY_SYNC_KEY_PATH,
+        (Join-Path $ResolvedProjectRoot "work_bot.pem")
+    )
+    $resolvedKeyPath = if ([string]::IsNullOrWhiteSpace($resolvedKeyPathText)) {
+        ""
+    } else {
+        Resolve-FullPath -BaseDir $ResolvedProjectRoot -PathText $resolvedKeyPathText
+    }
+
+    $reason = ""
+    $enabled = $false
+    if ($DisableRelayTaskRootSync) {
+        $reason = "disabled by operator flag"
+    } elseif ($RelaySyncRepeatSeconds -le 0) {
+        $reason = "repeat-seconds must be greater than 0"
+    } elseif ($outboundTransport -ne "relay") {
+        $reason = "outbound_transport is not relay"
+    } elseif ([string]::IsNullOrWhiteSpace($relayUrl)) {
+        $reason = "relay_url is missing"
+    } elseif ([string]::IsNullOrWhiteSpace($resolvedHost)) {
+        $reason = "relay host could not be resolved from relay_url"
+    } elseif ([string]::IsNullOrWhiteSpace($resolvedLocalTaskRoot)) {
+        $reason = "task_root could not be resolved"
+    } elseif ([string]::IsNullOrWhiteSpace($resolvedKeyPath) -or (-not (Test-Path $resolvedKeyPath))) {
+        $reason = "relay sync SSH key is missing"
+    } else {
+        $enabled = $true
+    }
+
+    return [pscustomobject]@{
+        Enabled        = $enabled
+        Reason         = $reason
+        RelayUrl       = $relayUrl
+        LocalTaskRoot  = $resolvedLocalTaskRoot
+        Host           = $resolvedHost
+        User           = $resolvedUser
+        KeyPath        = $resolvedKeyPath
+        RemoteTaskRoot = $resolvedRemoteTaskRoot
+        RepeatSeconds  = $RelaySyncRepeatSeconds
+    }
+}
+
+function Get-ManagedProcessesFromPidFile {
+    param(
+        [string]$PidFile = "",
+        [string]$RunnerKind = "managed"
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PidFile)) {
+        return @()
+    }
+
+    $pidRecord = Get-PidRecord -PidFile $PidFile
+    if ($null -eq $pidRecord) {
+        return @()
+    }
+
+    $records = @()
+    foreach ($candidatePid in @($pidRecord.LauncherProcessId, $pidRecord.HostProcessId)) {
+        $normalizedPid = Get-OptionalIntValue -Value $candidatePid
+        if ($null -eq $normalizedPid) {
+            continue
+        }
+        $record = New-RunnerProcessRecordFromPid -ProcessId $normalizedPid -RunnerKind $RunnerKind -CommandLine ("(" + $RunnerKind + " process from pid file)")
+        if ($null -ne $record) {
+            $records += $record
+        }
+    }
+
+    return @($records | Sort-Object ProcessId -Unique)
+}
+
+function Stop-ManagedProcessesFromPidFile {
+    param(
+        [string]$PidFile = ""
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PidFile)) {
+        return
+    }
+
+    $pidRecord = Get-PidRecord -PidFile $PidFile
+    if ($null -eq $pidRecord) {
+        return
+    }
+
+    Stop-RunnerProcessId -ProcessId $pidRecord.LauncherProcessId
+    Stop-RunnerProcessId -ProcessId $pidRecord.HostProcessId
+}
+
+function Wait-ForManagedProcessState {
+    param(
+        [string]$PidFile = "",
+        [Parameter(Mandatory = $true)]
+        [bool]$ShouldExist,
+        [int]$TimeoutSeconds = 10
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $exists = @(Get-ManagedProcessesFromPidFile -PidFile $PidFile).Count -gt 0
+        if ($ShouldExist -and $exists) {
+            return $true
+        }
+        if ((-not $ShouldExist) -and (-not $exists)) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 500
+    }
+
+    return $false
+}
+
+function Wait-ForProcessStable {
+    param(
+        [int]$ProcessId,
+        [int]$TimeoutSeconds = 10,
+        [int]$StableSeconds = 2
+    )
+
+    if ($ProcessId -le 0) {
+        return $false
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $stableSince = $null
+    while ((Get-Date) -lt $deadline) {
+        if ($null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+            if ($null -eq $stableSince) {
+                $stableSince = Get-Date
+            }
+            if (((Get-Date) - $stableSince).TotalSeconds -ge $StableSeconds) {
+                return $true
+            }
+        } else {
+            $stableSince = $null
+        }
+        Start-Sleep -Milliseconds 500
+    }
+
+    return $false
+}
+
+function Get-ManagedProcessDiagnostics {
+    param(
+        [string]$PidFile = "",
+        [string]$StdoutLog = "",
+        [string]$StderrLog = ""
+    )
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::IsNullOrWhiteSpace($PidFile)) {
+        $pidRecord = Get-PidRecord -PidFile $PidFile
+        if ($null -eq $pidRecord) {
+            $lines.Add("pid file: (missing or unreadable)")
+        } else {
+            $lines.Add("pid file launcher_pid=" + $pidRecord.LauncherProcessId + " host_pid=" + $pidRecord.HostProcessId)
+        }
+    }
+
+    $processes = @(Get-ManagedProcessesFromPidFile -PidFile $PidFile -RunnerKind "relay-sync")
+    if ($processes) {
+        $lines.Add("managed_processes:")
+        foreach ($proc in ($processes | Sort-Object ProcessId)) {
+            $lines.Add("  - kind=" + $proc.RunnerKind + " pid=" + $proc.ProcessId + " name=" + $proc.Name + " cmd=" + $proc.CommandLine)
+        }
+    } else {
+        $lines.Add("managed_processes: (none)")
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($StderrLog) -and (Test-Path $StderrLog)) {
+        $stderrTail = @(Get-Content -Encoding utf8 -Tail 20 $StderrLog)
+        if ($stderrTail.Count -gt 0) {
+            $lines.Add("stderr tail:")
+            foreach ($line in $stderrTail) {
+                $lines.Add("  " + $line)
+            }
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($StdoutLog) -and (Test-Path $StdoutLog)) {
+        $stdoutTail = @(Get-Content -Encoding utf8 -Tail 20 $StdoutLog)
+        if ($stdoutTail.Count -gt 0) {
+            $lines.Add("stdout tail:")
+            foreach ($line in $stdoutTail) {
+                $lines.Add("  " + $line)
+            }
+        }
+    }
+
+    return ($lines -join [Environment]::NewLine)
+}
+
 function Quote-PowerShellLiteral {
     param(
         [Parameter(Mandatory = $true)]
@@ -127,26 +432,290 @@ function Quote-PowerShellLiteral {
     return "'" + $Value.Replace("'", "''") + "'"
 }
 
+function Convert-ToEncodedPowerShellCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CommandText
+    )
+
+    return [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($CommandText))
+}
+
+function Get-DetachedLauncherTaskName {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedRuntimeDir,
+        [Parameter(Mandatory = $true)]
+        [string]$Purpose
+    )
+
+    $normalized = ($Purpose.Trim().ToLowerInvariant() + "|" + $ResolvedRuntimeDir.Trim().ToLowerInvariant())
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($normalized)
+        $hashBytes = $sha.ComputeHash($bytes)
+    } finally {
+        $sha.Dispose()
+    }
+    $hash = ([BitConverter]::ToString($hashBytes)).Replace("-", "").Substring(0, 12)
+    return ("MailRunner_" + $Purpose + "_" + $hash)
+}
+
+function Start-DetachedPowerShellViaStartProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PowerShellCommand
+    )
+
+    $encodedCommand = Convert-ToEncodedPowerShellCommand -CommandText $PowerShellCommand
+    Start-Process `
+        -FilePath "powershell.exe" `
+        -WindowStyle Hidden `
+        -ArgumentList @(
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-EncodedCommand", $encodedCommand
+        ) | Out-Null
+    return "start-process"
+}
+
+function Start-ScheduledTaskPowerShellCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TaskName,
+        [Parameter(Mandatory = $true)]
+        [string]$PowerShellCommand
+    )
+
+    $encodedCommand = Convert-ToEncodedPowerShellCommand -CommandText $PowerShellCommand
+    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $action = New-ScheduledTaskAction `
+        -Execute "powershell.exe" `
+        -Argument ("-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand " + $encodedCommand)
+    $trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(5))
+    $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType InteractiveToken -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -StartWhenAvailable `
+        -ExecutionTimeLimit (New-TimeSpan -Hours 0) `
+        -MultipleInstances IgnoreNew
+    Register-ScheduledTask `
+        -TaskName $TaskName `
+        -Action $action `
+        -Trigger $trigger `
+        -Principal $principal `
+        -Settings $settings `
+        -Force | Out-Null
+    Start-ScheduledTask -TaskName $TaskName
+    return ("scheduled-task=" + $TaskName)
+}
+
+function Start-DetachedPowerShellCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedRuntimeDir,
+        [Parameter(Mandatory = $true)]
+        [string]$Purpose,
+        [Parameter(Mandatory = $true)]
+        [string]$PowerShellCommand
+    )
+
+    try {
+        return Start-DetachedPowerShellViaStartProcess -PowerShellCommand $PowerShellCommand
+    } catch {
+        Write-Warning ("Start-Process launcher failed for " + $Purpose + " (" + $ResolvedRuntimeDir + "). Falling back to cmd /c start. error=" + $_.Exception.Message)
+    }
+    $encodedCommand = Convert-ToEncodedPowerShellCommand -CommandText $PowerShellCommand
+    & cmd.exe /c start "" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedCommand | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Detached PowerShell launcher failed with exit code $LASTEXITCODE."
+    }
+    return "cmd-start"
+}
+
+function Start-DetachedRunnerHost {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedProjectRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$PythonPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedConfigPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedRuntimeDir,
+        [Parameter(Mandatory = $true)]
+        [string]$StdoutLog,
+        [Parameter(Mandatory = $true)]
+        [string]$StderrLog
+    )
+
+    $hostCmdLine = (
+        '"' + $PythonPath + '"' +
+        ' -m mail_runner.host --config "' + $ResolvedConfigPath + '"' +
+        ' --runtime-dir "' + $ResolvedRuntimeDir + '"' +
+        ' 1>>"' + $StdoutLog + '"' +
+        ' 2>>"' + $StderrLog + '"'
+    )
+    $launcherCommand = (
+        '$ErrorActionPreference = ''Stop''; ' +
+        'Set-Location -LiteralPath ' + (Quote-PowerShellLiteral -Value $ResolvedProjectRoot) + '; ' +
+        '& cmd.exe /d /c ' + (Quote-PowerShellLiteral -Value $hostCmdLine)
+    )
+    return Start-DetachedPowerShellCommand `
+        -ResolvedRuntimeDir $ResolvedRuntimeDir `
+        -Purpose "Host" `
+        -PowerShellCommand $launcherCommand
+}
+
 function Start-DetachedRunnerRestart {
     param(
         [Parameter(Mandatory = $true)]
         [string]$ScriptPath,
         [Parameter(Mandatory = $true)]
+        [string]$ResolvedProjectRoot,
+        [Parameter(Mandatory = $true)]
         [string]$ResolvedConfigPath,
         [Parameter(Mandatory = $true)]
-        [string]$ResolvedRuntimeDir
+        [string]$ResolvedRuntimeDir,
+        [string]$RelaySyncHost = "",
+        [string]$RelaySyncUser = "",
+        [string]$RelaySyncKeyPath = "",
+        [string]$RelaySyncRemoteTaskRoot = "",
+        [double]$RelaySyncRepeatSeconds = 2.0,
+        [switch]$DisableRelayTaskRootSync,
+        [switch]$NoPopup
     )
 
-    $restartCommand = "Start-Sleep -Seconds 2; & " + (Quote-PowerShellLiteral -Value $ScriptPath) + " restart -ConfigPath " + (Quote-PowerShellLiteral -Value $ResolvedConfigPath) + " -RuntimeDir " + (Quote-PowerShellLiteral -Value $ResolvedRuntimeDir)
-    if ($NoPopup) {
-        $restartCommand += " -NoPopup"
+    $restartArguments = New-Object System.Collections.Generic.List[string]
+    $restartArguments.Add("restart")
+    $restartArguments.Add("-ProjectRoot " + (Quote-PowerShellLiteral -Value $ResolvedProjectRoot))
+    $restartArguments.Add("-ConfigPath " + (Quote-PowerShellLiteral -Value $ResolvedConfigPath))
+    $restartArguments.Add("-RuntimeDir " + (Quote-PowerShellLiteral -Value $ResolvedRuntimeDir))
+    $restartArguments.Add(
+        "-RelaySyncRepeatSeconds " + (
+            Quote-PowerShellLiteral -Value $RelaySyncRepeatSeconds.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+        )
+    )
+    if (-not [string]::IsNullOrWhiteSpace($RelaySyncHost)) {
+        $restartArguments.Add("-RelaySyncHost " + (Quote-PowerShellLiteral -Value $RelaySyncHost))
     }
-    $helper = Start-Process `
-        -FilePath "powershell.exe" `
-        -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $restartCommand) `
+    if (-not [string]::IsNullOrWhiteSpace($RelaySyncUser)) {
+        $restartArguments.Add("-RelaySyncUser " + (Quote-PowerShellLiteral -Value $RelaySyncUser))
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RelaySyncKeyPath)) {
+        $restartArguments.Add("-RelaySyncKeyPath " + (Quote-PowerShellLiteral -Value $RelaySyncKeyPath))
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RelaySyncRemoteTaskRoot)) {
+        $restartArguments.Add("-RelaySyncRemoteTaskRoot " + (Quote-PowerShellLiteral -Value $RelaySyncRemoteTaskRoot))
+    }
+    if ($DisableRelayTaskRootSync) {
+        $restartArguments.Add("-DisableRelayTaskRootSync")
+    }
+    if ($NoPopup) {
+        $restartArguments.Add("-NoPopup")
+    }
+    $restartCommand = "Start-Sleep -Seconds 2; & " + (Quote-PowerShellLiteral -Value $ScriptPath) + " " + ($restartArguments -join " ")
+    return Start-DetachedPowerShellCommand `
+        -ResolvedRuntimeDir $ResolvedRuntimeDir `
+        -Purpose "Restart" `
+        -PowerShellCommand $restartCommand
+}
+
+function Start-RelayTaskRootSync {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedProjectRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$PythonPath,
+        [Parameter(Mandatory = $true)]
+        [object]$SyncSettings,
+        [Parameter(Mandatory = $true)]
+        [string]$PidFile,
+        [Parameter(Mandatory = $true)]
+        [string]$StdoutLog,
+        [Parameter(Mandatory = $true)]
+        [string]$StderrLog
+    )
+
+    if (-not $SyncSettings.Enabled) {
+        throw "Relay task-root sync is not enabled for this config."
+    }
+
+    $syncScriptPath = Join-Path $ResolvedProjectRoot "scripts\sync_relay_task_root.py"
+    if (-not (Test-Path $syncScriptPath)) {
+        throw "Relay task-root sync script not found: $syncScriptPath"
+    }
+
+    New-Item -ItemType Directory -Force -Path $SyncSettings.LocalTaskRoot | Out-Null
+    Remove-Item -LiteralPath $StdoutLog -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $StderrLog -ErrorAction SilentlyContinue
+
+    $process = Start-Process `
+        -FilePath $PythonPath `
+        -WorkingDirectory $ResolvedProjectRoot `
+        -ArgumentList @(
+            "-u",
+            $syncScriptPath,
+            "--host", $SyncSettings.Host,
+            "--user", $SyncSettings.User,
+            "--key-path", $SyncSettings.KeyPath,
+            "--local-task-root", $SyncSettings.LocalTaskRoot,
+            "--remote-task-root", $SyncSettings.RemoteTaskRoot,
+            "--repeat-seconds", $SyncSettings.RepeatSeconds.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+        ) `
+        -RedirectStandardOutput $StdoutLog `
+        -RedirectStandardError $StderrLog `
         -WindowStyle Hidden `
         -PassThru
-    return ("powershell-helper-pid=" + $helper.Id)
+    Save-PidRecord -PidFile $PidFile -HostProcessId $process.Id
+    return $process
+}
+
+function Stop-RelayTaskRootSync {
+    param(
+        [string]$PidFile = "",
+        [string]$StdoutLog = "",
+        [string]$StderrLog = "",
+        [int]$TimeoutSeconds = 10
+    )
+
+    Stop-ManagedProcessesFromPidFile -PidFile $PidFile
+    if (-not (Wait-ForManagedProcessState -PidFile $PidFile -ShouldExist $false -TimeoutSeconds $TimeoutSeconds)) {
+        $diagnostics = Get-ManagedProcessDiagnostics -PidFile $PidFile -StdoutLog $StdoutLog -StderrLog $StderrLog
+        throw ("Relay task-root sync did not stop cleanly.`n" + $diagnostics)
+    }
+    Remove-Item -LiteralPath $PidFile -ErrorAction SilentlyContinue
+}
+
+function Get-RelayTaskRootSyncStatusObject {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$SyncSettings,
+        [Parameter(Mandatory = $true)]
+        [string]$PidFile,
+        [Parameter(Mandatory = $true)]
+        [string]$StdoutLog,
+        [Parameter(Mandatory = $true)]
+        [string]$StderrLog
+    )
+
+    $processes = @(Get-ManagedProcessesFromPidFile -PidFile $PidFile -RunnerKind "relay-sync")
+    return [pscustomobject]@{
+        enabled          = $SyncSettings.Enabled
+        reason           = $SyncSettings.Reason
+        relay_url        = $SyncSettings.RelayUrl
+        local_task_root  = $SyncSettings.LocalTaskRoot
+        host             = $SyncSettings.Host
+        user             = $SyncSettings.User
+        remote_task_root = $SyncSettings.RemoteTaskRoot
+        repeat_seconds   = $SyncSettings.RepeatSeconds
+        pid_file         = $PidFile
+        stdout_log       = $StdoutLog
+        stderr_log       = $StderrLog
+        running          = $processes.Count -gt 0
+        managed_pids     = if ($processes) { (($processes | Sort-Object ProcessId | ForEach-Object { $_.ProcessId }) -join ",") } else { "" }
+    }
 }
 
 function Add-UniqueProcessId {
@@ -200,7 +769,7 @@ function New-RunnerProcessRecordFromPid {
     }
 }
 
-function Get-RunnerProcessesFallback {
+function Get-RunnerProcessesFromMetadata {
     param(
         [ValidateSet("all", "host", "legacy")]
         [string]$Kind = "all",
@@ -208,7 +777,6 @@ function Get-RunnerProcessesFallback {
         [string]$HostStatePath = ""
     )
 
-    Write-RunnerProcessDiscoveryFallbackWarning
     if ($Kind -eq "legacy") {
         return @()
     }
@@ -245,6 +813,18 @@ function Get-RunnerProcessesFallback {
     }
 
     return @($records | Sort-Object ProcessId -Unique)
+}
+
+function Get-RunnerProcessesFallback {
+    param(
+        [ValidateSet("all", "host", "legacy")]
+        [string]$Kind = "all",
+        [string]$PidFile = "",
+        [string]$HostStatePath = ""
+    )
+
+    Write-RunnerProcessDiscoveryFallbackWarning
+    return Get-RunnerProcessesFromMetadata -Kind $Kind -PidFile $PidFile -HostStatePath $HostStatePath
 }
 
 function Stop-RunnerProcessId {
@@ -300,6 +880,17 @@ function Get-RunnerProcesses {
         [ValidateSet("all", "host", "legacy")]
         [string]$Kind = "all"
     )
+
+    $metadataExists = (
+        ((-not [string]::IsNullOrWhiteSpace($PidFile)) -and (Test-Path $PidFile)) `
+        -or ((-not [string]::IsNullOrWhiteSpace($HostStatePath)) -and (Test-Path $HostStatePath))
+    )
+    $metadataMatches = @(
+        Get-RunnerProcessesFromMetadata -Kind $Kind -PidFile $PidFile -HostStatePath $HostStatePath
+    )
+    if ($metadataExists) {
+        return $metadataMatches
+    }
 
     $escapedConfig = [regex]::Escape($ResolvedConfigPath)
     try {
@@ -674,18 +1265,42 @@ $stdoutLog = Join-Path $resolvedRuntimeDir "loop.stdout.log"
 $stderrLog = Join-Path $resolvedRuntimeDir "loop.stderr.log"
 $userFile = Join-Path $resolvedRuntimeDir "loop.user.txt"
 $hostStatePath = Join-Path $resolvedRuntimeDir "host_state.json"
+$relayTaskRootSyncPidFile = Join-Path $resolvedRuntimeDir "relay_task_root_sync.pid"
+$relayTaskRootSyncStdoutLog = Join-Path $resolvedRuntimeDir "relay_task_root_sync.stdout.log"
+$relayTaskRootSyncStderrLog = Join-Path $resolvedRuntimeDir "relay_task_root_sync.stderr.log"
+$relayTaskRootSyncSettings = Get-RelayTaskRootSyncSettings `
+    -ResolvedProjectRoot $resolvedProjectRoot `
+    -ResolvedConfigPath $resolvedConfigPath `
+    -RelaySyncHost $RelaySyncHost `
+    -RelaySyncUser $RelaySyncUser `
+    -RelaySyncKeyPath $RelaySyncKeyPath `
+    -RelaySyncRemoteTaskRoot $RelaySyncRemoteTaskRoot `
+    -RelaySyncRepeatSeconds $RelaySyncRepeatSeconds `
+    -DisableRelayTaskRootSync:$DisableRelayTaskRootSync
 $scriptPath = [System.IO.Path]::GetFullPath($MyInvocation.MyCommand.Path)
 
 if ($Action -eq "detach-restart") {
     $launcherPath = Start-DetachedRunnerRestart `
         -ScriptPath $scriptPath `
+        -ResolvedProjectRoot $resolvedProjectRoot `
         -ResolvedConfigPath $resolvedConfigPath `
-        -ResolvedRuntimeDir $resolvedRuntimeDir
+        -ResolvedRuntimeDir $resolvedRuntimeDir `
+        -RelaySyncHost $RelaySyncHost `
+        -RelaySyncUser $RelaySyncUser `
+        -RelaySyncKeyPath $RelaySyncKeyPath `
+        -RelaySyncRemoteTaskRoot $RelaySyncRemoteTaskRoot `
+        -RelaySyncRepeatSeconds $RelaySyncRepeatSeconds `
+        -DisableRelayTaskRootSync:$DisableRelayTaskRootSync `
+        -NoPopup:$NoPopup
     Write-Output ("Detached mail runner restart scheduled via launcher: " + $launcherPath)
     exit 0
 }
 
 if ($Action -in @("stop", "shutdown", "restart")) {
+    Stop-RelayTaskRootSync `
+        -PidFile $relayTaskRootSyncPidFile `
+        -StdoutLog $relayTaskRootSyncStdoutLog `
+        -StderrLog $relayTaskRootSyncStderrLog
     Stop-RunnerProcesses -ResolvedProjectRoot $resolvedProjectRoot -ResolvedConfigPath $resolvedConfigPath -PidFile $pidFile -HostStatePath $hostStatePath
     if (-not (Wait-ForRunnerState -ResolvedProjectRoot $resolvedProjectRoot -ResolvedConfigPath $resolvedConfigPath -PidFile $pidFile -ShouldExist $false -HostStatePath $hostStatePath)) {
         $diagnostics = Get-RunnerStateDiagnostics `
@@ -715,12 +1330,31 @@ if ($Action -eq "status") {
     $legacyProcs = @($procs | Where-Object { $_.RunnerKind -eq "legacy" })
     $hostState = Get-HostState -HostStatePath $hostStatePath
     $hostPid = Get-HostStatePid -HostState $hostState
+    $syncStatus = Get-RelayTaskRootSyncStatusObject `
+        -SyncSettings $relayTaskRootSyncSettings `
+        -PidFile $relayTaskRootSyncPidFile `
+        -StdoutLog $relayTaskRootSyncStdoutLog `
+        -StderrLog $relayTaskRootSyncStderrLog
     if ($hostState) {
         Write-Output "Host state:"
         $hostState | Format-List | Out-Host
         if (($null -ne $hostPid) -and (-not (Test-HostPidAlive -ProcessId $hostPid))) {
             Write-Warning "host_state.json is stale for this runtime_dir; the recorded host pid is no longer alive."
         }
+    }
+    Write-Output "Relay task-root sync:"
+    $syncStatus | Format-List | Out-Host
+    if ($relayTaskRootSyncSettings.Enabled -and (-not $syncStatus.running)) {
+        Write-Warning "Relay task-root sync is enabled for this relay config but the companion process is not running. Current-session direct actions may fail when the VPS task_root snapshot lags."
+        $syncDiagnostics = Get-ManagedProcessDiagnostics `
+            -PidFile $relayTaskRootSyncPidFile `
+            -StdoutLog $relayTaskRootSyncStdoutLog `
+            -StderrLog $relayTaskRootSyncStderrLog
+        if (-not [string]::IsNullOrWhiteSpace($syncDiagnostics)) {
+            Write-Output $syncDiagnostics
+        }
+    } elseif ((-not $relayTaskRootSyncSettings.Enabled) -and $syncStatus.running) {
+        Write-Warning "Relay task-root sync companion is still running even though sync is disabled for this config."
     }
     if (-not $procs) {
         Write-Output "Mail runner is not running."
@@ -737,12 +1371,39 @@ if ($Action -eq "status") {
 }
 
 $existing = Get-RunnerProcesses -ResolvedProjectRoot $resolvedProjectRoot -ResolvedConfigPath $resolvedConfigPath -PidFile $pidFile -HostStatePath $hostStatePath -Kind all
+$existingSyncProcesses = @(Get-ManagedProcessesFromPidFile -PidFile $relayTaskRootSyncPidFile -RunnerKind "relay-sync")
 if ($existing) {
     Write-Output "Mail runner is already running."
     if (@($existing | Where-Object { $_.RunnerKind -eq "legacy" }).Count -gt 0) {
         Write-Warning "A legacy mail_runner.app --loop process is already using this config. Run restart to migrate cleanly to mail_runner.host."
     }
+    if ($relayTaskRootSyncSettings.Enabled -and (-not $existingSyncProcesses)) {
+        $syncProcess = Start-RelayTaskRootSync `
+            -ResolvedProjectRoot $resolvedProjectRoot `
+            -PythonPath $pythonPath `
+            -SyncSettings $relayTaskRootSyncSettings `
+            -PidFile $relayTaskRootSyncPidFile `
+            -StdoutLog $relayTaskRootSyncStdoutLog `
+            -StderrLog $relayTaskRootSyncStderrLog
+        if (-not (Wait-ForProcessStable -ProcessId $syncProcess.Id)) {
+            $diagnostics = Get-ManagedProcessDiagnostics `
+                -PidFile $relayTaskRootSyncPidFile `
+                -StdoutLog $relayTaskRootSyncStdoutLog `
+                -StderrLog $relayTaskRootSyncStderrLog
+            throw ("Relay task-root sync did not remain alive long enough to be considered stable.`n" + $diagnostics)
+        }
+        Write-Output "Relay task-root sync companion started."
+    } elseif ((-not $relayTaskRootSyncSettings.Enabled) -and $existingSyncProcesses) {
+        Write-Warning "Relay task-root sync companion is still running even though sync is disabled for this config."
+    }
     $existingHostState = Get-HostState -HostStatePath $hostStatePath
+    $existingSyncStatus = Get-RelayTaskRootSyncStatusObject `
+        -SyncSettings $relayTaskRootSyncSettings `
+        -PidFile $relayTaskRootSyncPidFile `
+        -StdoutLog $relayTaskRootSyncStdoutLog `
+        -StderrLog $relayTaskRootSyncStderrLog
+    Write-Output "Relay task-root sync:"
+    $existingSyncStatus | Format-List | Out-Host
     (Get-RunnerDisplayProcesses -Processes $existing -HostState $existingHostState) |
         Select-Object RunnerKind, ProcessId, LauncherProcessId, ParentProcessId, Name, CommandLine |
         Format-List
@@ -750,18 +1411,21 @@ if ($existing) {
     exit 0
 }
 
+Stop-RelayTaskRootSync `
+    -PidFile $relayTaskRootSyncPidFile `
+    -StdoutLog $relayTaskRootSyncStdoutLog `
+    -StderrLog $relayTaskRootSyncStderrLog
 whoami | Set-Content -Path $userFile
 Remove-Item -LiteralPath $stdoutLog -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $stderrLog -ErrorAction SilentlyContinue
-$startedProcess = Start-Process `
-    -FilePath $pythonPath `
-    -ArgumentList @("-m", "mail_runner.host", "--config", $resolvedConfigPath, "--runtime-dir", $resolvedRuntimeDir) `
-    -WorkingDirectory $resolvedProjectRoot `
-    -RedirectStandardOutput $stdoutLog `
-    -RedirectStandardError $stderrLog `
-    -WindowStyle Hidden `
-    -PassThru
-Save-PidRecord -PidFile $pidFile -LauncherProcessId $startedProcess.Id
+$launcherPath = Start-DetachedRunnerHost `
+    -ResolvedProjectRoot $resolvedProjectRoot `
+    -PythonPath $pythonPath `
+    -ResolvedConfigPath $resolvedConfigPath `
+    -ResolvedRuntimeDir $resolvedRuntimeDir `
+    -StdoutLog $stdoutLog `
+    -StderrLog $stderrLog
+Save-PidRecord -PidFile $pidFile
 
 if (-not (Wait-ForRunnerState -ResolvedProjectRoot $resolvedProjectRoot -ResolvedConfigPath $resolvedConfigPath -PidFile $pidFile -ShouldExist $true -HostStatePath $hostStatePath)) {
     $diagnostics = Get-RunnerStateDiagnostics `
@@ -786,15 +1450,40 @@ if (-not (Wait-ForStableHostState -HostStatePath $hostStatePath)) {
 $hostState = Get-HostState -HostStatePath $hostStatePath
 $hostPid = Get-HostStatePid -HostState $hostState
 $storedHostPid = if ($null -ne $hostPid) { $hostPid } else { 0 }
-Save-PidRecord -PidFile $pidFile -LauncherProcessId $startedProcess.Id -HostProcessId $storedHostPid
+Save-PidRecord -PidFile $pidFile -HostProcessId $storedHostPid
+$syncStatus = $null
+if ($relayTaskRootSyncSettings.Enabled) {
+    $syncProcess = Start-RelayTaskRootSync `
+        -ResolvedProjectRoot $resolvedProjectRoot `
+        -PythonPath $pythonPath `
+        -SyncSettings $relayTaskRootSyncSettings `
+        -PidFile $relayTaskRootSyncPidFile `
+        -StdoutLog $relayTaskRootSyncStdoutLog `
+        -StderrLog $relayTaskRootSyncStderrLog
+    if (-not (Wait-ForProcessStable -ProcessId $syncProcess.Id)) {
+        $diagnostics = Get-ManagedProcessDiagnostics `
+            -PidFile $relayTaskRootSyncPidFile `
+            -StdoutLog $relayTaskRootSyncStdoutLog `
+            -StderrLog $relayTaskRootSyncStderrLog
+        throw ("Relay task-root sync did not remain alive long enough to be considered stable.`n" + $diagnostics)
+    }
+}
+$syncStatus = Get-RelayTaskRootSyncStatusObject `
+    -SyncSettings $relayTaskRootSyncSettings `
+    -PidFile $relayTaskRootSyncPidFile `
+    -StdoutLog $relayTaskRootSyncStdoutLog `
+    -StderrLog $relayTaskRootSyncStderrLog
 $started = Get-RunnerProcesses -ResolvedProjectRoot $resolvedProjectRoot -ResolvedConfigPath $resolvedConfigPath -PidFile $pidFile -HostStatePath $hostStatePath -Kind all
 $successLabel = if ($Action -eq "restart") { "restarted" } else { "started" }
 
 Write-Output ("Mail runner " + $successLabel + " with config: " + $resolvedConfigPath)
+Write-Output ("Detached launcher: " + $launcherPath)
 if ($hostState) {
     Write-Output "Host state:"
     $hostState | Format-List
 }
+Write-Output "Relay task-root sync:"
+$syncStatus | Format-List
 (Get-RunnerDisplayProcesses -Processes $started -HostState $hostState) |
     Select-Object RunnerKind, ProcessId, LauncherProcessId, ParentProcessId, Name, CommandLine |
     Format-List

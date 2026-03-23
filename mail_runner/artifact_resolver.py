@@ -8,6 +8,7 @@ import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .file_surface import ARTIFACT_FILE_BINDING_INDEX_FILENAME
 from .models import OutgoingAttachment, RunArtifact, RunResult, ThreadState
 
 _IMAGE_MIME_PREFIX = "image/"
@@ -165,7 +166,7 @@ def _resolve_directory_fallback(artifacts_root: Path) -> _ResolvedArtifacts:
     for path in sorted(artifacts_root.rglob("*")):
         if not path.is_file():
             continue
-        if path.name in {_MANIFEST_FILENAME, _ARTIFACT_INDEX_FILENAME}:
+        if path.name in {_MANIFEST_FILENAME, _ARTIFACT_INDEX_FILENAME, ARTIFACT_FILE_BINDING_INDEX_FILENAME}:
             continue
         if any(part.startswith(".") for part in path.parts):
             continue

@@ -3,40 +3,58 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from html import escape
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from ..config import AppConfig
 from ..mail_io import MailClient
 from ..models import MailEnvelope
 from ..outbound.contract import TransportReceipt
 from ..parser import parse_subject
+from ..project_folder_sync import build_project_folder_sync_body, list_project_folders
 from ..runner import SerialTaskRunner
 from ..status import BACKEND_CODEX, BACKEND_OPENCODE
 from .config import RelayServerConfig
 from .packet_store import AcceptedRelayPacket
-from .protocol import RelayErrorMessage, RelayPacketAckMessage, RelayPacketMessage
+from .protocol import (
+    RelayErrorMessage,
+    RelayPacketAckMessage,
+    RelayPacketMessage,
+    build_bootstrap_result,
+)
 
 _PHASE2_SCHEMA_VERSION = "phase2-direct-outbound-contract-v1"
+_BOOTSTRAP_SCHEMA_VERSION_V1 = "taskmail-bootstrap-control-contract-v1"
+_BOOTSTRAP_SCHEMA_VERSION_V2 = "taskmail-bootstrap-control-contract-v2"
 _DIRECT_CHANNEL = "taskmail_android_direct"
 _DIRECT_ACTION_NEW_TASK = "new_task"
+_DIRECT_ACTION_SYNC_PROJECT_FOLDERS = "sync_project_folders"
 _DIRECT_ORIGIN_CLIENT = "android_taskmail"
 _FALLBACK_POLICY_MAIL = "mail"
 _DIRECT_TRANSPORT_NAME = "relay_direct_new_task"
+_DIRECT_PROJECT_SYNC_TRANSPORT_NAME = "relay_direct_project_sync"
+_DIRECT_PROJECT_SYNC_MAIL_BRIDGE_TRANSPORT_NAME = "relay_direct_project_sync_mail_bridge"
 _BOT_MESSAGE_ID_DOMAIN = "mail-runner.local"
+_SYNC_REQUEST_SUBJECT = "[SYNC]"
+_PROJECT_SYNC_SUMMARY_TEXT = "Project folder sync completed. No task was created."
 _SAFE_MESSAGE_ID_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _SUPPORTED_BACKENDS = {BACKEND_OPENCODE, BACKEND_CODEX}
 _SUPPORTED_MODES = {"modify", "analysis_only"}
 _SUPPORTED_PERMISSIONS = {"default", "highest"}
 _DIRECT_NEW_TASK_FALLBACK_CLASSIFIED_ERROR_CODES = frozenset({"unsupported_action", "direct_temporarily_unavailable"})
 _DIRECT_NEW_TASK_HARD_REJECTION_ERROR_CODES = frozenset({"invalid_payload", "validation_failed", "unauthorized"})
+_DIRECT_PROJECT_SYNC_FALLBACK_CLASSIFIED_ERROR_CODES = frozenset({"unsupported_action", "direct_temporarily_unavailable"})
+_DIRECT_PROJECT_SYNC_HARD_REJECTION_ERROR_CODES = frozenset({"invalid_payload", "validation_failed", "unauthorized"})
 
 DIRECT_NEW_TASK_OUTCOME_ACCEPTED = "accepted"
 DIRECT_NEW_TASK_OUTCOME_FALLBACK_CLASSIFIED_REJECTION = "fallback_classified_rejection"
 DIRECT_NEW_TASK_OUTCOME_HARD_REJECTION = "hard_rejection"
+DIRECT_PROJECT_SYNC_OUTCOME_ACCEPTED = "accepted"
+DIRECT_PROJECT_SYNC_OUTCOME_FALLBACK_CLASSIFIED_REJECTION = "fallback_classified_rejection"
+DIRECT_PROJECT_SYNC_OUTCOME_HARD_REJECTION = "hard_rejection"
 
 
 def _timestamp() -> str:
@@ -104,7 +122,13 @@ def _normalize_permission(value: Any) -> str | None:
     return normalized
 
 
-def _looks_like_direct_packet(task_run_packet: dict[str, Any], dispatch_metadata: dict[str, Any]) -> bool:
+def _looks_like_direct_action_packet(
+    task_run_packet: dict[str, Any],
+    dispatch_metadata: dict[str, Any],
+    *,
+    schema_version: str,
+    action: str,
+) -> bool:
     task_schema = str(task_run_packet.get("schema_version") or "").strip()
     dispatch_schema = str(dispatch_metadata.get("schema_version") or "").strip()
     channel = str(dispatch_metadata.get("channel") or "").strip()
@@ -112,20 +136,57 @@ def _looks_like_direct_packet(task_run_packet: dict[str, Any], dispatch_metadata
     dispatch_action = str(dispatch_metadata.get("action") or "").strip().lower()
     if task_action and dispatch_action and task_action != dispatch_action:
         return False
-    action = task_action or dispatch_action
+    normalized_action = task_action or dispatch_action
     return any(
         item
         for item in (
-            task_schema == _PHASE2_SCHEMA_VERSION,
-            dispatch_schema == _PHASE2_SCHEMA_VERSION,
-            action == _DIRECT_ACTION_NEW_TASK,
-            channel == _DIRECT_CHANNEL and action == _DIRECT_ACTION_NEW_TASK,
+            task_schema == schema_version,
+            dispatch_schema == schema_version,
+            normalized_action == action,
+            channel == _DIRECT_CHANNEL and normalized_action == action,
         )
     )
 
 
 def is_taskmail_direct_packet(message: RelayPacketMessage) -> bool:
-    return _looks_like_direct_packet(message.task_run_packet, message.dispatch_metadata)
+    return _looks_like_direct_action_packet(
+        message.task_run_packet,
+        message.dispatch_metadata,
+        schema_version=_PHASE2_SCHEMA_VERSION,
+        action=_DIRECT_ACTION_NEW_TASK,
+    )
+
+
+def is_taskmail_direct_project_sync_packet(message: RelayPacketMessage) -> bool:
+    task_action = str(message.task_run_packet.get("action") or "").strip().lower()
+    dispatch_action = str(message.dispatch_metadata.get("action") or "").strip().lower()
+    if task_action and dispatch_action and task_action != dispatch_action:
+        return False
+    normalized_action = task_action or dispatch_action
+    channel = str(message.dispatch_metadata.get("channel") or "").strip()
+    return bool(normalized_action == _DIRECT_ACTION_SYNC_PROJECT_FOLDERS and channel == _DIRECT_CHANNEL)
+
+
+def is_taskmail_direct_project_sync_v1_packet(message: RelayPacketMessage) -> bool:
+    return _matches_direct_project_sync_packet(message, schema_version=_BOOTSTRAP_SCHEMA_VERSION_V1)
+
+
+def is_taskmail_direct_project_sync_v2_packet(message: RelayPacketMessage) -> bool:
+    return _matches_direct_project_sync_packet(message, schema_version=_BOOTSTRAP_SCHEMA_VERSION_V2)
+
+
+def _matches_direct_project_sync_packet(message: RelayPacketMessage, *, schema_version: str) -> bool:
+    task_schema = str(message.task_run_packet.get("schema_version") or "").strip()
+    dispatch_schema = str(message.dispatch_metadata.get("schema_version") or "").strip()
+    task_action = str(message.task_run_packet.get("action") or "").strip().lower()
+    dispatch_action = str(message.dispatch_metadata.get("action") or "").strip().lower()
+    if task_action and dispatch_action and task_action != dispatch_action:
+        return False
+    normalized_action = task_action or dispatch_action
+    channel = str(message.dispatch_metadata.get("channel") or "").strip()
+    if normalized_action != _DIRECT_ACTION_SYNC_PROJECT_FOLDERS or channel != _DIRECT_CHANNEL:
+        return False
+    return task_schema == schema_version or dispatch_schema == schema_version
 
 
 def classify_direct_new_task_error_code(error_code: str | None) -> str | None:
@@ -154,6 +215,32 @@ def classify_direct_new_task_server_outcome(message: RelayPacketAckMessage | Rel
     return outcome
 
 
+def classify_direct_project_sync_error_code(error_code: str | None) -> str | None:
+    normalized = str(error_code or "").strip()
+    if not normalized:
+        return None
+    if normalized in _DIRECT_PROJECT_SYNC_FALLBACK_CLASSIFIED_ERROR_CODES:
+        return DIRECT_PROJECT_SYNC_OUTCOME_FALLBACK_CLASSIFIED_REJECTION
+    if normalized in _DIRECT_PROJECT_SYNC_HARD_REJECTION_ERROR_CODES:
+        return DIRECT_PROJECT_SYNC_OUTCOME_HARD_REJECTION
+    return None
+
+
+def classify_direct_project_sync_server_outcome(message: RelayPacketAckMessage | RelayErrorMessage) -> str:
+    if isinstance(message, RelayPacketAckMessage):
+        if message.accepted:
+            return DIRECT_PROJECT_SYNC_OUTCOME_ACCEPTED
+        error_code = message.error_code
+    elif isinstance(message, RelayErrorMessage):
+        error_code = message.code
+    else:
+        raise TypeError("message must be RelayPacketAckMessage or RelayErrorMessage")
+    outcome = classify_direct_project_sync_error_code(error_code)
+    if outcome is None:
+        raise ValueError(f"unsupported direct project sync error code: {str(error_code or '').strip() or '<missing>'}")
+    return outcome
+
+
 @dataclass(slots=True)
 class DirectNewTaskPayload:
     backend: str
@@ -168,6 +255,30 @@ class DirectNewTaskPayload:
     acceptance: list[str]
     request_id: str
     sender_account_uuid: str | None
+
+
+@dataclass(slots=True)
+class DirectProjectSyncPayload:
+    request_id: str
+    sender_account_uuid: str | None
+
+
+@dataclass(slots=True)
+class RelayDirectActionResult:
+    receipt: TransportReceipt
+    server_messages: list[dict[str, Any]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.receipt, TransportReceipt):
+            raise TypeError("receipt must be a TransportReceipt")
+        if not isinstance(self.server_messages, list):
+            raise TypeError("server_messages must be a list[dict]")
+        normalized_messages: list[dict[str, Any]] = []
+        for index, item in enumerate(self.server_messages):
+            if not isinstance(item, dict):
+                raise TypeError(f"server_messages[{index}] must be a dict")
+            normalized_messages.append(dict(item))
+        self.server_messages = normalized_messages
 
 
 class RelayDirectActionError(Exception):
@@ -186,7 +297,7 @@ class RelayDirectPacketHandler(Protocol):
 
     def validate_packet(self, message: RelayPacketMessage) -> None: ...
 
-    def handle_accepted_packet(self, packet: AcceptedRelayPacket) -> TransportReceipt: ...
+    def handle_accepted_packet(self, packet: AcceptedRelayPacket) -> TransportReceipt | RelayDirectActionResult: ...
 
 
 class RelayTaskMailDirectNewTaskHandler:
@@ -345,6 +456,131 @@ class RelayTaskMailDirectNewTaskMailBridge:
         )
 
 
+class RelayTaskMailDirectProjectSyncMailBridge:
+    """Bridges accepted direct project sync packets back into the canonical `[SYNC]` mail ingress path."""
+
+    transport_name = _DIRECT_PROJECT_SYNC_MAIL_BRIDGE_TRANSPORT_NAME
+
+    def __init__(self, config: RelayServerConfig, *, mail_client: MailClient | None = None) -> None:
+        self._config = config
+        self._mail_client = mail_client or MailClient(config.to_taskmail_direct_mail_config())
+        self._bot_mailbox_addr = _require_text(config.taskmail_bot_mailbox_addr, "taskmail_bot_mailbox_addr")
+
+    def matches(self, message: RelayPacketMessage) -> bool:
+        return is_taskmail_direct_project_sync_v1_packet(message)
+
+    def validate_packet(self, message: RelayPacketMessage) -> None:
+        _parse_direct_project_sync_payload(
+            client_trace_id=message.client_trace_id,
+            task_run_packet=message.task_run_packet,
+            dispatch_metadata=message.dispatch_metadata,
+            expected_schema_version=_BOOTSTRAP_SCHEMA_VERSION_V1,
+            version_label="bootstrap v1",
+        )
+        if "attachments" in message.task_run_packet:
+            attachments = message.task_run_packet.get("attachments") or []
+            if attachments:
+                raise RelayDirectActionError(
+                    "unsupported_action",
+                    "attachment-bearing direct TaskMail sync actions are not available in bootstrap v1",
+                )
+
+    def handle_accepted_packet(self, packet: AcceptedRelayPacket) -> TransportReceipt:
+        payload = _parse_direct_project_sync_payload(
+            client_trace_id=packet.client_trace_id,
+            task_run_packet=packet.task_run_packet,
+            dispatch_metadata=packet.dispatch_metadata,
+            expected_schema_version=_BOOTSTRAP_SCHEMA_VERSION_V1,
+            version_label="bootstrap v1",
+        )
+        try:
+            message_id = self._mail_client.send_mail(
+                to_addr=self._bot_mailbox_addr,
+                subject=_SYNC_REQUEST_SUBJECT,
+                body="",
+                headers={
+                    "X-TaskMail-Direct": "1",
+                    "X-TaskMail-Relay-Packet-Id": packet.packet_id,
+                    "X-TaskMail-Relay-Request-Id": payload.request_id,
+                },
+            )
+        except Exception as exc:
+            message = str(exc).strip() or "failed to bridge direct TaskMail sync packet into bot mailbox mail ingress"
+            raise RelayDirectActionError("direct_temporarily_unavailable", message) from exc
+
+        return TransportReceipt(
+            success=True,
+            transport_name=_DIRECT_PROJECT_SYNC_MAIL_BRIDGE_TRANSPORT_NAME,
+            sent_at=_timestamp(),
+            transport_message_id=message_id,
+        )
+
+
+class RelayTaskMailDirectProjectSyncHandler:
+    """Accepts direct `[SYNC]` packets and returns the project-folder listing over relay."""
+
+    transport_name = _DIRECT_PROJECT_SYNC_TRANSPORT_NAME
+
+    def __init__(self, *, config: AppConfig, clock: Callable[[], str] | None = None) -> None:
+        self._config = config
+        self._clock = clock or _timestamp
+
+    def matches(self, message: RelayPacketMessage) -> bool:
+        return is_taskmail_direct_project_sync_v2_packet(message)
+
+    def validate_packet(self, message: RelayPacketMessage) -> None:
+        _parse_direct_project_sync_payload(
+            client_trace_id=message.client_trace_id,
+            task_run_packet=message.task_run_packet,
+            dispatch_metadata=message.dispatch_metadata,
+            expected_schema_version=_BOOTSTRAP_SCHEMA_VERSION_V2,
+            version_label="bootstrap v2",
+        )
+        if "attachments" in message.task_run_packet:
+            attachments = message.task_run_packet.get("attachments") or []
+            if attachments:
+                raise RelayDirectActionError(
+                    "unsupported_action",
+                    "attachment-bearing direct TaskMail sync actions are not available in bootstrap v2",
+                )
+
+    def handle_accepted_packet(self, packet: AcceptedRelayPacket) -> RelayDirectActionResult:
+        payload = _parse_direct_project_sync_payload(
+            client_trace_id=packet.client_trace_id,
+            task_run_packet=packet.task_run_packet,
+            dispatch_metadata=packet.dispatch_metadata,
+            expected_schema_version=_BOOTSTRAP_SCHEMA_VERSION_V2,
+            version_label="bootstrap v2",
+        )
+        scanned_at = self._clock()
+        listings = list_project_folders(list(self._config.project_sync_roots or []))
+        canonical_body_text = build_project_folder_sync_body(listings, scanned_at=scanned_at)
+        result_message = build_bootstrap_result(
+            request_id=payload.request_id,
+            packet_id=packet.packet_id,
+            receipt_id=packet.receipt_id,
+            result_id=f"bootstrap-result:{payload.request_id}",
+            sent_at=scanned_at,
+            sync_project_folders_result={
+                "summary_text": _PROJECT_SYNC_SUMMARY_TEXT,
+                "scanned_at": scanned_at,
+                "task_created": False,
+                "thread_created": False,
+                "session_created": False,
+                "roots": _serialize_project_sync_listings(listings),
+                "canonical_body_text": canonical_body_text,
+            },
+        )
+        return RelayDirectActionResult(
+            receipt=TransportReceipt(
+                success=True,
+                transport_name=_DIRECT_PROJECT_SYNC_TRANSPORT_NAME,
+                sent_at=scanned_at,
+            ),
+            server_messages=[result_message],
+        )
+
+
 def _parse_direct_new_task_payload(
     *,
     client_trace_id: str,
@@ -404,6 +640,78 @@ def _parse_direct_new_task_payload(
         request_id=request_id,
         sender_account_uuid=sender_account_uuid,
     )
+
+
+def _parse_direct_project_sync_payload(
+    *,
+    client_trace_id: str,
+    task_run_packet: dict[str, Any],
+    dispatch_metadata: dict[str, Any],
+    expected_schema_version: str,
+    version_label: str,
+) -> DirectProjectSyncPayload:
+    task_payload = _require_mapping(task_run_packet, "task_run_packet")
+    dispatch_payload = _require_mapping(dispatch_metadata, "dispatch_metadata")
+
+    task_schema = _require_text(task_payload.get("schema_version"), "task_run_packet.schema_version")
+    dispatch_schema = _require_text(dispatch_payload.get("schema_version"), "dispatch_metadata.schema_version")
+    if task_schema != expected_schema_version or dispatch_schema != expected_schema_version:
+        raise RelayDirectActionError(
+            "validation_failed",
+            f"only {expected_schema_version} is supported for direct TaskMail sync actions",
+        )
+
+    task_action = _require_text(task_payload.get("action"), "task_run_packet.action").lower()
+    dispatch_action = _require_text(dispatch_payload.get("action"), "dispatch_metadata.action").lower()
+    if task_action != _DIRECT_ACTION_SYNC_PROJECT_FOLDERS or dispatch_action != _DIRECT_ACTION_SYNC_PROJECT_FOLDERS:
+        raise RelayDirectActionError(
+            "unsupported_action",
+            f"only direct action {_DIRECT_ACTION_SYNC_PROJECT_FOLDERS} is supported in {version_label}",
+        )
+
+    channel = _require_text(dispatch_payload.get("channel"), "dispatch_metadata.channel")
+    if channel != _DIRECT_CHANNEL:
+        raise RelayDirectActionError("invalid_payload", f"dispatch_metadata.channel must be {_DIRECT_CHANNEL}")
+
+    fallback_policy = _require_text(dispatch_payload.get("fallback_policy"), "dispatch_metadata.fallback_policy")
+    if fallback_policy != _FALLBACK_POLICY_MAIL:
+        raise RelayDirectActionError("invalid_payload", "dispatch_metadata.fallback_policy must be mail")
+
+    request_id = _require_text(task_payload.get("request_id"), "task_run_packet.request_id")
+    if _require_text(client_trace_id, "client_trace_id") != request_id:
+        raise RelayDirectActionError("invalid_payload", "client_trace_id must equal task_run_packet.request_id")
+
+    origin = _require_mapping(task_payload.get("origin"), "task_run_packet.origin")
+    origin_client = _require_text(origin.get("client"), "task_run_packet.origin.client")
+    if origin_client != _DIRECT_ORIGIN_CLIENT:
+        raise RelayDirectActionError("invalid_payload", f"origin.client must be {_DIRECT_ORIGIN_CLIENT}")
+    sender_account_uuid = _optional_text(origin.get("sender_account_uuid"), "task_run_packet.origin.sender_account_uuid")
+
+    _require_mapping(task_payload.get("sync_project_folders"), "task_run_packet.sync_project_folders")
+    return DirectProjectSyncPayload(
+        request_id=request_id,
+        sender_account_uuid=sender_account_uuid,
+    )
+
+
+def _serialize_project_sync_listings(listings: list[Any]) -> list[dict[str, Any]]:
+    roots: list[dict[str, Any]] = []
+    for listing in listings:
+        roots.append(
+            {
+                "root_path": listing.root_path,
+                "available": listing.available,
+                "error": listing.error,
+                "entries": [
+                    {
+                        "name": entry.name,
+                        "path": entry.path,
+                    }
+                    for entry in listing.entries
+                ],
+            }
+        )
+    return roots
 
 
 def _build_initial_task_body(payload: DirectNewTaskPayload) -> str:

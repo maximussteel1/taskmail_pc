@@ -42,6 +42,7 @@ from .reporter import (
     MAIL_STATUS_QUESTION,
     MAIL_STATUS_RUNNING,
     MAIL_STATUS_STATUS,
+    build_status_subject,
 )
 from .runtime_control import (
     list_runner_restart_request_paths,
@@ -53,6 +54,13 @@ from .runtime_control import (
     write_runner_restart_request,
 )
 from .runner import SerialTaskRunner
+from .session_action_closeout import (
+    ACTION_TYPE_HEADER,
+    RECEIPT_ID_HEADER,
+    build_target_session_identity,
+    target_session_identity_from_headers,
+    upsert_session_action_closeout,
+)
 from .session_semantics import effective_thread_status, thread_can_attempt_resume
 from .state_capsule import parse_state_capsule
 from .stream_events import load_stream_events, stream_events_path
@@ -125,6 +133,10 @@ TEMPLATE_FILES = (
 )
 _RUNTIME_DIR_ENV = "MAIL_RUNNER_RUNTIME_DIR"
 _DEFAULT_RUNTIME_DIR = PROJECT_ROOT / "_tmp_live_mail_runner"
+_DIRECT_POST_CREATION_HEADER = "X-TaskMail-Direct"
+_DIRECT_POST_CREATION_REQUEST_ID_HEADER = "X-TaskMail-Relay-Request-Id"
+_DIRECT_POST_CREATION_PACKET_ID_HEADER = "X-TaskMail-Relay-Packet-Id"
+_DIRECT_POST_CREATION_ACTION_TYPES = frozenset({"status", "reply"})
 
 
 def configure_logging(level: int = logging.INFO) -> None:
@@ -1304,6 +1316,76 @@ def _process_existing_thread_mail(
     )
 
 
+def _direct_post_creation_closeout_context(envelope: MailEnvelope) -> dict[str, Any] | None:
+    raw_headers = envelope.raw_headers if isinstance(envelope.raw_headers, dict) else {}
+    if str(raw_headers.get(_DIRECT_POST_CREATION_HEADER) or "").strip() != "1":
+        return None
+
+    request_id = str(raw_headers.get(_DIRECT_POST_CREATION_REQUEST_ID_HEADER) or "").strip()
+    action_type = str(raw_headers.get(ACTION_TYPE_HEADER) or "").strip().lower()
+    if not request_id or action_type not in _DIRECT_POST_CREATION_ACTION_TYPES:
+        return None
+
+    return {
+        "action_type": action_type,
+        "request_id": request_id,
+        "packet_id": str(raw_headers.get(_DIRECT_POST_CREATION_PACKET_ID_HEADER) or "").strip() or None,
+        "receipt_id": str(raw_headers.get(RECEIPT_ID_HEADER) or "").strip() or None,
+        "target_session_identity": target_session_identity_from_headers(raw_headers),
+    }
+
+
+def _fallback_target_session_identity(state: ThreadState) -> dict[str, str] | None:
+    return build_target_session_identity(
+        workspace_id=state.workspace_id,
+        session_id=state.session_id or state.thread_id,
+        thread_id=state.thread_id,
+    )
+
+
+def _maybe_upsert_direct_post_creation_mail_closeout(
+    envelope: MailEnvelope,
+    task_root: Path,
+    *,
+    state: ThreadState,
+    status_label: str,
+    subject_text: str,
+    terminal_mail_message_id: str | None,
+) -> None:
+    context = _direct_post_creation_closeout_context(envelope)
+    if context is None:
+        return
+
+    terminal_mail_subject = None
+    if terminal_mail_message_id is not None:
+        terminal_mail_subject = build_status_subject(
+            status_label,
+            subject_text,
+            state.session_id or state.thread_id,
+        )
+
+    try:
+        upsert_session_action_closeout(
+            task_root,
+            thread_id=state.thread_id,
+            action_type=context["action_type"],
+            request_id=context["request_id"],
+            ingress_message_id=envelope.message_id,
+            packet_id=context["packet_id"],
+            receipt_id=context["receipt_id"],
+            terminal_mail_subject=terminal_mail_subject,
+            terminal_mail_message_id=terminal_mail_message_id,
+            last_summary=state.last_summary,
+            target_session_identity=context["target_session_identity"] or _fallback_target_session_identity(state),
+        )
+    except Exception:
+        LOGGER.exception(
+            "Unable to upsert direct post-creation closeout from mail response. thread=%s request_id=%s",
+            state.thread_id,
+            context["request_id"],
+        )
+
+
 def _send_existing_action_status_update(
     envelope: MailEnvelope,
     config: AppConfig,
@@ -1321,7 +1403,7 @@ def _send_existing_action_status_update(
     summary_override: str | None = None,
     reply_override: str | None = None,
 ) -> str | None:
-    return _send_status_update(
+    sent_message_id = _send_status_update(
         mail_client,
         config,
         task_root,
@@ -1337,6 +1419,15 @@ def _send_existing_action_status_update(
         reply_message_id=None if target_reply_chain else envelope.message_id,
         references=None if target_reply_chain else _build_references(envelope.message_id, envelope.references),
     )
+    _maybe_upsert_direct_post_creation_mail_closeout(
+        envelope,
+        task_root,
+        state=state,
+        status_label=status_label,
+        subject_text=subject_text,
+        terminal_mail_message_id=sent_message_id,
+    )
+    return sent_message_id
 
 
 def _send_current_status_query(

@@ -13,7 +13,7 @@ BackendTransport = Literal["cli", "sdk"]
 LifecycleState = Literal["active", "ended"]
 QuestionType = Literal["single_choice", "boolean", "short_text"]
 ArtifactKind = Literal["image", "file"]
-ExternalDeliveryProvider = Literal["cos"]
+ExternalDeliveryProvider = Literal["cos", "file_surface"]
 PermissionLevel = Literal["default", "highest"]
 MailAction = Literal[
     "NEW_TASK",
@@ -67,7 +67,7 @@ _RUN_STATUSES = set(CURRENT_RUN_STATUSES)
 _SESSION_STATUSES = {"queued", "running", "waiting_user", "paused", "done", "failed", "killed", "archived"}
 _QUESTION_TYPES = {"single_choice", "boolean", "short_text"}
 _ARTIFACT_KINDS = {"image", "file"}
-_EXTERNAL_DELIVERY_PROVIDERS = {"cos"}
+_EXTERNAL_DELIVERY_PROVIDERS = {"cos", "file_surface"}
 _PERMISSION_LEVELS = {"default", "highest"}
 
 

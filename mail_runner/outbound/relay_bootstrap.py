@@ -111,8 +111,9 @@ def probe_healthz(
     normalized_url = str(health_url or "").strip()
     context = _build_http_ssl_context(normalized_url, verify_tls=verify_tls, ca_file=ca_file)
     request = urllib.request.Request(normalized_url, headers={"Accept": "application/json"})
+    opener = _build_direct_http_opener(context)
     try:
-        with urllib.request.urlopen(request, timeout=max(1, int(timeout_seconds)), context=context) as response:
+        with opener.open(request, timeout=max(1, int(timeout_seconds))) as response:
             payload = json.loads(response.read().decode("utf-8"))
             return RelayHealthProbeResult(
                 url=normalized_url,
@@ -329,6 +330,15 @@ def _build_http_ssl_context(url: str, *, verify_tls: bool, ca_file: str | None) 
     elif ca_file:
         context.load_verify_locations(ca_file)
     return context
+
+
+def _build_direct_http_opener(context: ssl.SSLContext | None) -> urllib.request.OpenerDirector:
+    # Relay bootstrap must probe the configured VPS directly rather than
+    # inheriting ambient shell proxy settings.
+    handlers: list[urllib.request.BaseHandler] = [urllib.request.ProxyHandler({})]
+    if context is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=context))
+    return urllib.request.build_opener(*handlers)
 
 
 def _build_websocket_ssl_context(relay_url: str, *, verify_tls: bool, ca_file: str | None) -> ssl.SSLContext | None:

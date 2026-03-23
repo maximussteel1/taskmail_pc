@@ -12,22 +12,24 @@ from typing import Any
 
 from ..config import AppConfig
 from ..mail_io import MailClient
-from ..models import MailEnvelope, ThreadState
+from ..models import MailEnvelope, SessionState, ThreadState
 from ..outbound.contract import TransportReceipt
 from ..parser import parse_subject
 from ..reporter import MAIL_STATUS_PAUSED, MAIL_STATUS_STATUS, build_status_subject
 from ..runner import SerialTaskRunner
 from ..session_action_closeout import (
     ACTION_TYPE_HEADER,
+    RECEIPT_ID_HEADER,
     TARGET_SESSION_ID_HEADER,
     TARGET_THREAD_ID_HEADER,
     TARGET_WORKSPACE_ID_HEADER,
     build_target_session_identity,
-    write_session_action_closeout,
+    upsert_session_action_closeout,
 )
 from ..status import THREAD_STATUS_AWAITING_USER_INPUT, THREAD_STATUS_PAUSED
 from ..state_capsule import render_state_capsule
-from ..thread_store import load_session_state, load_thread_state
+from ..thread_store import build_workspace_id
+from ..thread_store import list_all_thread_states, load_session_state, load_thread_state
 from .config import RelayServerConfig
 from .direct_actions import RelayDirectActionError, RelayDirectPacketHandler
 from .packet_store import AcceptedRelayPacket
@@ -335,41 +337,93 @@ def _resolve_current_session_thread_state(
     payload: DirectCurrentSessionStatusPayload | DirectCurrentSessionReplyPayload,
     task_root: Path,
 ) -> ThreadState:
+    session_state: SessionState | None = None
+    thread_state: ThreadState | None = None
+
     try:
         session_state = load_session_state(payload.workspace_id, payload.session_id, task_root)
-    except FileNotFoundError as exc:
+    except FileNotFoundError:
+        session_state = None
+
+    if session_state is not None:
+        try:
+            thread_state = load_thread_state(session_state.thread_id, task_root)
+        except FileNotFoundError:
+            thread_state = None
+
+    if thread_state is None and payload.thread_id is not None:
+        try:
+            thread_state = load_thread_state(payload.thread_id, task_root)
+        except FileNotFoundError:
+            thread_state = None
+
+    if thread_state is None:
+        candidate_states = [
+            state
+            for state in list_all_thread_states(task_root)
+            if (state.workspace_id or build_workspace_id(state.repo_path, state.workdir)) == payload.workspace_id
+            and (state.session_id or state.thread_id) == payload.session_id
+            and (payload.thread_id is None or state.thread_id == payload.thread_id)
+        ]
+        if len(candidate_states) == 1:
+            thread_state = candidate_states[0]
+        elif len(candidate_states) > 1:
+            raise RelayDirectActionError(
+                "session_identity_unresolved",
+                "multiple thread_state candidates matched the requested current session",
+            )
+
+    if session_state is None and thread_state is None:
         raise RelayDirectActionError(
             "session_identity_unresolved",
             "could not resolve a session for the requested workspace/session locator",
-        ) from exc
-    try:
-        thread_state = load_thread_state(session_state.thread_id, task_root)
-    except FileNotFoundError as exc:
+        )
+
+    if thread_state is None:
         raise RelayDirectActionError(
             "session_identity_unresolved",
-            "session_state exists but backing thread_state is missing",
-        ) from exc
+            "failed to resolve current-session state",
+        )
 
-    if session_state.workspace_id != payload.workspace_id:
+    canonical_workspace_id = (
+        thread_state.workspace_id
+        or session_state.workspace_id
+        or build_workspace_id(thread_state.repo_path, thread_state.workdir)
+    )
+    canonical_session_id = thread_state.session_id or session_state.session_id or thread_state.thread_id
+    canonical_thread_id = thread_state.thread_id
+
+    if payload.workspace_id != canonical_workspace_id:
         raise RelayDirectActionError(
             "session_identity_mismatch",
             "workspace_id does not match the resolved canonical workspace for this session",
         )
-    if session_state.session_id != payload.session_id:
+    if payload.session_id != canonical_session_id:
         raise RelayDirectActionError(
             "session_identity_mismatch",
             "session_id does not match the resolved canonical session",
         )
-    if session_state.thread_id != thread_state.thread_id:
-        raise RelayDirectActionError(
-            "session_identity_unresolved",
-            "session_state and thread_state do not resolve to the same canonical thread",
-        )
-    if payload.thread_id is not None and payload.thread_id != thread_state.thread_id:
+    if payload.thread_id is not None and payload.thread_id != canonical_thread_id:
         raise RelayDirectActionError(
             "session_identity_mismatch",
             "thread_id does not match the resolved canonical thread",
         )
+    if session_state is not None:
+        if session_state.workspace_id != canonical_workspace_id:
+            raise RelayDirectActionError(
+                "session_identity_mismatch",
+                "session_state workspace_id does not match the resolved canonical workspace",
+            )
+        if session_state.session_id != canonical_session_id:
+            raise RelayDirectActionError(
+                "session_identity_mismatch",
+                "session_state session_id does not match the resolved canonical session",
+            )
+        if session_state.thread_id != canonical_thread_id:
+            raise RelayDirectActionError(
+                "session_identity_unresolved",
+                "session_state and thread_state do not resolve to the same canonical thread",
+            )
     return thread_state
 
 
@@ -408,6 +462,7 @@ def _build_post_creation_target_identity(
 def _build_post_creation_headers(
     *,
     packet_id: str,
+    receipt_id: str | None,
     request_id: str,
     action_type: str,
     target_session_identity: dict[str, str] | None,
@@ -418,6 +473,9 @@ def _build_post_creation_headers(
         "X-TaskMail-Relay-Request-Id": request_id,
         ACTION_TYPE_HEADER: action_type,
     }
+    normalized_receipt_id = str(receipt_id or "").strip()
+    if normalized_receipt_id:
+        headers[RECEIPT_ID_HEADER] = normalized_receipt_id
     if target_session_identity is not None:
         if target_session_identity.get("workspace_id") is not None:
             headers[TARGET_WORKSPACE_ID_HEADER] = target_session_identity["workspace_id"]
@@ -470,6 +528,7 @@ def _build_post_creation_status_closeout_subject(target_state: ThreadState) -> s
 def _build_status_envelope(
     *,
     packet_id: str,
+    receipt_id: str | None,
     payload: DirectCurrentSessionStatusPayload,
     from_addr: str,
     to_addr: str,
@@ -490,12 +549,76 @@ def _build_status_envelope(
             "Subject": subject,
             **_build_post_creation_headers(
                 packet_id=packet_id,
+                receipt_id=receipt_id,
                 request_id=payload.request_id,
                 action_type=_DIRECT_ACTION_STATUS,
                 target_session_identity=target_session_identity,
             ),
         },
     )
+
+
+def _status_label_for_thread_state(target_state: ThreadState) -> str:
+    if target_state.status == "accepted":
+        return "ACCEPTED"
+    if target_state.status == "running":
+        return "RUNNING"
+    if target_state.status == "done":
+        return "DONE"
+    if target_state.status == "failed":
+        return "FAILED"
+    if target_state.status == "killed":
+        return "KILLED"
+    if target_state.status == THREAD_STATUS_AWAITING_USER_INPUT:
+        return "QUESTION"
+    if target_state.status == THREAD_STATUS_PAUSED:
+        return MAIL_STATUS_PAUSED
+    return MAIL_STATUS_STATUS
+
+
+def _build_post_creation_reply_closeout_subject(target_state: ThreadState) -> str:
+    return build_status_subject(
+        _status_label_for_thread_state(target_state),
+        _subject_text_for_target_state(target_state),
+        target_state.session_id or target_state.thread_id,
+    )
+
+
+def _maybe_upsert_post_creation_closeout(
+    *,
+    task_root: Path,
+    thread_id: str,
+    action_type: str,
+    request_id: str,
+    ingress_message_id: str | None,
+    packet_id: str | None,
+    receipt_id: str | None,
+    terminal_mail_subject: str | None,
+    terminal_mail_message_id: str | None,
+    last_summary: str | None,
+    target_session_identity: dict[str, str] | None,
+) -> None:
+    try:
+        upsert_session_action_closeout(
+            task_root,
+            thread_id=thread_id,
+            action_type=action_type,
+            request_id=request_id,
+            ingress_message_id=ingress_message_id,
+            packet_id=packet_id,
+            receipt_id=receipt_id,
+            terminal_mail_subject=terminal_mail_subject,
+            terminal_mail_message_id=terminal_mail_message_id,
+            last_summary=last_summary,
+            target_session_identity=target_session_identity,
+        )
+    except Exception:
+        LOGGER.exception(
+            "Unable to write direct current-session %s closeout. thread=%s request_id=%s",
+            action_type,
+            thread_id,
+            request_id,
+        )
 
 
 class RelayTaskMailDirectCurrentSessionStatusHandler:
@@ -552,6 +675,7 @@ class RelayTaskMailDirectCurrentSessionStatusHandler:
         subject_text = _subject_text_for_target_state(target_state)
         envelope = _build_status_envelope(
             packet_id=packet.packet_id,
+            receipt_id=packet.receipt_id,
             payload=payload,
             from_addr=self._recipient_addr,
             to_addr=bot_addr,
@@ -583,24 +707,20 @@ class RelayTaskMailDirectCurrentSessionStatusHandler:
                 "direct TaskMail current-session status could not be processed",
             )
 
-        try:
-            write_session_action_closeout(
-                self._task_root,
-                thread_id=target_state.thread_id,
-                action_type=_DIRECT_ACTION_STATUS,
-                request_id=payload.request_id,
-                ingress_message_id=envelope.message_id,
-                packet_id=packet.packet_id,
-                terminal_mail_subject=_build_post_creation_status_closeout_subject(target_state),
-                last_summary=target_state.last_summary,
-                target_session_identity=target_session_identity,
-            )
-        except Exception:
-            LOGGER.exception(
-                "Unable to write direct current-session status closeout. thread=%s request_id=%s",
-                target_state.thread_id,
-                payload.request_id,
-            )
+        updated_state = load_thread_state(target_state.thread_id, self._task_root)
+        _maybe_upsert_post_creation_closeout(
+            task_root=self._task_root,
+            thread_id=updated_state.thread_id,
+            action_type=_DIRECT_ACTION_STATUS,
+            request_id=payload.request_id,
+            ingress_message_id=envelope.message_id,
+            packet_id=packet.packet_id,
+            receipt_id=packet.receipt_id,
+            terminal_mail_subject=_build_post_creation_status_closeout_subject(updated_state),
+            terminal_mail_message_id=updated_state.latest_message_id,
+            last_summary=updated_state.last_summary,
+            target_session_identity=_build_post_creation_target_identity(payload, updated_state),
+        )
         return TransportReceipt(
             success=True,
             transport_name=self.transport_name,
@@ -671,6 +791,7 @@ class RelayTaskMailDirectCurrentSessionStatusMailBridge:
                 html_body=html_body,
                 headers=_build_post_creation_headers(
                     packet_id=packet.packet_id,
+                    receipt_id=packet.receipt_id,
                     request_id=payload.request_id,
                     action_type=_DIRECT_ACTION_STATUS,
                     target_session_identity=target_session_identity,
@@ -681,24 +802,19 @@ class RelayTaskMailDirectCurrentSessionStatusMailBridge:
             raise RelayDirectActionError("direct_temporarily_unavailable", message) from exc
 
         if target_state is not None and self._task_root is not None:
-            try:
-                write_session_action_closeout(
-                    self._task_root,
-                    thread_id=target_state.thread_id,
-                    action_type=_DIRECT_ACTION_STATUS,
-                    request_id=payload.request_id,
-                    ingress_message_id=message_id,
-                    packet_id=packet.packet_id,
-                    terminal_mail_subject=_build_post_creation_status_closeout_subject(target_state),
-                    last_summary=target_state.last_summary,
-                    target_session_identity=target_session_identity,
-                )
-            except Exception:
-                LOGGER.exception(
-                    "Unable to write direct current-session status closeout. thread=%s request_id=%s",
-                    target_state.thread_id,
-                    payload.request_id,
-                )
+            _maybe_upsert_post_creation_closeout(
+                task_root=self._task_root,
+                thread_id=target_state.thread_id,
+                action_type=_DIRECT_ACTION_STATUS,
+                request_id=payload.request_id,
+                ingress_message_id=message_id,
+                packet_id=packet.packet_id,
+                receipt_id=packet.receipt_id,
+                terminal_mail_subject=_build_post_creation_status_closeout_subject(target_state),
+                terminal_mail_message_id=None,
+                last_summary=target_state.last_summary,
+                target_session_identity=target_session_identity,
+            )
         return TransportReceipt(
             success=True,
             transport_name=self.transport_name,
@@ -775,6 +891,7 @@ class RelayTaskMailDirectCurrentSessionReplyHandler:
                 "Subject": subject,
                 **_build_post_creation_headers(
                     packet_id=packet.packet_id,
+                    receipt_id=packet.receipt_id,
                     request_id=payload.request_id,
                     action_type=_DIRECT_ACTION_REPLY,
                     target_session_identity=target_session_identity,
@@ -803,6 +920,30 @@ class RelayTaskMailDirectCurrentSessionReplyHandler:
                 "direct_temporarily_unavailable",
                 "direct TaskMail current-session reply could not be processed",
             )
+
+        updated_state = load_thread_state(target_state.thread_id, self._task_root)
+        terminal_mail_message_id = (
+            updated_state.latest_message_id
+            if str(updated_state.latest_message_id or "").strip() != str(target_state.latest_message_id or "").strip()
+            else None
+        )
+        _maybe_upsert_post_creation_closeout(
+            task_root=self._task_root,
+            thread_id=updated_state.thread_id,
+            action_type=_DIRECT_ACTION_REPLY,
+            request_id=payload.request_id,
+            ingress_message_id=envelope.message_id,
+            packet_id=packet.packet_id,
+            receipt_id=packet.receipt_id,
+            terminal_mail_subject=(
+                _build_post_creation_reply_closeout_subject(updated_state)
+                if terminal_mail_message_id is not None
+                else None
+            ),
+            terminal_mail_message_id=terminal_mail_message_id,
+            last_summary=updated_state.last_summary,
+            target_session_identity=_build_post_creation_target_identity(payload, updated_state),
+        )
 
         return TransportReceipt(
             success=True,
@@ -883,6 +1024,7 @@ class RelayTaskMailDirectCurrentSessionReplyMailBridge:
                 references=references,
                 headers=_build_post_creation_headers(
                     packet_id=packet.packet_id,
+                    receipt_id=packet.receipt_id,
                     request_id=payload.request_id,
                     action_type=_DIRECT_ACTION_REPLY,
                     target_session_identity=target_session_identity,
@@ -891,6 +1033,21 @@ class RelayTaskMailDirectCurrentSessionReplyMailBridge:
         except Exception as exc:
             message = str(exc).strip() or "failed to bridge direct TaskMail reply packet into bot mailbox mail ingress"
             raise RelayDirectActionError("direct_temporarily_unavailable", message) from exc
+
+        if target_state is not None and self._task_root is not None:
+            _maybe_upsert_post_creation_closeout(
+                task_root=self._task_root,
+                thread_id=target_state.thread_id,
+                action_type=_DIRECT_ACTION_REPLY,
+                request_id=payload.request_id,
+                ingress_message_id=message_id,
+                packet_id=packet.packet_id,
+                receipt_id=packet.receipt_id,
+                terminal_mail_subject=None,
+                terminal_mail_message_id=None,
+                last_summary=target_state.last_summary,
+                target_session_identity=target_session_identity,
+            )
 
         return TransportReceipt(
             success=True,

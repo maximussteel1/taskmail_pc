@@ -211,6 +211,44 @@ def test_process_once_handles_project_folder_sync_without_creating_task(tmp_path
     assert not (tmp_path / "tasks" / "thread_001").exists()
 
 
+def test_process_once_handles_relay_direct_project_folder_sync_without_creating_task(tmp_path) -> None:
+    sync_root = tmp_path / "sync_root"
+    (sync_root / "alpha").mkdir(parents=True)
+
+    envelope = MailEnvelope(
+        message_id="<relay-sync@example.com>",
+        subject="[SYNC]",
+        from_addr="taskmail-user@example.com",
+        to_addr="bot@example.com",
+        date="2026-03-23T12:31:00",
+        body_text="",
+        raw_headers={
+            "Subject": "[SYNC]",
+            "X-TaskMail-Direct": "1",
+            "X-TaskMail-Relay-Packet-Id": "android-taskmail:sync-project-folders:req_001",
+            "X-TaskMail-Relay-Request-Id": "req_001",
+        },
+    )
+    client = FakeMailClient([envelope])
+    dispatcher = Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0))
+    config = AppConfig(
+        from_addr="user@example.com",
+        from_name="Mail Runner",
+        task_root="tasks",
+        project_sync_roots=[str(sync_root)],
+    )
+
+    stats = process_once(config, base_dir=tmp_path, mail_client=client, dispatcher=dispatcher)
+
+    assert stats == {"fetched": 1, "processed": 1, "skipped": 0, "failed": 0}
+    assert [item["subject"] for item in client.sent_messages] == ["[SYNC] Project Folder List"]
+    assert client.sent_messages[0]["in_reply_to"] == "<relay-sync@example.com>"
+    assert client.sent_messages[0]["body"].startswith("Project folder sync completed. No task was created.")
+    assert f"- alpha | {sync_root / 'alpha'}" in client.sent_messages[0]["body"]
+    assert client.deleted_message_batches == []
+    assert not (tmp_path / "tasks" / "thread_001").exists()
+
+
 def test_process_once_reports_unavailable_project_sync_root(tmp_path) -> None:
     existing_root = tmp_path / "sync_existing"
     existing_root.mkdir()

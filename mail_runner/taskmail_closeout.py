@@ -11,6 +11,7 @@ from typing import Any
 from .mail_io import SYSTEM_MESSAGE_HEADER, SYSTEM_MESSAGE_HEADER_VALUE
 from .session_action_closeout import (
     ACTION_TYPE_HEADER,
+    RECEIPT_ID_HEADER,
     SESSION_ACTION_CLOSEOUT_FILENAME,
     target_session_identity_from_headers,
 )
@@ -116,6 +117,10 @@ def _payload_packet_id(payload: dict[str, Any]) -> str | None:
     return _payload_header(payload, _PACKET_ID_HEADER)
 
 
+def _payload_receipt_id(payload: dict[str, Any]) -> str | None:
+    return _payload_header(payload, RECEIPT_ID_HEADER)
+
+
 def _jsonl_rows(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -176,6 +181,7 @@ def _bundle_anchor_from_thread_state(state: Any) -> dict[str, Any]:
         "request_id": None,
         "ingress_message_id": _normalized_text(state.root_message_id),
         "packet_id": None,
+        "receipt_id": None,
         "action_type": None,
         "target_session_identity": None,
         "last_summary": _normalized_text(state.last_summary),
@@ -203,12 +209,45 @@ def _bundle_anchor_from_session_action_closeout(payload: dict[str, Any]) -> dict
         "request_id": _normalized_text(payload.get("request_id")),
         "ingress_message_id": _normalized_text(payload.get("ingress_message_id")),
         "packet_id": _normalized_text(payload.get("packet_id")),
+        "receipt_id": _normalized_text(payload.get("receipt_id")),
         "action_type": _normalized_text(payload.get("action_type")),
         "target_session_identity": _normalized_target_session_identity(payload.get("target_session_identity")),
         "last_summary": _normalized_text(payload.get("last_summary")),
         "terminal_mail_message_id": _normalized_text(payload.get("terminal_mail_message_id")),
         "terminal_mail_subject": _normalized_text(payload.get("terminal_mail_subject")),
     }
+
+
+def _bundle_anchor_from_canonical_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ingress_type": _normalized_text(payload.get("ingress_type")),
+        "request_id": _normalized_text(payload.get("request_id")),
+        "ingress_message_id": _normalized_text(payload.get("ingress_message_id")),
+        "packet_id": _normalized_text(payload.get("packet_id")),
+        "receipt_id": _normalized_text(payload.get("receipt_id")),
+        "action_type": _normalized_text(payload.get("action_type")),
+        "target_session_identity": _normalized_target_session_identity(payload.get("target_session_identity")),
+        "last_summary": _normalized_text(payload.get("last_summary")),
+        "terminal_mail_message_id": _normalized_text(payload.get("terminal_mail_message_id")),
+        "terminal_mail_subject": _normalized_text(payload.get("terminal_mail_subject")),
+    }
+
+
+def _merge_bundle_anchors(
+    primary: dict[str, Any],
+    secondary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    merged = dict(primary)
+    if secondary is None:
+        return merged
+    for key, value in secondary.items():
+        if key == "target_session_identity":
+            if _normalized_target_session_identity(merged.get(key)) is None:
+                merged[key] = _normalized_target_session_identity(value)
+            continue
+        if _normalized_text(merged.get(key)) is None and _normalized_text(value) is not None:
+            merged[key] = _normalized_text(value)
+    return merged
 
 
 def _select_ingress_mail_item(
@@ -651,6 +690,7 @@ def _mail_item_evidence(
         "status_label": _status_label(_payload_subject(payload)) if payload is not None else None,
         "request_id": _payload_request_id(payload) if payload is not None else None,
         "packet_id": _payload_packet_id(payload) if payload is not None else None,
+        "receipt_id": _payload_receipt_id(payload) if payload is not None else None,
         "direct_header": _payload_direct_header(payload) if payload is not None else None,
     }
 
@@ -775,6 +815,7 @@ def _session_action_closeout_evidence(
         "action_type": _normalized_text(payload.get("action_type")) if payload is not None else None,
         "request_id": _normalized_text(payload.get("request_id")) if payload is not None else None,
         "packet_id": _normalized_text(payload.get("packet_id")) if payload is not None else None,
+        "receipt_id": _normalized_text(payload.get("receipt_id")) if payload is not None else None,
         "ingress_message_id": _normalized_text(payload.get("ingress_message_id")) if payload is not None else None,
         "terminal_mail_subject": _normalized_text(payload.get("terminal_mail_subject")) if payload is not None else None,
         "last_summary": _normalized_text(payload.get("last_summary")) if payload is not None else None,
@@ -810,33 +851,51 @@ def build_taskmail_daily_closeout_bundle(
     resolved_task_id = _normalized_text(task_id) or state.current_task_id
     run_dir = workspace.run_dir(thread_id, resolved_task_id)
     canonical_summary_path = workspace.run_file_path(thread_id, resolved_task_id, "canonical_summary.json")
-    canonical_summary_present = canonical_summary_path.exists()
-    session_action_closeout_path = None
-    session_action_closeout_payload = None
-    session_action_closeout_resolution = "not_found"
-    if canonical_summary_present:
-        canonical_summary = workspace.load_json(canonical_summary_path)
+    canonical_summary_payload = workspace.load_json(canonical_summary_path) if canonical_summary_path.exists() else None
+    canonical_summary = (
+        _bundle_anchor_from_canonical_summary(canonical_summary_payload)
+        if isinstance(canonical_summary_payload, dict)
+        else None
+    )
+    session_action_closeout_path, session_action_closeout_payload, session_action_closeout_resolution = (
+        _select_session_action_closeout_item(
+            workspace.task_root,
+            thread_id,
+            request_id=(
+                _normalized_text(canonical_summary.get("request_id"))
+                if canonical_summary is not None
+                else None
+            ),
+        )
+    )
+    prefer_session_action_closeout = (
+        canonical_summary is not None
+        and session_action_closeout_payload is not None
+        and _normalized_text(canonical_summary.get("ingress_type")) == "direct_bridge"
+        and _normalized_action_type(canonical_summary.get("action_type")) in {"status", "reply"}
+    )
+    if prefer_session_action_closeout:
+        canonical_summary = _merge_bundle_anchors(
+            _bundle_anchor_from_session_action_closeout(session_action_closeout_payload),
+            canonical_summary,
+        )
+        canonical_outcome_source = "session_action_closeout"
+        canonical_outcome_path = session_action_closeout_path
+        canonical_outcome_resolution = session_action_closeout_resolution
+    elif canonical_summary is not None:
         canonical_outcome_source = "canonical_summary"
         canonical_outcome_path = canonical_summary_path
         canonical_outcome_resolution = "canonical_summary"
+    elif session_action_closeout_payload is not None:
+        canonical_summary = _bundle_anchor_from_session_action_closeout(session_action_closeout_payload)
+        canonical_outcome_source = "session_action_closeout"
+        canonical_outcome_path = session_action_closeout_path
+        canonical_outcome_resolution = session_action_closeout_resolution
     else:
-        session_action_closeout_path, session_action_closeout_payload, session_action_closeout_resolution = (
-            _select_session_action_closeout_item(
-                workspace.task_root,
-                thread_id,
-                request_id=None,
-            )
-        )
-        if session_action_closeout_payload is not None:
-            canonical_summary = _bundle_anchor_from_session_action_closeout(session_action_closeout_payload)
-            canonical_outcome_source = "session_action_closeout"
-            canonical_outcome_path = session_action_closeout_path
-            canonical_outcome_resolution = session_action_closeout_resolution
-        else:
-            canonical_summary = _bundle_anchor_from_thread_state(state)
-            canonical_outcome_source = "thread_state_fallback"
-            canonical_outcome_path = None
-            canonical_outcome_resolution = "thread_state_fallback"
+        canonical_summary = _bundle_anchor_from_thread_state(state)
+        canonical_outcome_source = "thread_state_fallback"
+        canonical_outcome_path = None
+        canonical_outcome_resolution = "thread_state_fallback"
 
     ingress_mail_path, ingress_mail_payload, ingress_mail_resolution = _select_ingress_mail_item(
         workspace.task_root,
@@ -850,6 +909,8 @@ def build_taskmail_daily_closeout_bundle(
             canonical_summary["request_id"] = _payload_request_id(ingress_mail_payload)
         if _normalized_text(canonical_summary.get("packet_id")) is None:
             canonical_summary["packet_id"] = _payload_packet_id(ingress_mail_payload)
+        if _normalized_text(canonical_summary.get("receipt_id")) is None:
+            canonical_summary["receipt_id"] = _payload_receipt_id(ingress_mail_payload)
         if _normalized_text(canonical_summary.get("action_type")) is None:
             canonical_summary["action_type"] = _normalized_text(
                 _payload_headers(ingress_mail_payload).get(ACTION_TYPE_HEADER)
@@ -936,6 +997,7 @@ def build_taskmail_daily_closeout_bundle(
             "request_id": _normalized_text(canonical_summary.get("request_id")),
             "ingress_message_id": _normalized_text(canonical_summary.get("ingress_message_id")),
             "packet_id": _normalized_text(canonical_summary.get("packet_id")),
+            "receipt_id": _normalized_text(canonical_summary.get("receipt_id")),
             "action_type": _normalized_text(canonical_summary.get("action_type")),
             "target_session_identity": _normalized_target_session_identity(
                 canonical_summary.get("target_session_identity")

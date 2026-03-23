@@ -179,13 +179,20 @@ If a manifest item points to a missing or invalid file:
 Current runtime behavior supports two outbound delivery paths:
 
 1. regular mail attachments for small artifacts
-2. COS external delivery links for oversized artifacts
+2. external delivery links for oversized artifacts
 
-When COS delivery is configured and an outgoing artifact exceeds the configured
-`external_delivery_threshold_mb`, the runtime:
+When an outgoing artifact exceeds the configured
+`external_delivery_threshold_mb`, the runtime uses one of these external
+delivery backends:
 
-1. uploads that file to COS
-2. generates a presigned download URL
+- COS, when COS delivery is configured
+- relay file surface, when `outbound_transport=relay` is enabled with
+  `relay_url + relay_transport_token` and COS delivery isn't configured
+
+In both cases, the runtime:
+
+1. uploads that file to the selected external delivery backend
+2. generates a downloadable URL
 3. keeps the artifact listed in the single `Artifacts` section
 4. adds a separate `External Deliveries` section to the status mail body
 5. omits the oversized file from the actual MIME attachments
@@ -195,15 +202,17 @@ This keeps the control protocol unchanged while avoiding mailbox size limits.
 Current default policy:
 
 - threshold: `20 MB`
-- presigned URL lifetime: `7 days`
-- object key shape: `mail-runner/<thread_id>/<task_id>/<filename>`
+- COS presigned URL lifetime: `7 days`
+- COS object key shape: `mail-runner/<thread_id>/<task_id>/<filename>`
 - COS upload uses a direct HTTPS client session and does not inherit ambient `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` environment variables
+- relay file-surface upload derives `http(s)://<relay-host>/v1/files` from the configured `ws(s)://<relay-host>/relay`
+- relay file-surface upload uses the same Bearer transport token as the relay websocket bootstrap
 - small files still remain normal mail attachments
 - for `apk` / `ipa` payloads on the COS default domain, the runtime rewrites the
   uploaded object name to `<original_name>.bin` and emits a user-facing notice,
   because the default COS public domain blocks direct APK/IPA distribution
 
-If COS upload fails for an oversized file:
+If external delivery upload fails for an oversized file:
 
 - do not silently fall back to attaching the large file
 - keep sending the status mail
@@ -250,6 +259,7 @@ Implemented runtime details:
 - each CLI run creates `runs/<task_id>/artifacts/`
 - each CLI run writes `runs/<task_id>/incoming_attachments.json`
 - when outgoing artifacts are resolved for status mail delivery, the runtime writes `runs/<task_id>/artifacts/artifact_index.json`
+- when relay file-surface external delivery is used, the runtime also writes `runs/<task_id>/artifacts/artifact_file_binding_index.json`
 - `RunResult.artifacts_dir` points at `runs/<task_id>/artifacts`
 - prompt/runtime hints tell the backend to create outgoing files in `MAIL_RUNNER_ARTIFACTS_DIR`
 - COS oversized-delivery credentials may live in a local-only `mail_config.cos.local.yaml` file

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import urllib.request
 
-from mail_runner.outbound.relay_bootstrap import derive_healthz_url, probe_relay_bootstrap
+from mail_runner.outbound.relay_bootstrap import derive_healthz_url, probe_healthz, probe_relay_bootstrap
 from mail_runner.outbound.contract import TransportReceipt
 from mail_runner.relay_server.app import start_relay_server
 from mail_runner.relay_server.config import RelayServerConfig
@@ -13,6 +14,46 @@ from mail_runner.relay_server.session_store import PersistentSessionStore
 
 def test_derive_healthz_url_from_plaintext_relay_url() -> None:
     assert derive_healthz_url("ws://127.0.0.1:8787/relay") == "http://127.0.0.1:8787/healthz"
+
+
+def test_probe_healthz_disables_environment_proxy(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"status":"ok","tls_enabled":false}'
+
+    class FakeOpener:
+        def open(self, request, timeout):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+    def fake_build_opener(*handlers):
+        captured["handlers"] = handlers
+        return FakeOpener()
+
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:9000")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:9001")
+    monkeypatch.setenv("ALL_PROXY", "socks5://proxy.example:9002")
+    monkeypatch.setattr(urllib.request, "build_opener", fake_build_opener)
+
+    result = probe_healthz("http://relay.example.test/healthz", timeout_seconds=7)
+
+    assert result.ok is True
+    assert result.payload == {"status": "ok", "tls_enabled": False}
+    proxy_handlers = [handler for handler in captured["handlers"] if isinstance(handler, urllib.request.ProxyHandler)]
+    assert len(proxy_handlers) == 1
+    assert proxy_handlers[0].proxies == {}
+    assert captured["timeout"] == 7
 
 
 def test_probe_relay_bootstrap_reports_hello_ack_for_plaintext_runtime(tmp_path) -> None:

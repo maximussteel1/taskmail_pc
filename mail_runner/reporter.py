@@ -205,10 +205,12 @@ def _format_size_bytes(size_bytes: int) -> str:
 
 
 def _external_delivery_markdown_lines(delivery: ExternalDelivery) -> list[str]:
-    suffix = (
-        f": Delivered via {delivery.provider.upper()} "
-        f"({_format_size_bytes(delivery.size_bytes)}, expires {delivery.expires_at})"
-    )
+    provider_label = "FILE SURFACE" if delivery.provider == "file_surface" else delivery.provider.upper()
+    size_label = _format_size_bytes(delivery.size_bytes)
+    if delivery.provider == "file_surface":
+        suffix = f": Delivered via {provider_label} ({size_label})"
+    else:
+        suffix = f": Delivered via {provider_label} ({size_label}, expires {delivery.expires_at})"
     return [f"- [{delivery.name}]({delivery.url}){suffix}"]
 
 

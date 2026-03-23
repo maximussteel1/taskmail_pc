@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -25,6 +25,15 @@ def _require_optional_text(value: str | None, field_name: str) -> str | None:
     if value is None:
         return None
     return _require_text(value, field_name)
+
+
+def _require_mapping_list(value: Any, field_name: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a list[dict]")
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        normalized.append(_require_mapping(item, f"{field_name}[{index}]"))
+    return normalized
 
 
 def _load_json(path: Path, default: Any) -> Any:
@@ -55,6 +64,7 @@ class AcceptedRelayPacket:
     last_error_code: str | None = None
     last_error_message: str | None = None
     attempt_count: int = 0
+    server_messages: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.packet_id = _require_text(self.packet_id, "packet_id")
@@ -74,6 +84,7 @@ class AcceptedRelayPacket:
         self.last_error_message = _require_optional_text(self.last_error_message, "last_error_message")
         if not isinstance(self.attempt_count, int) or self.attempt_count < 0:
             raise ValueError("attempt_count must be a non-negative integer")
+        self.server_messages = _require_mapping_list(self.server_messages, "server_messages")
 
 
 @dataclass(slots=True)
@@ -145,6 +156,7 @@ class InMemoryAcceptedPacketStore:
         transport_message_id: str | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        server_messages: list[dict[str, Any]] | None = None,
     ) -> AcceptedRelayPacket:
         normalized_packet_id = _require_text(packet_id, "packet_id")
         with self._lock:
@@ -166,6 +178,8 @@ class InMemoryAcceptedPacketStore:
                 packet.delivered_at = _require_text(attempted_at, "attempted_at")
                 packet.last_error_code = None
                 packet.last_error_message = None
+                if server_messages is not None:
+                    packet.server_messages = _require_mapping_list(server_messages, "server_messages")
             else:
                 packet.delivery_status = "failed"
                 packet.last_error_code = _require_optional_text(error_code, "error_code")
@@ -260,6 +274,7 @@ class PersistentAcceptedPacketStore:
         transport_message_id: str | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        server_messages: list[dict[str, Any]] | None = None,
     ) -> AcceptedRelayPacket:
         normalized_packet_id = _require_text(packet_id, "packet_id")
         with self._lock:
@@ -281,6 +296,8 @@ class PersistentAcceptedPacketStore:
                 packet.delivered_at = _require_text(attempted_at, "attempted_at")
                 packet.last_error_code = None
                 packet.last_error_message = None
+                if server_messages is not None:
+                    packet.server_messages = _require_mapping_list(server_messages, "server_messages")
             else:
                 packet.delivery_status = "failed"
                 packet.last_error_code = _require_optional_text(error_code, "error_code")

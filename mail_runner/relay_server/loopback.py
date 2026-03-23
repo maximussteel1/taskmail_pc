@@ -11,7 +11,13 @@ from ..outbound.contract import TransportReceipt
 
 from .auth import token_fingerprint, validate_transport_token
 from .config import RelayServerConfig
-from .direct_actions import RelayDirectActionError, RelayDirectPacketHandler, is_taskmail_direct_packet
+from .direct_actions import (
+    RelayDirectActionResult,
+    RelayDirectActionError,
+    RelayDirectPacketHandler,
+    is_taskmail_direct_packet,
+    is_taskmail_direct_project_sync_packet,
+)
 from .packet_store import InMemoryAcceptedPacketStore
 from .post_creation_actions import is_taskmail_post_creation_packet
 from .phase3_emitter import (
@@ -391,7 +397,7 @@ class LoopbackRelayServer:
             dispatch_metadata=message.dispatch_metadata,
         )
         if accepted_packet.delivery_status == "delivered":
-            return [
+            responses = [
                 build_packet_ack(
                     packet_id=accepted_packet.packet_id,
                     accepted=True,
@@ -400,6 +406,8 @@ class LoopbackRelayServer:
                     transport_message_id=accepted_packet.transport_message_id,
                 )
             ]
+            responses.extend(accepted_packet.server_messages)
+            return responses
 
         if phase3_subscribe_request is not None:
             return self._handle_phase3_subscribe(
@@ -411,7 +419,7 @@ class LoopbackRelayServer:
 
         if direct_packet_handler is not None:
             try:
-                receipt = direct_packet_handler.handle_accepted_packet(accepted_packet)
+                raw_result = direct_packet_handler.handle_accepted_packet(accepted_packet)
             except RelayDirectActionError as exc:
                 self._packet_store.mark_delivery_result(
                     accepted_packet.packet_id,
@@ -439,6 +447,8 @@ class LoopbackRelayServer:
                         sent_at=now,
                     )
                 ]
+            direct_result = raw_result if isinstance(raw_result, RelayDirectActionResult) else RelayDirectActionResult(raw_result)
+            receipt = direct_result.receipt
             updated_packet = self._packet_store.mark_delivery_result(
                 accepted_packet.packet_id,
                 attempted_at=now,
@@ -447,6 +457,7 @@ class LoopbackRelayServer:
                 transport_message_id=receipt.transport_message_id,
                 error_code=receipt.error_code,
                 error_message=receipt.error_message,
+                server_messages=direct_result.server_messages if receipt.success else None,
             )
             if not receipt.success:
                 return [
@@ -459,7 +470,7 @@ class LoopbackRelayServer:
                         error_code=receipt.error_code,
                     )
                 ]
-            return [
+            responses = [
                 build_packet_ack(
                     packet_id=updated_packet.packet_id,
                     accepted=True,
@@ -468,6 +479,8 @@ class LoopbackRelayServer:
                     transport_message_id=updated_packet.transport_message_id,
                 )
             ]
+            responses.extend(updated_packet.server_messages)
+            return responses
 
         if self._delivery_callback is not None:
             receipt = self._delivery_callback(accepted_packet)
@@ -733,7 +746,11 @@ class LoopbackRelayServer:
         for handler in self._direct_packet_handlers:
             if handler.matches(message):
                 return handler
-        if is_taskmail_direct_packet(message) or is_taskmail_post_creation_packet(message):
+        if (
+            is_taskmail_direct_packet(message)
+            or is_taskmail_direct_project_sync_packet(message)
+            or is_taskmail_post_creation_packet(message)
+        ):
             raise RelayDirectActionError("unsupported_action", "direct TaskMail action is not available on this relay")
         return None
 

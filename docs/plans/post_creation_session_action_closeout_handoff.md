@@ -28,17 +28,18 @@
 - current-session direct `/status` accepted path 已落地
 - current-session plain direct `reply` accepted path 已落地
 - server-side current-session resolver、mail-bridge seam、post-creation classifier 已落地
-- current-session direct `/status` accepted 后会落 thread-scoped `session_action_closeout.json`
-- current-session direct `reply` accepted 后会在 run-scoped `canonical_summary.json` 中保留：
+- current-session direct `/status` 与 plain `reply` accepted 后都会在本地 authoritative task root 落 thread-scoped `session_action_closeout.json`
+- current-session direct `reply` accepted 后，run-scoped `canonical_summary.json` 仍会继续保留：
   - `action_type`
   - `target_session_identity`
   - `request_id`
+  - `receipt_id`
 - `build_taskmail_closeout_bundle.py` 已能同时解释：
   - run-scoped `canonical_summary.json`
   - thread-scoped `session_action_closeout.json`
 - repository full suite 已通过：
   - `.\.venv\Scripts\python.exe -m pytest`
-  - `395 passed`
+  - `403 passed`
 
 当前不应把这次 closeout 误读成：
 
@@ -88,17 +89,25 @@
   - 最好保留 `request_id`
 - relay `packet_ack` 与 packet store
 - PC ingress raw mail
+- `tasks/<thread_id>/session_actions/<request_id>/session_action_closeout.json`
 - `runs/<task_id>/canonical_summary.json`
 - 后续 canonical status / receipt mail
 - 由 `build_taskmail_closeout_bundle.py` 生成的 closeout bundle
 
 建议判读重点：
 
-- bundle 的 canonical outcome source 应稳定落到 `canonical_summary`
-- `canonical_summary.json` 应保留：
+- bundle 的 canonical outcome source 应稳定落到 `session_action_closeout`
+- `session_action_closeout.json` 应至少保留：
   - `action_type = reply`
   - `target_session_identity`
   - `request_id`
+  - `receipt_id`
+  - `ingress_message_id`
+- `canonical_summary.json` 仍应保留：
+  - `action_type = reply`
+  - `target_session_identity`
+  - `request_id`
+  - `receipt_id`
   - `ingress_message_id`
 - `same_run_bind` 应至少能稳定落到：
   - `request_id`
@@ -124,7 +133,7 @@
 3. 生成 `/status` 的 closeout bundle
 4. 再发起一条 current-session plain direct `reply`
 5. 等待其收敛到当前 canonical mail outcome
-6. 收集 `canonical_summary.json`、terminal mail 与 bundle
+6. 收集 `session_action_closeout.json`、`canonical_summary.json`、terminal mail 与 bundle
 7. 对两条样本分别做 bind / semantics review
 
 建议使用的仓库内入口：

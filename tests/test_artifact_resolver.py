@@ -153,6 +153,7 @@ def test_resolve_outgoing_attachments_ignores_generated_artifact_index_file(tmp_
     artifacts_dir.mkdir(parents=True)
     (artifacts_dir / "chart.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     (artifacts_dir / "artifact_index.json").write_text("{}", encoding="utf-8")
+    (artifacts_dir / "artifact_file_binding_index.json").write_text("{}", encoding="utf-8")
 
     attachments, skipped = resolve_outgoing_attachments(task_root, _state(), _result())
 
