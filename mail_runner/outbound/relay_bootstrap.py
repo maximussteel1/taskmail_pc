@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import ssl
 import urllib.error
@@ -24,6 +25,7 @@ from ..relay_server import (
 
 _DEFAULT_CLIENT_ID = "pc-local"
 _DEFAULT_CLIENT_VERSION = "0.1.0-dev"
+_WEBSOCKETS_CONNECT_SUPPORTS_PROXY = "proxy" in inspect.signature(websockets.connect).parameters
 
 
 def _timestamp() -> str:
@@ -234,6 +236,7 @@ async def _probe_websocket_bootstrap(
             close_timeout=max(1, int(timeout_seconds)),
             extra_headers={"Authorization": f"Bearer {transport_token}"},
             max_size=4 * 1024 * 1024,
+            **_direct_websocket_connect_kwargs(),
         ) as websocket:
             await websocket.send(
                 json.dumps(
@@ -351,6 +354,12 @@ def _build_websocket_ssl_context(relay_url: str, *, verify_tls: bool, ca_file: s
     elif ca_file:
         context.load_verify_locations(ca_file)
     return context
+
+
+def _direct_websocket_connect_kwargs() -> dict[str, object]:
+    if _WEBSOCKETS_CONNECT_SUPPORTS_PROXY:
+        return {"proxy": None}
+    return {}
 
 
 def _parse_json_mapping(text: str) -> dict[str, object] | None:

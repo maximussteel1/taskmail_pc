@@ -86,6 +86,7 @@ from .thread_store import (
     save_raw_mail,
     save_thread_state,
 )
+from .transport_probe_mail import is_transport_probe_mail, record_transport_probe_observation
 
 LOGGER = logging.getLogger(__name__)
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -730,6 +731,34 @@ def _handle_project_folder_sync(
     if sent_message_id:
         _remember_sync_reply_message_id(task_root, sent_message_id)
         _prune_previous_sync_mails(mail_client, task_root, keep_message_id=sent_message_id)
+    return True
+
+
+def _handle_transport_probe_mail(
+    envelope: MailEnvelope,
+    task_root: Path,
+) -> bool:
+    try:
+        observed_probe, observation_path = record_transport_probe_observation(
+            task_root,
+            envelope,
+            observed_at=_timestamp(),
+        )
+    except Exception:
+        LOGGER.exception(
+            "Unable to record transport-probe mailbox observation. message_id=%s subject=%s",
+            getattr(envelope, "message_id", "unknown"),
+            getattr(envelope, "subject", ""),
+        )
+        return True
+
+    LOGGER.info(
+        "Recorded transport-probe mailbox observation. probe_id=%s request_id=%s packet_id=%s path=%s",
+        observed_probe.probe_id,
+        observed_probe.request_id,
+        observed_probe.packet_id,
+        observation_path,
+    )
     return True
 
 
@@ -2019,6 +2048,9 @@ def _process_mail(
     *,
     background: bool,
 ) -> bool:
+    if is_transport_probe_mail(envelope):
+        return _handle_transport_probe_mail(envelope, task_root)
+
     subject_info = parse_subject(envelope.subject)
     capsule_state = parse_state_capsule(envelope.body_text)
 

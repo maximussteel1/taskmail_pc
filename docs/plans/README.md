@@ -1,238 +1,148 @@
 # Plans
 
-This directory contains repository-scoped implementation plans for `mail_based_task_manager`.
+本目录存放 `mail_based_task_manager` 的仓库内计划、当前主线、后继候选线、冻结线，以及 closeout / handoff / evidence 文档。
 
-Rules:
+## 规则
 
-- Documents here should describe changes to the current repository, not the future full platform.
-- If `README.md`, `state.md`, or `docs/current/*` disagree with a plan here, treat current behavior as the source of truth.
-- Keep speculative platform design out of this directory.
+- `docs/current/*` 永远比本目录更高优先级
+- 如果 `README.md`、`state.md`、`docs/current/*` 与本目录冲突，以 `docs/current/*` 为准
+- 本目录只描述当前仓库的实现计划与 closeout，不承载未来平台的总设计
+- 已完成切片不要通过继续改旧 execution plan 的方式“隐式重开”；如果要开启新一轮实现，应新建 plan 或 handoff
 
-Current plan documents:
+## 当前状态
 
-- `mail_adapter_refactor_plan.md`: mail adapter refactor plan for the current repository.
-- `run_artifact_delivery_plan.md`: local file delivery and run-artifact consolidation plan.
-- `artifact_markdown_rendering_plan.md`: Markdown-first artifact rendering and inline-image layering plan.
-- `backend_permission_control_plan.md`: `Permission` field semantics and backend projection plan.
-- `project_folder_sync_entry_plan.md`: first-mail project-folder sync entry plan.
-- `project_folder_sync_relay_single_account_plan.md`: earlier bridge-only `[SYNC]` relay alternative, now superseded by the v2 bootstrap roundtrip contract.
-- `taskmail_bootstrap_control_contract_v2.md`: shared contract freeze for direct `[SYNC]` request, `packet_ack`, direct `bootstrap_result`, replay, and fallback semantics without rewriting current Layer 1 behavior yet.
-- `taskmail_android_pc_control_artifact_companion_note_v0.1.md`: repository-side companion note that acknowledges the shared Android-PC `WebSocket + HTTP` transport shell and freezes the repo-side baseline for upload size, artifact hosting, replay ownership, and auth path.
-- `taskmail_transport_probe_payload_companion_note_v0.1.md`: repository-side companion note that acknowledges the shared `transport_probe` payload, deterministic mail mapping, timeline fields, and probe file-plane baseline.
-- `taskmail_control_plane_repo_responsibility_note_v0.1.md`: repo-side minimal responsibility note for the vNext `/control` endpoint, including admission, accepted/replay authority, and message-set boundaries.
-- `taskmail_file_surface_repo_responsibility_note_v0.1.md`: repo-side minimal responsibility note for the vNext `/v1/files` surface, including upload/download semantics, `artifact_id -> file_id` layering, and file-truth boundaries.
-- `taskmail_artifact_fileid_mapping_sidecar_note_v0.1.md`: repo-side sidecar note for persisting `artifact_id -> file_id` bindings without polluting the local `artifact_index.json` truth layer.
-- `taskmail_relay_accepted_result_replay_evidence_note_v0.1.md`: repo-side evidence note that records what `packets.json`, `delivery_attempts.jsonl`, `server_messages`, and current tests already prove about accepted/result replay continuity.
-- `taskmail_transport_token_reconnect_upload_error_companion_note_v0.1.md`: repo-side companion note that freezes the first auth/reconnect baseline for `/control` + `/v1/files` and the minimum machine-readable upload error shape.
-- `pc_background_hardening_plan.md`: near-term hardening order for the repository as a long-running PC-side background process.
-- `pc_service_hosting_plan.md`: concrete service-hosting plan centered on Windows Task Scheduler plus `mail_runner.host`.
-- `vps_relay_bootstrap_plan.md`: narrow repository-side bootstrap plan for the first VPS relay/control-plane workstream behind the completed outbound layering seam.
-- `vps_relay_deploy_runbook.md`: concrete Phase C deployment/runbook for the current lightweight relay skeleton on the inspected Ubuntu VPS.
-- `vps_environment_baseline.md`: inspected Ubuntu VPS baseline for the first relay deployment path.
-- `vps_ingress_truth_v1_checklist.md`: Chinese design checklist for moving ingress / lease / canonical binding truth into VPS while keeping execution truth on the PC.
-- `vps_ingress_truth_v1_execution_order.md`: implementation-order companion for the ingress-truth v1 checklist, including first-batch module split and repo-internal relay action suggestions.
-- `coding_backlog.md`: canonical next-phase development backlog for the current repository.
+- 当前 repo-side 主线仍是 `TaskMail direct relay/control/file`
+- 这条线已经把较大一段 current behavior 落到代码和 `docs/current/*`，但整条线尚未闭环
+- `phase2/phase3/phase4`、post-creation、taskmail control/file 相关文档当前仍是这条主线的 closeout / evidence / handoff 支撑资料，不应一律当作纯历史
+- `P9 HTML` 仍处于冻结状态，不是当前默认编码队列
+- `VPS ingress truth v1` 当前是后继候选线，不是当前主线
 
-Current priority reading:
+## 当前阅读顺序
 
-- highest: current Android / PC / VPS `VPS 直连` mainline
-- second: `HTML 解析 / HTML reading` related work under the frozen consumer contract
-- then: `VPS ingress truth v1`
-- `codex_sdk_continuous_session_plan.md`: detailed P1 implementation plan for Codex SDK continuous sessions.
-- `codex_sdk_capability_probe.md`: capability probe notes for SDK and MCP integration boundaries before P1.
-- `p3_streaming_session_window_plan.md`: detailed P3 implementation plan for the first streaming, timestamped, PC-side session window on the `codex + sdk` path.
-- `p5_p6_health_and_mail_retention_plan.md`: detailed execution plan for P5 health-state detection and P6 live-mail retention cleanup.
-- `p7_acceptance_and_structured_output_plan.md`: detailed execution plan for P7 fixed real-mailbox acceptance and CLI structured output parsing.
-- `p8_session_targeting_plan.md`: detailed execution plan for explicit session targeting and routing UX without changing the current Android reply contract.
-- `p9_html_mail_projection_plan.md`: narrow P9 plan for Thunderbird/mobile-oriented HTML mail projection while keeping Markdown and plain text as truth layers; repo-side work is partially landed and the remaining plan is temporarily frozen.
-- `pc_outbound_layering_refactor_plan.md`: active repository-side implementation plan for splitting the current PC outbound path into render / packet / transport layers without changing the Android-facing contract.
-- `pc_outbound_layering_first_slice_checklist.md`: execution-level checklist for the first coding slice of the active PC outbound layering refactor.
-- `outbound_mail_baseline_delta_checklist.md`: Phase 0 baseline matrix that records current runtime output versus the frozen outbound contract, and splits the deltas into `P9` versus `post-P9`.
-- `android_consumer_contract_alignment_plan.md`: sequencing adjustment plan that prioritizes freezing the Android/Thunderbird-consumable outbound contract before broader outbound convergence work.
-- `android_consumer_protocol_freeze_note.md`: short PC-side freeze note listing the outbound contract details that should stay stable while the Android rich-text body slice lands.
-- `android_consumer_acceptance_requirements.md`: concrete Android-side success requirements for declaring the current consumer-contract validation complete.
-- `android_pc_vps_evolution_authority.md`: current repository-side macro authority for the public-IP plaintext direct-connect direction while keeping current implementation-truth docs unchanged until code changes land.
-- `android_pc_vps_coordinated_execution_plan.md`: active cross-repo staged plan for public-IP plaintext direct-connect as the intended Android main path with mail fallback preserved during rollout.
-- `android_pc_vps_phase0_phase1_checklist.md`: detailed checklist for Phase 0-1 of the public plaintext direct-connect line: direction reset, baseline freeze, and bootstrap promotion.
-- `android_pc_vps_phase0_execution_plan.md`: execution-level plan for reaching the first direct-connect handshake without document drift.
-- `phase0_public_plaintext_baseline.md`: exact repository-side mirror of the shared Phase 0 public-IP plaintext baseline, aligned to the Android-side freeze note.
-- `phase0_relay_readiness_note.md`: verified readiness note for the chosen public plaintext baseline; records that the live VPS now matches that baseline.
-- `phase0_direct_connect_handoff.md`: short repository-side handoff note that closes Phase 0 planning freeze and points Phase 1 at bootstrap promotion with mail fallback preserved.
-- `phase1_direct_connect_bootstrap.md`: repository-side Phase 1 bootstrap/seam/failure note that defines the reusable relay bootstrap probe boundary and current fallback taxonomy.
-- `phase2_direct_outbound_contract_v1.md`: shared Phase 2 contract freeze for the first direct outbound `new task` slice over the existing relay transport wrapper.
-- `post_creation_session_action_contract_v1.md`: shared contract freeze for the first direct post-creation session actions, currently limited to current-session plain `reply` and current-session `/status` in planning only.
-- `post_creation_session_action_execution_plan.md`: 仓库侧执行计划，按 `/status -> reply` 的顺序落地 post-creation direct action，并先补齐 resolver、bridge seam、classification、closeout。
-- `post_creation_session_action_closeout_handoff.md`: 仓库侧 closeout handoff，收口第一轮 post-creation 实现切片，固定 live `/status` 与 live `reply` 的证据采集、bind 判读与 Layer 1 升级门槛。
-- `phase2_direct_outbound_closeout_handoff.md`: short repository-side handoff note that closes the Phase 2 direct-outbound v1 slice and points the next session at the Phase 3 direct inbound update bridge.
-- `phase3_direct_inbound_mapping_v1.md`: shared Phase 3 first-slice mapping note for active-session direct inbound updates into the existing Android session-detail read side.
-- `phase3_direct_inbound_wire_v1.md`: shared Phase 3 first-slice wire contract for active-session detail subscribe, `session_update`, ordering, and resync.
-- `phase3_direct_inbound_fixture_package_v1.md`: shared Phase 3 representative fixture package note for subscribe identity fallbacks, status snapshots, reconciliation, and resync.
-- `phase3_direct_inbound_closeout_handoff.md`: short repository-side handoff note that closes the Phase 3 direct inbound v1 slice and points the next active cross-repo work at Phase 4 dual-stack parity and primary-path switch.
-- `phase4_dual_stack_parity_plan.md`: repository-side execution plan for the first Phase 4 covered-flow parity pass, mismatch triage, rollback trigger definition, and the first primary-path switch gate.
-- `phase4_dual_stack_parity_checklist.md`: repository-side first validated matrix baseline for the shared Phase 4 parity checklist, currently scoped to `new_task`.
-- `phase4_mismatch_ledger.md`: repository-side mismatch-ledger skeleton plus the first validated repo-side readout for Phase 4.
-- `phase4_rollback_trigger_note.md`: repository-side first validated trigger baseline for the shared Phase 4 rollback trigger note, currently scoped to `new_task`.
-- `phase5_long_term_default_hardening_plan.md`: repository-side pre-freeze execution plan for sequencing the shared Phase 5 documentation set.
-- `phase5_long_term_fallback_note.md`: repository-side first draft baseline for the shared Phase 5 long-term fallback note.
-- `phase5_token_and_reconnect_handling_note.md`: repository-side first draft baseline for the shared Phase 5 token and reconnect handling note.
-- `phase5_remaining_edge_case_ledger.md`: repository-side first draft baseline for the shared Phase 5 remaining edge-case ledger.
-- `phase5_freeze_review_precheck.md`: repository-side precheck note for deciding whether the current Phase 5 draft set is ready to enter shared freeze review preparation without swallowing still-open lines.
-- `outbound_mail_contract_convergence_plan.md`: broader long-term plan for converging outbound task mail onto a neutral internal model, summary-first plain text, fragment-based HTML projection, and dual-format subject compatibility.
+1. 先看当前行为：`docs/current/*`
+2. 再看本目录中的“当前主线”
+3. 如果要补当前主线的 closeout / parity / bind 证据，再看本目录中的“主线支撑文档”
+4. 冻结线只在明确 reopen 时才重新进入 active queue
 
-Original outbound sequencing was: freeze the consumer-facing contract first, land the narrow `p9_html_mail_projection_plan.md` reading slice against that frozen contract, and only then start the broader `outbound_mail_contract_convergence_plan.md` work.
+## 当前主线
 
-As of 2026-03-20, the repo-side P9 slice is partially landed but the remaining plan is temporarily frozen. Use `docs/plans/p9_html_mail_projection_plan.md` as the progress record, and do not treat P9 as the active implementation queue until it is explicitly reopened.
+当前 active mainline 是 `TaskMail direct relay/control/file`。
 
-As of 2026-03-20, the repo-side outbound layering refactor is structurally landed in code. `docs/plans/pc_outbound_layering_refactor_plan.md` now serves as the progress record for that completed layering slice and the handoff point for future relay/VPS transport work, while the Android-facing contract remains frozen.
+当前主线阅读入口：
 
-Obsolete mail-first or TLS-gated Android/PC/VPS planning snapshots are intentionally removed from this directory rather
-than retained as passive historical context.
+- `android_pc_vps_coordinated_execution_plan.md`
+- `phase4_dual_stack_parity_plan.md`
+- `post_creation_session_action_contract_v1.md`
+- `post_creation_session_action_execution_plan.md`
+- `post_creation_session_action_closeout_handoff.md`
+- `taskmail_bootstrap_control_contract_v2.md`
+- `taskmail_android_pc_control_artifact_companion_note_v0.1.md`
+- `taskmail_control_plane_repo_responsibility_note_v0.1.md`
+- `taskmail_file_surface_repo_responsibility_note_v0.1.md`
+- `taskmail_artifact_fileid_mapping_sidecar_note_v0.1.md`
+- `taskmail_relay_accepted_result_replay_evidence_note_v0.1.md`
+- `taskmail_transport_probe_payload_companion_note_v0.1.md`
+- `android_transport_probe_joint_debug_requirements.md`
+- `taskmail_transport_token_reconnect_upload_error_companion_note_v0.1.md`
 
-The current server-side follow-up for relay work is now split across:
+当前读法：
 
-- `docs/plans/vps_relay_bootstrap_plan.md` for repository-scoped implementation sequencing
-- `docs/plans/vps_environment_baseline.md` for the inspected VPS baseline
-- `docs/platform/relay_transport_protocol_draft.md` for the earlier TLS-backed PC-to-VPS transport draft, now kept mainly as historical or alternative reference rather than as the active Android main-path authority
+- direct `new_task`、bootstrap `[SYNC]` `v1/v2`、current-session direct `/status` / plain `reply`、active-detail sidecar、`/v1/files`、`canonical_summary.json` / `session_action_closeout.json` / closeout bundle 都已经有 current behavior 落地
+- Android 仓当前也已补上 transport readiness / observability 的首轮真机正向证据：`/control transport_probe` same-id replay 稳定，`/v1/files` 已有 debug-only 单样本文本文件闭环
+- 但这条线还没有被仓库文档正式读成“闭环完成”；相关 closeout、live acceptance、Layer 1 读法升级判断仍可能继续发生
 
-As of 2026-03-21, Phases A-C of `vps_relay_bootstrap_plan.md` are landed. The repository now has the relay
-skeleton, local authenticated loopback, and a live VPS deployment on public `:8787`.
+## 后继候选线
 
-As of the 2026-03-21 plaintext cutover probe, that live deployment now matches the frozen public baseline:
-`http://124.223.41.153:8787/healthz` returns `200 OK` with `tls_enabled = false`, and
-`ws://124.223.41.153:8787/relay` returns `hello_ack` on the live token path. Use
-`docs/plans/phase0_relay_readiness_note.md` as the current repository-side proof package for that baseline.
+当前明确排在这条主线之后的候选内容是：
 
-As of the 2026-03-22 public partial re-probe, `http://124.223.41.153:8787/healthz` still returns `200 OK`, the live
-health payload still reports `tls_enabled = false` and now exposes `taskmail_direct_ingress_enabled = true`, and
-`ws://124.223.41.153:8787/relay` with an invalid token still returns `unauthorized`. The remaining VPS live-acceptance
-gap is therefore no longer basic public reachability, but a fresh valid-token `hello_ack` plus upgraded-path packet /
-SMTP delivery verification.
+- `vps_ingress_truth_v1_checklist.md`
+- `vps_ingress_truth_v1_execution_order.md`
 
-As of 2026-03-21, the remaining repository-side Phase 0 handoff is also explicit in
-`docs/plans/phase0_direct_connect_handoff.md`. That means repository-side Phase 0 is now closed, and the next active
-Android/PC/VPS slice is Phase 1 bootstrap promotion rather than more baseline debate.
+补充说明：
 
-As of 2026-03-21, repository-side Phase 1 bootstrap artifacts are also published in
-`docs/plans/phase1_direct_connect_bootstrap.md`. That note closes the repository-side bootstrap probe/seam/failure
-taxonomy, while cross-repo Phase 1 still remains open pending Android-side reuse above the debug-only screen.
+- “是否升级 current-session direct `/status` / plain `reply` 的 Layer 1 读法” 目前还是一个待决策方向，不是已冻结的新执行计划
+- 如果 owner 决定把这条 decision line 升格成新切片，可以新写 plan/handoff，也可以继续沿当前主线 closeout 资料推进；不要先把它误降级为“已经结束的旧线”
 
-As of 2026-03-21, the first shared Phase 2 freeze artifact also exists in
-`docs/plans/phase2_direct_outbound_contract_v1.md`. That note freezes only the first direct `new task` packet shape,
-ack meaning, and fallback matrix; it does not claim that the repository already implements direct Android business
-traffic today.
+## 冻结或非当前队列
 
-As of 2026-03-21, the repository-side closeout handoff for that first Phase 2 slice is also explicit in
-`docs/plans/phase2_direct_outbound_closeout_handoff.md`. That means the next active cross-repo slice should now be
-read as Phase 3 direct inbound update bridge rather than more implicit Phase 2 scope growth.
+以下文档当前不是 active implementation queue：
 
-As of 2026-03-21, the first repository-side Phase 3 read-side freeze artifact also exists in
-`docs/plans/phase3_direct_inbound_mapping_v1.md`. That note intentionally starts with active-session detail mapping and
-mail/direct coexistence rules rather than jumping straight to a full history or workspace-summary API.
+- `p9_html_mail_projection_plan.md`
+- `android_consumer_contract_alignment_plan.md`
+- `android_consumer_protocol_freeze_note.md`
+- `android_consumer_acceptance_requirements.md`
+- `outbound_mail_contract_convergence_plan.md`
+- `phase5_long_term_default_hardening_plan.md`
+- `phase5_long_term_fallback_note.md`
+- `phase5_token_and_reconnect_handling_note.md`
+- `phase5_remaining_edge_case_ledger.md`
+- `phase5_freeze_review_precheck.md`
 
-As of 2026-03-21, the next companion artifact for that Phase 3 slice is also explicit in
-`docs/plans/phase3_direct_inbound_wire_v1.md`. That note freezes the active-session detail subscribe flow, the
-`session_update` push message, and the first resync/ordering rules so Android and repository-side work can stop
-guessing different wire behavior.
+这些文档当前分别属于：
 
-As of 2026-03-21, the first representative fixture companion for that Phase 3 slice is also explicit in
-`docs/plans/phase3_direct_inbound_fixture_package_v1.md`. That note freezes the fixture-unit contract, identity
-fallback cases, question/status coverage, reconciliation suppress cases, and the first deterministic manifest both
-repositories should implement against.
+- 冻结中的 HTML / consumer-contract 线
+- 当前主线之外的长期 hardening / freeze-prep / evidence 资料
 
-As of 2026-03-22, the repository-side Phase 3 closeout handoff is also explicit in
-`docs/plans/phase3_direct_inbound_closeout_handoff.md`. That note reads the current repository slice as a closed first
-inbound-update package, records the paired Android-side Phase 3 freeze / Phase 4 start signal, and shifts the next
-active cross-repo slice to Phase 4 dual-stack parity and primary-path switch rather than further implicit Phase 3 scope
-growth.
+## 主线支撑文档
 
-As of 2026-03-22, the repository-side Phase 4 execution plan is also explicit in
-`docs/plans/phase4_dual_stack_parity_plan.md`. That note keeps the first covered flow conservative (`new_task` first),
-defines the planned parity checklist / mismatch ledger / rollback trigger outputs, and keeps direct `reply` /
-direct `/status` outside the Phase 4 covered flow even though a separate planning-layer contract freeze can now exist.
+### 1. Relay Bootstrap / Baseline
 
-As of 2026-03-22, the first shared post-creation session-action contract artifact also exists in
-`docs/plans/post_creation_session_action_contract_v1.md`. That note freezes only the planning-layer scope, target
-identity, bridge semantics, classification, and closeout anchors for current-session plain `reply` and current-session
-`/status`; it does not change current Layer 1 behavior and does not by itself authorize direct-default or implementation
-promotion.
+- `vps_relay_bootstrap_plan.md`
+- `vps_relay_deploy_runbook.md`
+- `vps_environment_baseline.md`
+- `phase0_public_plaintext_baseline.md`
+- `phase0_relay_readiness_note.md`
+- `phase0_direct_connect_handoff.md`
+- `phase1_direct_connect_bootstrap.md`
 
-As of 2026-03-22, the repository-side implementation follow-up for that shared contract is also explicit in
-`docs/plans/post_creation_session_action_execution_plan.md`. That note keeps the first repository execution order
-conservative (`/status` first, `reply` second), recommends reusing the current canonical mail ingress through a
-server-side bridge seam, and keeps Layer 1 unchanged until code, tests, and closeout evidence are all in place.
+### 2. Direct `new_task` / Active Detail / Phase 4 Evidence
 
-As of 2026-03-23, the repository-side closeout handoff for that post-creation slice is also explicit in
-`docs/plans/post_creation_session_action_closeout_handoff.md`. That note reads the first repository coding slice as
-landed, fixes the next live-evidence pair to current-session direct `/status` plus current-session plain direct
-`reply`, and keeps the next decision focused on closeout evidence and possible Layer 1 upgrade rather than further
-implicit scope growth.
+- `android_pc_vps_coordinated_execution_plan.md`
+- `phase2_direct_outbound_contract_v1.md`
+- `phase2_direct_outbound_closeout_handoff.md`
+- `phase3_direct_inbound_mapping_v1.md`
+- `phase3_direct_inbound_wire_v1.md`
+- `phase3_direct_inbound_fixture_package_v1.md`
+- `phase3_direct_inbound_closeout_handoff.md`
+- `phase4_dual_stack_parity_plan.md`
+- `phase4_dual_stack_parity_checklist.md`
+- `phase4_mismatch_ledger.md`
+- `phase4_rollback_trigger_note.md`
 
-As of 2026-03-23, the first shared bootstrap roundtrip contract artifact is also explicit in
-`docs/plans/taskmail_bootstrap_control_contract_v2.md`. That note intentionally does not overload the current
-bridge-to-mail `taskmail-bootstrap-control-contract-v1` reading; instead it freezes the next-step `[SYNC]` direct
-roundtrip contract as `v2`, with explicit `packet_ack`, direct `bootstrap_result`, replay, and fallback rules while
-keeping `docs/current/*` unchanged until code and closeout evidence land.
+### 3. Post-Creation Direct Action Closeout
 
-As of 2026-03-23, the repository-side companion note for the next shared Android-PC control/file split is also explicit
-in `docs/plans/taskmail_android_pc_control_artifact_companion_note_v0.1.md`. That note does not change current
-repository behavior; it records that the repository planning layer now acknowledges the shared `/control` +
-`/v1/files` shell, shared correlation keys, harness-first sequencing, and a first repo-side baseline for upload size,
-artifact hosting responsibility, replay ownership, and auth path.
+- `post_creation_session_action_contract_v1.md`
+- `post_creation_session_action_execution_plan.md`
+- `post_creation_session_action_closeout_handoff.md`
 
-As of 2026-03-23, those repo-side baselines are also split into two narrower implementation notes:
+### 4. TaskMail Control / File / Replay / Auth Notes
 
-- `docs/plans/taskmail_control_plane_repo_responsibility_note_v0.1.md`
-- `docs/plans/taskmail_file_surface_repo_responsibility_note_v0.1.md`
+- `taskmail_bootstrap_control_contract_v2.md`
+- `taskmail_android_pc_control_artifact_companion_note_v0.1.md`
+- `taskmail_control_plane_repo_responsibility_note_v0.1.md`
+- `taskmail_file_surface_repo_responsibility_note_v0.1.md`
+- `taskmail_artifact_fileid_mapping_sidecar_note_v0.1.md`
+- `taskmail_relay_accepted_result_replay_evidence_note_v0.1.md`
+- `taskmail_transport_probe_payload_companion_note_v0.1.md`
+- `android_transport_probe_joint_debug_requirements.md`
+- `taskmail_transport_token_reconnect_upload_error_companion_note_v0.1.md`
 
-These two notes still do not claim current behavior has changed; they only compress the next `/control` and `/v1/files`
-implementation responsibilities into repository-scoped language so later patches do not have to rediscover the same
-boundary decisions.
+## 仍可用的支撑性参考文档
 
-As of 2026-03-23, the repository also has two narrower follow-up notes for the remaining transport/file seams:
+以下文档不是当前主线本身，但仍是有效参考：
 
-- `docs/plans/taskmail_artifact_fileid_mapping_sidecar_note_v0.1.md`
-- `docs/plans/taskmail_relay_accepted_result_replay_evidence_note_v0.1.md`
+- `pc_background_hardening_plan.md`
+- `pc_service_hosting_plan.md`
+- `mail_adapter_refactor_plan.md`
+- `run_artifact_delivery_plan.md`
+- `artifact_markdown_rendering_plan.md`
+- `backend_permission_control_plan.md`
+- `project_folder_sync_entry_plan.md`
+- `project_folder_sync_relay_single_account_plan.md`
 
-The former freezes how repo-local `artifact_id` truth should project into transport-facing `file_id` bindings, while the
-later records the current relay-side machine-readable evidence baseline for `accepted` continuity and bootstrap-v2
-`result_id` replay continuity.
+## 使用建议
 
-As of 2026-03-23, the repository also has a narrower companion note for the remaining auth/reconnect/upload-error seam:
-
-- `docs/plans/taskmail_transport_token_reconnect_upload_error_companion_note_v0.1.md`
-
-That note does not change current behavior either. It freezes the repo-side reading that `/control` and `/v1/files`
-share one Bearer transport token, that reconnect is “new connection + new `hello_ack` + old logical request identity”,
-and that `/v1/files` failures must surface as machine-readable JSON errors rather than as silent fallback or silent
-truncation.
-
-As of 2026-03-22, the repository-side first evidence baselines for those three shared Phase 4 artifacts also exist in
-`docs/plans/phase4_dual_stack_parity_checklist.md`, `docs/plans/phase4_mismatch_ledger.md`, and
-`docs/plans/phase4_rollback_trigger_note.md`. Those notes keep the shared artifact names aligned with Android, record
-the first repository-side parity / rollback evidence readout, and intentionally keep the mismatch table empty until a
-confirmed cross-repo delta is actually evidenced.
-
-As of 2026-03-22, the repository-side `new_task` outcome normalization seam is also landed in code and tests: accepted,
-fallback-classified rejection, and hard rejection now share one repo-side classifier, accepted-packet failure can
-persist `last_error_code`, Android authority samples now also exist for shared closeout workflow reuse (`thread_097`)
-and `request_id`-first bind (`thread_098`), and `hard_rejection_stop` should now be read as a closed shared negative
-closeout rather than as a standing tail item for that specific `new_task` row. This does not close other open lines
-such as fresh VPS acceptance; it only means that later planning should not keep reopening `hard_rejection_stop` unless
-a fresh regression actually appears on the current build.
-
-As of 2026-03-22, the repository-side Phase 5 documentation-sequencing plan is also explicit in
-`docs/plans/phase5_long_term_default_hardening_plan.md`. That note keeps the current Phase 5 effort at the
-documentation-assembly / pre-freeze stage, defines the fill order for the shared artifacts, and explicitly prevents
-Phase 5 from being read as “Phase 4 already closed”.
-
-As of 2026-03-22, the repository-side Phase 5 shared-artifact homes also exist in
-`docs/plans/phase5_long_term_fallback_note.md`, `docs/plans/phase5_token_and_reconnect_handling_note.md`, and
-`docs/plans/phase5_remaining_edge_case_ledger.md`. All three have now advanced to first draft baselines. None of these
-documents imply that the Phase 4 exit gates are already satisfied or that `direct-default` has already switched.
-
-As of 2026-03-22, the repository-side freeze-review-preparation checkpoint is also explicit in
-`docs/plans/phase5_freeze_review_precheck.md`. That note does not declare Phase 5 frozen and does not authorize
-`direct-default`; it only records that the current draft set now has a reviewable precheck shape while still keeping
-open lines such as fresh VPS acceptance visible.
-
-Layering reference: [document_layering_plan.md](../document_layering_plan.md).
+- 如果任务是“修改当前行为”，先改 `docs/current/*`
+- 如果任务是“判断当前还缺什么”，先看 `docs/plans/coding_backlog.md`
+- 如果任务是“继续推进当前直连主线”，优先读本文件里的“当前主线”和“主线支撑文档”
+- 如果某份旧计划文档没有被本文件列为当前主线、后继候选线或冻结线，就不要默认把它当成当前实现队列

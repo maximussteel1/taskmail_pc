@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import os
 import tarfile
 
-from scripts.sync_relay_task_root import build_task_root_archive, compute_task_root_fingerprint
+from scripts.sync_relay_task_root import (
+    _scp_base_args,
+    _ssh_base_args,
+    build_task_root_archive,
+    compute_task_root_fingerprint,
+)
 
 
 def test_compute_task_root_fingerprint_changes_when_task_root_changes(tmp_path) -> None:
@@ -36,3 +42,33 @@ def test_build_task_root_archive_preserves_relative_paths(tmp_path) -> None:
         names = sorted(member.name for member in tar.getmembers())
     assert "thread_001/thread_state.json" in names
     assert "_mailbox/index.json" in names
+
+
+def test_sync_task_root_ssh_and_scp_ignore_proxy_and_jump_settings(tmp_path) -> None:
+    key_path = tmp_path / "work_bot.pem"
+    key_path.write_text("demo", encoding="utf-8")
+
+    ssh_args = _ssh_base_args("ubuntu", "relay.example.com", key_path)
+    scp_args = _scp_base_args("ubuntu", "relay.example.com", key_path)
+    expected_config_path = "NUL" if os.name == "nt" else "/dev/null"
+
+    assert ssh_args[:8] == [
+        "ssh",
+        "-F",
+        expected_config_path,
+        "-o",
+        "ProxyCommand=none",
+        "-o",
+        "ProxyJump=none",
+        "-i",
+    ]
+    assert scp_args[:8] == [
+        "scp",
+        "-F",
+        expected_config_path,
+        "-o",
+        "ProxyCommand=none",
+        "-o",
+        "ProxyJump=none",
+        "-i",
+    ]

@@ -11,11 +11,21 @@ from mail_runner.adapters.base import WorkerAdapter
 from mail_runner.app import _process_batch, bootstrap, process_once
 from mail_runner.config import AppConfig
 from mail_runner.dispatcher import Dispatcher
+from mail_runner.mail_io import SYSTEM_MESSAGE_HEADER, SYSTEM_MESSAGE_HEADER_VALUE
 from mail_runner.models import MailAttachment, MailEnvelope, RunResult, TaskSnapshot
 from mail_runner.adapters.mock_adapter import MockAdapter
 from mail_runner.runner import SerialTaskRunner
 from mail_runner.status import RUN_STATUS_SUCCESS
 from mail_runner.thread_store import build_workspace_id, load_thread_state, load_workspace_state
+from mail_runner.transport_probe_mail import (
+    TRANSPORT_PROBE_ID_HEADER,
+    TRANSPORT_PROBE_MAIL_HEADER,
+    TRANSPORT_PROBE_MAIL_HEADER_VALUE,
+    TRANSPORT_PROBE_PACKET_ID_HEADER,
+    TRANSPORT_PROBE_REQUEST_ID_HEADER,
+    TRANSPORT_PROBE_TRACE_ID_HEADER,
+    load_transport_probe_observation,
+)
 
 
 class FakeMailClient:
@@ -36,6 +46,47 @@ class FakeMailClient:
     def delete_messages_by_message_ids(self, message_ids, mailbox="INBOX"):
         self.deleted_message_batches.append(list(message_ids))
         return list(message_ids)
+
+
+def _transport_probe_envelope(
+    *,
+    message_id: str,
+    probe_id: str = "probe-transport-001",
+    request_id: str = "req-transport-001",
+    packet_id: str = "packet-transport-001",
+    trace_id: str = "trace-transport-001",
+    payload_text: str = "hello-probe",
+) -> MailEnvelope:
+    subject = f"[TPROBE][A2P][MAIL] {probe_id}"
+    body_text = "\n".join(
+        [
+            "Probe-Version: taskmail-transport-probe-payload-v1",
+            f"Probe-Id: {probe_id}",
+            "Scenario: android_direct_ping_to_vps_to_pc",
+            "Direction: android_to_pc",
+            "Transport-Kind: mail",
+            "Timeout-Seconds: 30",
+            f"Payload-Text: {payload_text}",
+            "",
+        ]
+    )
+    return MailEnvelope(
+        message_id=message_id,
+        subject=subject,
+        from_addr="relay@example.com",
+        to_addr="bot@example.com",
+        date="2026-03-24T00:30:00",
+        body_text=body_text,
+        raw_headers={
+            "Subject": subject,
+            SYSTEM_MESSAGE_HEADER: SYSTEM_MESSAGE_HEADER_VALUE,
+            TRANSPORT_PROBE_MAIL_HEADER: TRANSPORT_PROBE_MAIL_HEADER_VALUE,
+            TRANSPORT_PROBE_ID_HEADER: probe_id,
+            TRANSPORT_PROBE_REQUEST_ID_HEADER: request_id,
+            TRANSPORT_PROBE_PACKET_ID_HEADER: packet_id,
+            TRANSPORT_PROBE_TRACE_ID_HEADER: trace_id,
+        },
+    )
 
 
 def test_process_once_runs_new_task_happy_path(tmp_path) -> None:
@@ -247,6 +298,64 @@ def test_process_once_handles_relay_direct_project_folder_sync_without_creating_
     assert f"- alpha | {sync_root / 'alpha'}" in client.sent_messages[0]["body"]
     assert client.deleted_message_batches == []
     assert not (tmp_path / "tasks" / "thread_001").exists()
+
+
+def test_process_once_records_transport_probe_mailbox_observation_without_creating_thread(tmp_path) -> None:
+    envelope = _transport_probe_envelope(message_id="<probe@example.com>")
+    client = FakeMailClient([envelope])
+    dispatcher = Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0))
+    config = AppConfig(from_addr="user@example.com", from_name="Mail Runner", task_root="tasks")
+
+    stats = process_once(config, base_dir=tmp_path, mail_client=client, dispatcher=dispatcher)
+
+    observation_path = tmp_path / "tasks" / "_mailbox" / "transport_probes" / "probe-transport-001.json"
+    payload = json.loads(observation_path.read_text(encoding="utf-8"))
+    loaded_payload = load_transport_probe_observation(tmp_path / "tasks", "probe-transport-001")
+
+    assert stats == {"fetched": 1, "processed": 1, "skipped": 0, "failed": 0}
+    assert client.sent_messages == []
+    assert not (tmp_path / "tasks" / "thread_001").exists()
+    assert payload["schema_version"] == "taskmail-transport-probe-observation-v1"
+    assert payload["probe_id"] == "probe-transport-001"
+    assert payload["request_id"] == "req-transport-001"
+    assert payload["packet_id"] == "packet-transport-001"
+    assert payload["trace_id"] == "trace-transport-001"
+    assert payload["status"] == "observed"
+    assert payload["observation_scope"] == "pc_mailbox_ingress"
+    assert payload["delivery"]["transport_message_id"] == "<probe@example.com>"
+    assert payload["probe_mail"]["payload_text"] == "hello-probe"
+    assert payload["seen_count"] == 1
+    assert payload["observed_message_ids"] == ["<probe@example.com>"]
+    assert loaded_payload is not None
+    assert loaded_payload["delivery"]["transport_message_id"] == "<probe@example.com>"
+    assert loaded_payload["probe_mail"]["payload_text"] == "hello-probe"
+
+
+def test_process_once_upserts_transport_probe_mailbox_observation_by_probe_id(tmp_path) -> None:
+    first = _transport_probe_envelope(message_id="<probe-1@example.com>")
+    second = _transport_probe_envelope(
+        message_id="<probe-2@example.com>",
+        payload_text="hello-probe-again",
+    )
+    client = FakeMailClient([first, second])
+    dispatcher = Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0))
+    config = AppConfig(from_addr="user@example.com", from_name="Mail Runner", task_root="tasks")
+
+    stats = process_once(config, base_dir=tmp_path, mail_client=client, dispatcher=dispatcher)
+
+    observation_path = tmp_path / "tasks" / "_mailbox" / "transport_probes" / "probe-transport-001.json"
+    payload = json.loads(observation_path.read_text(encoding="utf-8"))
+    loaded_payload = load_transport_probe_observation(tmp_path / "tasks", "probe-transport-001")
+
+    assert stats == {"fetched": 2, "processed": 2, "skipped": 0, "failed": 0}
+    assert client.sent_messages == []
+    assert payload["seen_count"] == 2
+    assert payload["observed_message_ids"] == ["<probe-1@example.com>", "<probe-2@example.com>"]
+    assert payload["delivery"]["transport_message_id"] == "<probe-2@example.com>"
+    assert payload["probe_mail"]["payload_text"] == "hello-probe-again"
+    assert loaded_payload is not None
+    assert loaded_payload["seen_count"] == 2
+    assert loaded_payload["observed_message_ids"] == ["<probe-1@example.com>", "<probe-2@example.com>"]
 
 
 def test_process_once_reports_unavailable_project_sync_root(tmp_path) -> None:

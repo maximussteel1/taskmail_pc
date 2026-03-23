@@ -2,7 +2,7 @@
 
 仓库级协作约定见 [AGENTS.md](AGENTS.md)。
 
-本项目当前代码已经在 `Phase 8` 基础上继续落地 run artifact 交付、Markdown-first 状态渲染、backend permission control、首封 `[SYNC]` 项目目录同步入口、最小 host 宿主层、最小可观测 CLI、可选的 per-thread 自动监控窗口，以及超大产物的 COS 外链交付：运行产物仍然按 `thread` 目录落盘，但已经补上 `workspace + session` 索引、后台队列调度、native backend session resume、same-workspace explicit session targeting、`/pause -> /resume -> /end` 控制面、显式问题协议邮件闭环、`Permission:` 字段的跨 reply 持久化与后端映射、`mail_runner.host + host_state.json + runtime single-instance lock`、PC 侧本地 thread kill request，以及只读的 `mail_runner.observe status/list-running/list-queue/show-thread/show-thread-live`。对于 `codex + sdk` 路径，运行中的 turn 还会落盘 `stream.events.jsonl`，供 PC 侧会话窗显示带时间戳的 transcript + live output，并且 sidecar 现在会在看到终止 `turn.completed` / `turn.failed` 事件后立刻收尾，不再被迟迟不退出的 CLI 子进程拖住。Bot mailbox receive now supports best-effort IMAP `IDLE` on servers that advertise it, with bounded `IDLE` reads plus a forced full mailbox sync and `IDLE` rebuild every 5 minutes so a stuck long-lived socket cannot silently freeze the host loop; unsupported or unstable servers automatically fall back to the existing UID-based polling path. COS external delivery now uses a direct HTTPS client session and does not inherit ambient proxy env vars. `summary.md` 第一行、`thread_state.last_summary` 和状态邮件里的 `Summary:` 会优先展示真实后端输出的用户摘要，而不是固定模板文案。当前工作区在 `2026-03-20` 本地执行 `.\.venv\Scripts\python.exe -m pytest` 的结果为 `272 passed`。
+本项目当前代码已经超出早期 `Phase 8` 范围：在保留 mail-first 执行语义与现有邮件输出合同的前提下，仓库已经落地 direct `new_task`、bootstrap `[SYNC]` `v1/v2`、current-session direct `/status` / plain `reply`、active-session detail read sidecar、relay-hosted `/v1/files` 大文件交付，以及 `canonical_summary.json` / `session_action_closeout.json` / `taskmail_daily_closeout_bundle.json` 这组 closeout 证据层。运行产物仍按 `thread` 目录落盘，PC 仍是 task execution truth，mail 仍是默认控制面与 receipt/artifact/history truth；relay direct surface 只是窄范围附加面，不把 VPS 提升为执行真相层。`codex + sdk` 路径仍会落盘 `stream.events.jsonl` 供 PC 侧只读观察，bot mailbox receive 仍支持 best-effort IMAP `IDLE` 唤醒并保留 UID-based polling 作为 truth layer，COS 交付继续走直连 HTTPS，不继承 ambient proxy env vars。当前工作区最近一次有记录的 full suite 是 `2026-03-20` 的 `272 passed`；`2026-03-23` 之后又继续落地了 relay/control/file 相关切片。
 
 ## 当前能力
 
@@ -21,6 +21,9 @@
 - task thread 的 live mailbox 现在按三类保留：`[ACCEPTED]` / `[RUNNING]` / `[STATUS]` 只保留最新进度邮件；`[QUESTION]` / `[PAUSED]` 和 `[DONE]` / `[FAILED]` / `[KILLED]` 作为 action-required / receipt 邮件保留；完整历史仍保留在 `tasks/<thread_id>/mail/raw_*.json`
 - 真实 CLI / SDK 回复现在支持 structured run-result capsule：adapter 会回填 `RunResult.changed_files`、`tests_passed`、`error_type`、`error_message`，并把结果块从用户可见回复与状态邮件正文里剥离
 - 提供超大产物 COS 外链交付：小文件继续作为邮件附件，超阈值文件改为预签名下载链接并展示在单独的 `External Deliveries` 区域；`APK/IPA` 会自动改用 `.bin` 对象名绕过 COS 默认域名分发限制；COS 上传当前强制走直连 HTTPS，不继承宿主进程里的 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`
+- 提供窄范围 TaskMail direct relay surface：direct `new_task`、bootstrap `[SYNC]` `v1/v2`、current-session direct `/status` 与 plain `reply`，以及 active-session detail read sidecar
+- 提供 relay `/v1/files` external delivery：当 `outbound_transport=relay` 且未使用 COS 时，超阈值 artifact 会上传到 relay file surface，并把 `artifact_id -> file_id` 绑定单独写入 `artifact_file_binding_index.json`
+- 提供 direct-action / parity closeout 证据层：每轮 run 会落 `canonical_summary.json`，current-session direct `/status` 与 plain `reply` 会落 `session_action_closeout.json`，并可由 `scripts/build_taskmail_closeout_bundle.py` 组装 `taskmail_daily_closeout_bundle.json`
 - 提供首封 `[SYNC]` 项目目录同步入口：直接回复 `D:\projects` / `E:\projects` 或配置根路径下的一级文件夹清单，不触发 backend run，也不创建 task/session
 - 提供 `[PAUSED]` 状态邮件和 `/pause`、`/resume`、`/end` 的显式控制面；paused 只阻止后续 continuation，不会暂停已经在跑的 CLI 进程
 - 提供 `app.py --once` 的同步批处理路径，以及 `app.py --loop` 的后台轮询路径
@@ -86,9 +89,9 @@ task.md
 当前活跃协议文档集中在 [docs/current/README.md](docs/current/README.md)；
 当前仓库改造计划集中在 [docs/plans/README.md](docs/plans/README.md)；
 未来平台文档集中在 [docs/platform/README.md](docs/platform/README.md)；
-当前唯一的下一阶段开发计划在 [docs/plans/coding_backlog.md](docs/plans/coding_backlog.md)。
+当前 backlog 重置口径见 [docs/plans/coding_backlog.md](docs/plans/coding_backlog.md)。
 
-当前发出内容的 consumer-facing authority 以 [docs/current/pc_mail_output_protocol.md](docs/current/pc_mail_output_protocol.md) 和 [docs/current/multimedia_mail_protocol.md](docs/current/multimedia_mail_protocol.md) 为准。与 Android/Thunderbird 协同开发相关的下一步顺序已经收口为：先按 [docs/plans/android_consumer_contract_alignment_plan.md](docs/plans/android_consumer_contract_alignment_plan.md) 与 [docs/plans/android_consumer_protocol_freeze_note.md](docs/plans/android_consumer_protocol_freeze_note.md) 冻结 consumer contract，再落地 [docs/plans/p9_html_mail_projection_plan.md](docs/plans/p9_html_mail_projection_plan.md) 的窄范围 HTML projection，最后才进入 [docs/plans/outbound_mail_contract_convergence_plan.md](docs/plans/outbound_mail_contract_convergence_plan.md) 的 broader convergence。
+当前 Android / relay / output 相关 authority 以 [docs/current/taskmail_direct_control_file_contract.md](docs/current/taskmail_direct_control_file_contract.md)、[docs/current/android_runner_communication_contract.md](docs/current/android_runner_communication_contract.md)、[docs/current/pc_mail_output_protocol.md](docs/current/pc_mail_output_protocol.md) 和 [docs/current/multimedia_mail_protocol.md](docs/current/multimedia_mail_protocol.md) 为准。`docs/plans/README.md` 现在用于区分当前主线、后继候选线、冻结线和支撑性 closeout/handoff 文档；repo-side `TaskMail direct relay/control/file` 这条线虽然已经落地了大段 current behavior，但按当前口径仍然是 active mainline，不应被误读成已完成退场。
 
 ## 当前架构现状
 
@@ -488,9 +491,20 @@ question_id: phase2_device_validation
 
 ## 验证现状
 
-- `2026-03-18` 本地自动化验证：`.\.venv\Scripts\python.exe -m pytest` -> `247 passed`
-- 自动化测试已经覆盖新任务 happy path、首封 `[SYNC]` 目录同步、reply resume、失败后 fresh recovery run、`/new` fresh session、`/sessions` 列表、same-workspace targeted `/status` / `/continue` / `/resume`、`/pause -> /resume -> /end`、ended thread reactivation、`QUESTION -> ANSWER -> DONE`、线程健康判定、same-workspace 并发上限与同线程 follow-up 排队、跨 workspace 并发、runner 重启恢复，以及 CLI resume 命令构造
-- 真实邮箱 / 真实 backend 的联调记录仍保留在 `state.md`，其中 `[OC]`、`[CX]`、`STATUS_QUERY`、`RERUN`、真实 `[QUESTION] -> ANSWER -> DONE` 和正常 mailbox loop 下的真实 backend `KILL` 都已有落盘工件
+- 最近一次有记录的 full-suite 自动化验证是 `2026-03-20`：`.\.venv\Scripts\python.exe -m pytest` -> `272 passed`
+- `2026-03-23` 之后仓库又继续落地了 relay/control/file 相关切片；本次 README 重整没有顺带重跑测试
+- 当前自动化覆盖已经包含：
+  - 新任务与 `[SYNC]` 路径
+  - reply resume / failed-thread fresh recovery / `/new`
+  - same-workspace targeted `/status` / `/continue` / `/resume`
+  - `/pause -> /resume -> /end`
+  - thread lifecycle / health / queue / restart recovery
+  - direct `new_task`
+  - bootstrap `[SYNC]` `v1` / `v2`
+  - current-session direct `/status` 与 plain `reply`
+  - relay `/v1/files` file surface
+  - `canonical_summary.json` / `session_action_closeout.json` / `taskmail_daily_closeout_bundle.json`
+- 真实邮箱、真实后端、closeout 相关工件当前主要保留在 `_tmp_*`、`tasks/`、以及 `docs/plans/*` 对应 closeout/evidence 文档引用的脚本输出中
 
 ## Troubleshooting
 
@@ -508,11 +522,13 @@ question_id: phase2_device_validation
 
 ## 后续事项
 
-- 发出内容方向当前先按 `consumer contract freeze -> P9 HTML projection -> broader outbound convergence` 推进，不再把 neutral outbound model、summary-first plain text 或 subject-shape cutover 抢到 P9 前面
-- 评估是否要让非 reply 新邮件在 `workspace + title` 明确命中时复用已有 session
-- 如需继续推进会话面，优先收口 cross-workspace routing 与 non-reply reuse policy，而不是退回按标题隐式猜测
-- 如果继续推进调度重构，则优先补“新邮件按 workspace + 标题复用已有 session”以及更明确的 session 定位能力
-- 多媒体邮件输入输出功能的后续开发以 [docs/current/multimedia_mail_protocol.md](docs/current/multimedia_mail_protocol.md) 为唯一事实来源
+- repository-side `TaskMail direct relay/control/file` 这条线仍是当前主线；不要把它误读成“已经完成后退场”
+- `phase2/phase3/phase4/post_creation/taskmail_*` 文档当前仍是这条主线的 closeout / evidence / handoff 支撑资料，不是单纯历史
+- 当前主线之后最明确的候选线是 `VPS ingress truth v1`
+- “是否升级 current-session direct `/status` / plain `reply` 的 Layer 1 读法” 当前仍是 decision line，不是已冻结执行计划
+- 如需重启 HTML / `P9`，必须显式 reopen；不能因为旧文档仍在仓库里就默认恢复为当前主线
+- 如果后续重新打开 session / routing 方向，再讨论 non-reply reuse、cross-workspace routing 和更强的 session targeting，而不是继续沿用旧 roadmap 口径
+- 多媒体邮件输入输出的当前事实仍以 [docs/current/multimedia_mail_protocol.md](docs/current/multimedia_mail_protocol.md) 为准
 
 ## Transcript Export
 

@@ -44,6 +44,7 @@ from .protocol import (
     parse_client_message,
 )
 from .session_store import InMemorySessionStore
+from .transport_probe import is_taskmail_transport_probe_packet
 
 _DEFAULT_HEARTBEAT_SECONDS = 30
 _DEFAULT_PHASE3_BROADCAST_INTERVAL_SECONDS = 1.0
@@ -749,6 +750,7 @@ class LoopbackRelayServer:
         if (
             is_taskmail_direct_packet(message)
             or is_taskmail_direct_project_sync_packet(message)
+            or is_taskmail_transport_probe_packet(message)
             or is_taskmail_post_creation_packet(message)
         ):
             raise RelayDirectActionError("unsupported_action", "direct TaskMail action is not available on this relay")

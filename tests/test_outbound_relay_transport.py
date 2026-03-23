@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from mail_runner.outbound.contract import OutboundDispatchRequest, TaskRunPacket
+from mail_runner.outbound import relay_transport
 from mail_runner.outbound.relay_transport import RelayTransport
 from mail_runner.relay_server.config import RelayServerConfig
 from mail_runner.relay_server.loopback import LoopbackRelayServer
@@ -69,3 +70,15 @@ def test_relay_transport_sends_request_through_loopback_server() -> None:
     assert stored_packet is not None
     assert stored_packet.dispatch_metadata["subject"] == "[DONE][S:thread_001] Demo task"
     assert stored_packet.dispatch_metadata["references"] == ["<root@example.com>"]
+
+
+def test_relay_transport_direct_websocket_connect_kwargs_disable_proxy_when_supported(monkeypatch) -> None:
+    monkeypatch.setattr(relay_transport, "_WEBSOCKETS_CONNECT_SUPPORTS_PROXY", True)
+
+    assert relay_transport._direct_websocket_connect_kwargs() == {"proxy": None}
+
+
+def test_relay_transport_direct_websocket_connect_kwargs_stays_empty_when_proxy_kwarg_is_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(relay_transport, "_WEBSOCKETS_CONNECT_SUPPORTS_PROXY", False)
+
+    assert relay_transport._direct_websocket_connect_kwargs() == {}

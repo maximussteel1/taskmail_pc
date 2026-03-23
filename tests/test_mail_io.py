@@ -15,6 +15,14 @@ from mail_runner.mail_io import (
     message_bytes_to_envelope,
 )
 from mail_runner.models import OutgoingAttachment
+from mail_runner.transport_probe_mail import (
+    TRANSPORT_PROBE_ID_HEADER,
+    TRANSPORT_PROBE_MAIL_HEADER,
+    TRANSPORT_PROBE_MAIL_HEADER_VALUE,
+    TRANSPORT_PROBE_PACKET_ID_HEADER,
+    TRANSPORT_PROBE_REQUEST_ID_HEADER,
+    TRANSPORT_PROBE_TRACE_ID_HEADER,
+)
 
 
 def test_message_bytes_to_envelope_prefers_plain_text() -> None:
@@ -246,6 +254,99 @@ def test_fetch_unseen_messages_uses_uid_scan_and_skips_system_mail(monkeypatch, 
     assert inbox_state["last_uid"] == 102
     assert inbox_state["processed_uids"] == ["101", "102"]
     assert inbox_state["processed_message_ids"] == ["<normal@example.com>", "<system@example.com>"]
+
+
+def test_fetch_unseen_messages_passthroughs_transport_probe_system_mail(monkeypatch, tmp_path) -> None:
+    normal = EmailMessage()
+    normal["From"] = "User <user@example.com>"
+    normal["To"] = "Runner <runner@example.com>"
+    normal["Subject"] = "[OC] Demo"
+    normal["Message-ID"] = "<normal@example.com>"
+    normal.set_content("Body")
+
+    probe = EmailMessage()
+    probe["From"] = "Runner <relay@example.com>"
+    probe["To"] = "Runner <bot@example.com>"
+    probe["Subject"] = "[TPROBE][A2P][MAIL] probe-transport-001"
+    probe["Message-ID"] = "<probe@example.com>"
+    probe[SYSTEM_MESSAGE_HEADER] = SYSTEM_MESSAGE_HEADER_VALUE
+    probe[TRANSPORT_PROBE_MAIL_HEADER] = TRANSPORT_PROBE_MAIL_HEADER_VALUE
+    probe[TRANSPORT_PROBE_ID_HEADER] = "probe-transport-001"
+    probe[TRANSPORT_PROBE_REQUEST_ID_HEADER] = "req-transport-001"
+    probe[TRANSPORT_PROBE_PACKET_ID_HEADER] = "packet-transport-001"
+    probe[TRANSPORT_PROBE_TRACE_ID_HEADER] = "trace-transport-001"
+    probe.set_content(
+        "\n".join(
+            [
+                "Probe-Version: taskmail-transport-probe-payload-v1",
+                "Probe-Id: probe-transport-001",
+                "Scenario: android_direct_ping_to_vps_to_pc",
+                "Direction: android_to_pc",
+                "Transport-Kind: mail",
+                "Timeout-Seconds: 30",
+                "Payload-Text: hello-probe",
+                "",
+            ]
+        )
+    )
+
+    class FakeImap:
+        def __init__(self, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+
+        def login(self, user: str, password: str) -> tuple[str, list[bytes]]:
+            return "OK", [b""]
+
+        def select(self, mailbox: str) -> tuple[str, list[bytes]]:
+            return "OK", [b""]
+
+        def uid(self, command: str, *args):
+            normalized = command.upper()
+            if normalized == "SEARCH":
+                return "OK", [b"101 102"]
+            if normalized == "FETCH":
+                uid_text = str(args[0])
+                payload = normal.as_bytes() if uid_text == "101" else probe.as_bytes()
+                return "OK", [(b"RFC822", payload)]
+            if normalized == "STORE":
+                return "OK", [b""]
+            raise AssertionError(f"unexpected uid command: {command}")
+
+        def close(self) -> None:
+            return None
+
+        def logout(self) -> None:
+            return None
+
+    monkeypatch.setattr("mail_runner.mail_io.imaplib.IMAP4_SSL", FakeImap)
+    client = MailClient(
+        AppConfig(
+            imap_host="imap.example.com",
+            imap_port=993,
+            imap_user="user",
+            imap_password="pass",
+            smtp_host="smtp.example.com",
+            smtp_port=465,
+            smtp_user="user",
+            smtp_password="pass",
+            from_addr="runner@example.com",
+            task_root=str(tmp_path / "tasks"),
+        )
+    )
+
+    first_fetch = client.fetch_unseen_messages()
+    second_fetch = client.fetch_unseen_messages()
+
+    assert [item.message_id for item in first_fetch] == ["<normal@example.com>", "<probe@example.com>"]
+    assert second_fetch == []
+
+    state_path = tmp_path / "tasks" / "_mailbox" / "processed_messages.json"
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    inbox_state = payload["mailboxes"]["INBOX"]
+    assert inbox_state["last_uid"] == 102
+    assert inbox_state["processed_uids"] == ["101", "102"]
+    assert inbox_state["processed_message_ids"] == ["<normal@example.com>", "<probe@example.com>"]
 
 
 def test_fetch_unseen_messages_skips_duplicate_message_ids_from_new_uids(monkeypatch, tmp_path) -> None:

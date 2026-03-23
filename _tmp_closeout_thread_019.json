@@ -1,0 +1,176 @@
+{
+  "version": 1,
+  "generated_at": "2026-03-23T02:14:53",
+  "thread_id": "thread_019",
+  "task_id": "20260323_015159_aa93",
+  "run_dir": {
+    "path": "_tmp_live_mail_runner\\tasks\\thread_019\\runs\\20260323_015159_aa93",
+    "thread_relative_path": "runs/20260323_015159_aa93"
+  },
+  "bundle_presence": {
+    "pc_canonical_outcome": true,
+    "pc_terminal_mail": true,
+    "android_latest_send_evidence": true,
+    "android_terminal_summary": true,
+    "pc_outbound_delivery_attempts": true,
+    "pc_relay_packet_store": false,
+    "pc_session_action_closeout": false
+  },
+  "pc_canonical_outcome": {
+    "source": "canonical_summary",
+    "resolution": "canonical_summary",
+    "path": "_tmp_live_mail_runner\\tasks\\thread_019\\runs\\20260323_015159_aa93\\canonical_summary.json",
+    "thread_relative_path": "runs/20260323_015159_aa93/canonical_summary.json",
+    "ingress_type": "direct_bridge",
+    "request_id": "req_af38d0c80c4e472eae929a709c01d121",
+    "ingress_message_id": "<177420189131.472093.17819624323046196686@mail-runner.local>",
+    "packet_id": "android-taskmail:new-task:req_af38d0c80c4e472eae929a709c01d121",
+    "action_type": null,
+    "target_session_identity": null,
+    "last_summary": "Node.js v25.8.1",
+    "terminal_mail_message_id": "<177420192300.472093.15012734246337236242@mail-runner.local>",
+    "terminal_mail_subject": "[FAILED][S:thread_019] Phase5 status closeout 20260323 A"
+  },
+  "pc_terminal_mail": {
+    "resolution": "terminal_mail_message_id",
+    "path": "_tmp_live_mail_runner\\tasks\\thread_019\\mail\\raw_004.json",
+    "thread_relative_path": "mail/raw_004.json",
+    "message_id": "<177420192300.472093.15012734246337236242@mail-runner.local>",
+    "subject": "[FAILED][S:thread_019] Phase5 status closeout 20260323 A",
+    "status_label": "FAILED"
+  },
+  "android_latest_send_evidence": {
+    "source_path": "E:\\projects\\mail_based_task_manager\\_tmp_android_send_records_thread_019.json",
+    "selection": "target_time",
+    "action_type": "status",
+    "target_session_identity": {
+      "workspace_id": "workspace_cb2404bf828c",
+      "session_id": "thread_019",
+      "thread_id": "thread_019"
+    },
+    "sender_account_id": null,
+    "recorded_at": 1774202468880,
+    "repo_path": null,
+    "workdir": null,
+    "bootstrap_status": "hello_ack",
+    "outcome": "MailFallbackSucceeded",
+    "switch_gate": "FallbackRequired",
+    "request_id": null,
+    "receipt_id": null,
+    "transport_message_id": null,
+    "fallback_reason": "only phase2-direct-outbound-contract-v1 is supported for direct TaskMail actions",
+    "error_message": null
+  },
+  "android_terminal_summary": {
+    "last_summary": "Node.js v25.8.1"
+  },
+  "pc_supporting_evidence": {
+    "thread_state": {
+      "path": "_tmp_live_mail_runner\\tasks\\thread_019\\thread_state.json",
+      "thread_relative_path": "thread_state.json",
+      "status": "failed",
+      "lifecycle": "ended",
+      "root_message_id": "<177420189131.472093.17819624323046196686@mail-runner.local>",
+      "latest_message_id": "<177420248987.472093.16863858772984251228@mail-runner.local>",
+      "current_task_id": "20260323_015159_aa93",
+      "last_summary": "Node.js v25.8.1"
+    },
+    "run_result": {
+      "path": "_tmp_live_mail_runner\\tasks\\thread_019\\runs\\20260323_015159_aa93\\result.json",
+      "thread_relative_path": "runs/20260323_015159_aa93/result.json",
+      "status": "failed",
+      "exit_code": 1,
+      "started_at": "2026-03-23T01:52:02",
+      "finished_at": "2026-03-23T01:52:02",
+      "summary_file": "runs/20260323_015159_aa93/summary.md",
+      "error_type": "sidecar_exit",
+      "error_message": "Node.js v25.8.1"
+    },
+    "pc_ingress_mail": {
+      "resolution": "ingress_message_id",
+      "path": "_tmp_live_mail_runner\\tasks\\thread_019\\mail\\raw_001.json",
+      "thread_relative_path": "mail/raw_001.json",
+      "message_id": "<177420189131.472093.17819624323046196686@mail-runner.local>",
+      "subject": "[CX] Phase5 status closeout 20260323 A",
+      "status_label": "CX",
+      "request_id": "req_af38d0c80c4e472eae929a709c01d121",
+      "packet_id": "android-taskmail:new-task:req_af38d0c80c4e472eae929a709c01d121",
+      "direct_header": "1"
+    },
+    "session_action_closeout": null,
+    "outbound_delivery_attempts": {
+      "path": "_tmp_live_mail_runner\\tasks\\thread_019\\outbound\\delivery_attempts.jsonl",
+      "thread_relative_path": "outbound/delivery_attempts.jsonl",
+      "matched_attempt_count": 4,
+      "matched_attempts": [
+        {
+          "packet_id": "packet:20260323_015159_aa93:35a1334a",
+          "thread_id": "thread_019",
+          "task_id": "20260323_015159_aa93",
+          "transport_name": "relay",
+          "sent_at": "2026-03-23T01:52:00",
+          "success": true,
+          "to_addr": "jiangchun@tongji.edu.cn",
+          "subject": "[ACCEPTED][S:thread_019] Phase5 status closeout 20260323 A",
+          "transport_message_id": "<177420191926.472093.6057764909945998451@mail-runner.local>",
+          "error_message": null,
+          "client_trace_id": "20260323_015159_aa93"
+        },
+        {
+          "packet_id": "packet:20260323_015159_aa93:0a71a652",
+          "thread_id": "thread_019",
+          "task_id": "20260323_015159_aa93",
+          "transport_name": "relay",
+          "sent_at": "2026-03-23T01:52:01",
+          "success": true,
+          "to_addr": "jiangchun@tongji.edu.cn",
+          "subject": "[RUNNING][S:thread_019] Phase5 status closeout 20260323 A",
+          "transport_message_id": "<177420192037.472093.8900506535269191152@mail-runner.local>",
+          "error_message": null,
+          "client_trace_id": "20260323_015159_aa93"
+        },
+        {
+          "packet_id": "packet:20260323_015159_aa93:cb543082",
+          "thread_id": "thread_019",
+          "task_id": "20260323_015159_aa93",
+          "transport_name": "relay",
+          "sent_at": "2026-03-23T01:52:04",
+          "success": true,
+          "to_addr": "jiangchun@tongji.edu.cn",
+          "subject": "[FAILED][S:thread_019] Phase5 status closeout 20260323 A",
+          "transport_message_id": "<177420192300.472093.15012734246337236242@mail-runner.local>",
+          "error_message": null,
+          "client_trace_id": "20260323_015159_aa93"
+        },
+        {
+          "packet_id": "packet:20260323_015159_aa93:da994130",
+          "thread_id": "thread_019",
+          "task_id": "20260323_015159_aa93",
+          "transport_name": "relay",
+          "sent_at": "2026-03-23T02:01:31",
+          "success": true,
+          "to_addr": "jiangchun@tongji.edu.cn",
+          "subject": "[STATUS][S:thread_019] Phase5 status closeout 20260323 A",
+          "transport_message_id": "<177420248987.472093.16863858772984251228@mail-runner.local>",
+          "error_message": null,
+          "client_trace_id": "20260323_015159_aa93"
+        }
+      ]
+    },
+    "relay_packet_store": null
+  },
+  "same_run_bind": {
+    "effective_bind_level": "last_summary",
+    "matched_fields": [
+      "last_summary"
+    ],
+    "mismatched_fields": [],
+    "strong_bind": false,
+    "weak_bind_only": true,
+    "can_promote_to_mismatch_candidate": false,
+    "notes": [
+      "android_request_id_missing",
+      "android_transport_message_id_missing"
+    ]
+  }
+}

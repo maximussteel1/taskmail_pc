@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from mail_runner.relay_server.deploy import RelayDeploymentConfig, relay_bundle_members, render_env_file, render_systemd_unit
+from scripts.deploy_relay_server import _scp_base_args, _ssh_base_args
 
 
 def test_render_env_file_includes_relay_runtime_values() -> None:
@@ -116,3 +119,33 @@ def test_relay_deployment_config_rejects_partial_taskmail_direct_smtp() -> None:
             taskmail_direct_from_addr="taskmail-user@example.com",
             taskmail_direct_smtp_host="smtp.user.example.com",
         )
+
+
+def test_deploy_relay_server_ssh_and_scp_ignore_proxy_and_jump_settings(tmp_path) -> None:
+    key_path = tmp_path / "work_bot.pem"
+    key_path.write_text("demo", encoding="utf-8")
+
+    ssh_args = _ssh_base_args("ubuntu", "relay.example.com", key_path)
+    scp_args = _scp_base_args("ubuntu", "relay.example.com", key_path)
+    expected_config_path = "NUL" if os.name == "nt" else "/dev/null"
+
+    assert ssh_args[:8] == [
+        "ssh",
+        "-F",
+        expected_config_path,
+        "-o",
+        "ProxyCommand=none",
+        "-o",
+        "ProxyJump=none",
+        "-i",
+    ]
+    assert scp_args[:8] == [
+        "scp",
+        "-F",
+        expected_config_path,
+        "-o",
+        "ProxyCommand=none",
+        "-o",
+        "ProxyJump=none",
+        "-i",
+    ]

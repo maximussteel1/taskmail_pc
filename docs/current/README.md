@@ -8,6 +8,7 @@
 
 - `mail_protocol.md`
 - `android_runner_communication_contract.md`
+- `taskmail_direct_control_file_contract.md`
 - `android_reply_method_rules.md`
 - `task_view_mail_parsing_rules.md`
 - `multi_question_protocol.md`
@@ -25,6 +26,7 @@ Current outbound reference skeleton:
 - 当前行为变化时，优先更新本目录文档
 - 如与 [README.md](../../README.md) 或 [state.md](../../state.md) 冲突，以当前事实为准
 - 如与 `docs/plans/` 或 `docs/platform/` 冲突，以本目录定义的当前协议边界为准
+- TaskMail direct relay/control/file 相关 current truth 以 `taskmail_direct_control_file_contract.md` 为中心，再配合 `mail_protocol.md`、`android_runner_communication_contract.md`、`multimedia_mail_protocol.md` 与 `pc_mail_output_protocol.md` 阅读；2026-03-24 起当前已落地 shared `/control` 的两条已实现能力：bootstrap `sync_project_folders v2`，以及 relay-side `transport_probe` harness；其中 `transport_probe_result` 现在会在可见时等待并投影 `_mailbox/transport_probes/` 里的 PC observation，区分 `observed / timed_out / submitted / failed`
 
 分层依据见 [document_layering_plan.md](../document_layering_plan.md)。
 
@@ -83,7 +85,7 @@ Current outbound reference skeleton:
 - 当前本地 Windows service 维护以 `runtime_dir/host_state.json` 为第一活性真相、`runtime_dir/loop.pid` 为辅助锚点；两者与 `status` 输出冲突时，优先信 `host_state.json` + 真实 PID，再看 `loop.stderr.log`
 - `scripts/manage_mail_runner.ps1` 现在优先使用 `host_state.json + loop.pid` 做同 runtime 管理，`Win32_Process` 只作为缺少 runtime metadata 时的 best-effort 补充，避免某些受限 shell 里的 CIM/WMI 查询把 `status` / `start` / `restart` 卡住
 - `scripts/manage_mail_runner.ps1 start / restart` 现在会通过一个外部 detached PowerShell launcher 托管 `mail_runner.host`，避免非交互 operator shell 在退出时把刚拉起的 host 子进程一起回收
-- 对 relay-enabled 配置，`scripts/manage_mail_runner.ps1` 现在还会伴随管理一个 `sync_relay_task_root.py --repeat-seconds 2` companion；默认使用项目根目录下的 `work_bot.pem`，把本地 authoritative `task_root` 持续同步到 VPS relay 可见的 `/opt/mail_runner_relay/shared/task_root`，并在 `status` 中暴露 companion pid/log 诊断
+- 对 relay-enabled 配置，`scripts/manage_mail_runner.ps1` 现在还会伴随管理一个 `sync_relay_task_root.py --repeat-seconds 2` companion；默认使用项目根目录下的 `work_bot.pem`，把本地 authoritative `task_root` 持续同步到 VPS relay 可见的 `/opt/mail_runner_relay/shared/task_root`，并在 `status` 中暴露 companion pid/log 诊断；该 companion 现在显式忽略 ambient SSH proxy / jump-host 配置，强制走直连 `ssh/scp`
 - 这台机器上的 detached launcher 维护口径已经固定为隐藏 `Start-Process powershell.exe ...`；不要把 `Register-ScheduledTask` 当作 `start / restart` 主路径，因为它在 agent / 提权 shell 里可能卡住，导致 host 实际还没拉起
 - 对 agent / 非交互终端，`start` / `restart` 可能出现“命令侧超时但 host 已经起来”的现象；此时不要立刻重复启动，先复核 `host_state.json`、`manage_mail_runner.ps1 status` 与最新 `loop.stderr.log`
 - `scripts/manage_mail_runner.ps1 detach-restart` 现在会先安排一个外部 detached launcher，再由那个 launcher 执行真正的 `restart`；`/restart-runner` 邮件控制动作走的就是这条路径，避免任务内联 `restart` 把承载自己的 host 直接杀掉
@@ -101,10 +103,11 @@ Current outbound reference skeleton:
 - 当前这台机器的 relay-enabled 本地 host 维护口径是：配置文件优先用 `mail_config.bot.relay.local.yaml`，runtime dir 用 `.\_tmp_live_mail_runner`
 - 如果 relay-enabled host 本身在跑，但 `manage_mail_runner.ps1 status` 的 `Relay task-root sync` 段显示 companion 未运行，`current-session` direct `reply` / `/status` 仍可能因为 VPS `task_root` 快照落后而报 locator rejection；先修 companion，再重开 Android 侧排查
 - `.\.venv\Scripts\python.exe .\scripts\prune_stale_status_mails.py --config .\_tmp_live_mail_runner\mail_config.loop_30s.yaml --dry-run --output .\_tmp_live_mail_runner\stale_mail_cleanup.json` 可按当前保留规则清理遗漏的旧 task status mails 与旧 `[SYNC]` 系统回复，并把扫描/删除结果落成 JSON
-- 当前大文件交付支持两条 external delivery 路径：如果配置了 COS，则超阈值 artifact 继续走 COS 外链；如果启用了 `outbound_transport=relay` 且存在 `relay_url + relay_transport_token`，但没有 COS 配置，则同一 relay host 会暴露 `/v1/files` file surface，runtime 会把超阈值 artifact 上传到该 file surface。两条路径都会保留 `Artifacts` 区域条目、额外生成 `External Deliveries` 区域，并且不再把该超大文件作为 MIME 附件继续投递；COS 上传当前强制走直连 HTTPS，不继承宿主进程里的 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`，relay file-surface 上传则复用同一 relay host 与同一 Bearer transport token
+- 当前大文件交付支持两条 external delivery 路径：如果配置了 COS，则超阈值 artifact 继续走 COS 外链；如果启用了 `outbound_transport=relay` 且存在 `relay_url + relay_transport_token`，但没有 COS 配置，则同一 relay host 会暴露 `/v1/files` file surface，runtime 会把超阈值 artifact 上传到该 file surface。两条路径都会保留 `Artifacts` 区域条目、额外生成 `External Deliveries` 区域，并且不再把该超大文件作为 MIME 附件继续投递；COS 上传当前强制走直连 HTTPS，不继承宿主进程里的 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`，relay file-surface 上传则复用同一 relay host 与同一 Bearer transport token；该 token 当前也与 shared `/control` 首刀复用同一认证路径
 - relay packet store 现在会在 accepted packet 后续失败时同时持久化 `last_error_message` 和 `last_error_code`，便于区分 `direct_temporarily_unavailable`、`workspace_identity_unresolved` 等 machine-readable failure classification
 - terminal status mail 发送后，runtime 现在会在 `runs/<task_id>/canonical_summary.json` 下落一个 per-run canonical summary；当前字段集包含 `thread_id`、`task_id`、`run_status`、`ingress_type`、`ingress_message_id`、`request_id`、`packet_id`、`receipt_id`、`action_type`、`target_session_identity`、`last_summary`、`terminal_mail_message_id`、`terminal_mail_subject`、`generated_at`
 - 对 current-session direct `/status` 与 plain `reply`，runtime 现在都会在本地 authoritative task root 的 `tasks/<thread_id>/session_actions/<request_id>/session_action_closeout.json` 下落一份 thread-scoped session-action closeout；当前最小字段集包含 `action_type`、`target_session_identity`、`request_id`、`ingress_message_id`、`packet_id`、`receipt_id`、`last_summary`、`terminal_mail_subject`、`generated_at`
+- 对 relay-side `/control transport_probe` 注入到 bot mailbox 的 deterministic probe mail，PC host 现在会在本地 authoritative task root 的 `tasks/_mailbox/transport_probes/<probe_id>.json` 下落一份 mailbox observation sidecar；在 relay 具备 task-root 可见性时，`/control transport_probe_result.payload.observation` 会直接复用这份 evidence；若超时未观测或当前看不到 task-root，则结果会回 `partial`
 - current-session direct action resolver 仍优先读取 `session_state`；如果 relay 可见 task root 暂时缺少对应 session 索引或索引落后，runtime 仍可回退到 `thread_state`：优先使用请求显式提供的 `thread_id`，否则按 `workspace_id/session_id` 扫描 `thread_state` 候选并补解析 canonical `workspace_id/session_id/thread_id` 后继续处理；若 `session_state` 与 `thread_state` 都缺失，或补解析结果与请求 identity 冲突，仍会明确 reject
 - `.\.venv\Scripts\python.exe .\scripts\build_taskmail_closeout_bundle.py <thread_id> --task-root <tasks>` 现在可以把同 run 的 PC canonical outcome、ingress/terminal raw mail 锚点、`thread_state.json`、`result.json`、`outbound/delivery_attempts.jsonl`，以及可选 relay `packets.json` / `delivery_attempts.jsonl` 组装成 `runs/<task_id>/taskmail_daily_closeout_bundle.json`；对 direct post-creation `reply` / `/status`，若存在 matching `session_action_closeout.json`，bundle 会优先把它作为 canonical outcome source，并把 `canonical_summary.json` 继续作为 supporting evidence；若 `canonical_summary.json` 缺失，则仍会优先回退到 `session_action_closeout.json`，再回退到 `thread_state.json + mail/raw_*.json` 补齐最小对账锚点
 - closeout bundle 在消费 Android `taskmail_new_task_send_records.json` 时，会先做 Android retained evidence 的 record selection：优先 `request_id`，其次 `transport_message_id <-> ingress_message_id`，再按同 `repo_path/workdir` 且同 outcome family 的最近时间记录保守选取候选；这一步只是为 bundle 选 record，不等于提升 `same_run_bind` 的正式 bind level

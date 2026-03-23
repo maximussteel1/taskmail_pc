@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 import ssl
 from dataclasses import asdict
@@ -27,6 +28,7 @@ _TRANSPORT_NAME = "relay"
 _NOT_CONFIGURED_MESSAGE = "Relay transport is selected, but no relay loopback or transport token is configured."
 _DEFAULT_CLIENT_ID = "pc-local"
 _DEFAULT_CLIENT_VERSION = "0.1.0-dev"
+_WEBSOCKETS_CONNECT_SUPPORTS_PROXY = "proxy" in inspect.signature(websockets.connect).parameters
 
 
 def _timestamp() -> str:
@@ -101,6 +103,7 @@ class RelayTransport:
                 close_timeout=self._timeout_seconds,
                 extra_headers={"Authorization": f"Bearer {self._transport_token}"},
                 max_size=32 * 1024 * 1024,
+                **_direct_websocket_connect_kwargs(),
             ) as websocket:
                 await websocket.send(
                     json.dumps(
@@ -185,6 +188,12 @@ class RelayTransport:
             sent_at=_timestamp(),
             error_message=message,
         )
+
+
+def _direct_websocket_connect_kwargs() -> dict[str, object]:
+    if _WEBSOCKETS_CONNECT_SUPPORTS_PROXY:
+        return {"proxy": None}
+    return {}
 
 
 def _serialize_task_run_packet(packet) -> dict[str, object]:

@@ -311,7 +311,7 @@ def upload_artifact_to_file_surface(
         )
     except Exception as exc:
         error = FileSurfaceUploadError(
-            status_code=0,
+            status_code=599,
             error_code="request_failed",
             error_message=f"{type(exc).__name__}: {exc}",
             retryable=True,

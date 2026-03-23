@@ -82,6 +82,12 @@ def _prepare_private_key_copy(key_path: Path) -> tuple[Path, tempfile.TemporaryD
 def _ssh_base_args(user: str, host: str, key_path: Path) -> list[str]:
     return [
         "ssh",
+        "-F",
+        _ssh_config_path_without_proxy(),
+        "-o",
+        "ProxyCommand=none",
+        "-o",
+        "ProxyJump=none",
         "-i",
         str(key_path),
         "-o",
@@ -97,6 +103,12 @@ def _ssh_base_args(user: str, host: str, key_path: Path) -> list[str]:
 def _scp_base_args(user: str, host: str, key_path: Path) -> list[str]:
     return [
         "scp",
+        "-F",
+        _ssh_config_path_without_proxy(),
+        "-o",
+        "ProxyCommand=none",
+        "-o",
+        "ProxyJump=none",
         "-i",
         str(key_path),
         "-o",
@@ -106,6 +118,12 @@ def _scp_base_args(user: str, host: str, key_path: Path) -> list[str]:
         "-o",
         "IdentitiesOnly=yes",
     ]
+
+
+def _ssh_config_path_without_proxy() -> str:
+    # Force direct PC->VPS sync traffic and ignore ambient SSH proxy / jump-host
+    # settings from the operator environment.
+    return "NUL" if os.name == "nt" else "/dev/null"
 
 
 def _iter_task_root_entries(local_task_root: Path) -> list[Path]:

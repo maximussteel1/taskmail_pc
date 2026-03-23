@@ -1,112 +1,110 @@
 # AGENTS
 
-## Scope
+## 目标
 
-This file defines repository-specific guidance for coding agents working in
-`mail_based_task_manager`. Keep it aligned with the current codebase, not with
-future platform ideas.
+- 本文件面向编码代理，不面向普通读者。
+- 只依据当前仓库事实工作，不依据未来平台设想工作。
+- 这是个人单用户仓库。默认优化目标是长期可维护性、结构清晰度和复杂度下降，不是广泛的内部向后兼容。
 
-## Environment
+## 默认行动模式
 
-- Repository root: `E:\projects\mail_based_task_manager`
-- Shell: PowerShell on Windows
-- Preferred Python: `.venv\Scripts\python.exe`
-- Do not rely on bare `python`; on this machine it may resolve to the Windows
-  Store stub.
+- 默认允许为了降低复杂度而进行中到大规模重构。
+- 默认允许移动文件、重命名符号、合并或拆分模块、删除死代码、替换明显不合理的内部结构。
+- 默认不要因为“改动面大”或“可能影响内部兼容”而放弃更好的内部方案。
+- 只有触发“稳定边界”或“高风险判定”时，才切换为保守模式。
 
-## Primary Commands
+## 决策顺序
 
-- Run the full test suite:
-  - `.venv\Scripts\python.exe -m pytest`
-- Run a targeted test module:
-  - `.venv\Scripts\python.exe -m pytest tests/test_reporter.py`
-- Run the mail runner once:
-  - `.venv\Scripts\python.exe -m mail_runner.app --once --config .\mail_config.local.yaml`
-- Run the local loop:
-  - `.venv\Scripts\python.exe -m mail_runner.app --loop --config .\mail_config.local.yaml`
+1. 用户当前任务中的明确要求。
+2. `docs/current/` 中已声明的当前协议与运行时行为。
+3. 本文件定义的稳定边界。
+4. 长期可维护性、代码清晰度、结构一致性、复杂度下降。
+5. 局部最小改动与内部兼容性。
 
-## Repository Layout
+如果第 4 项与第 5 项冲突，优先第 4 项。
 
-- `mail_runner/`: runtime code
-- `tests/`: automated coverage; extend tests for behavior changes
-- `docs/current/`: source of truth for current protocol and runtime behavior
-- `docs/plans/`: repository-scoped implementation plans
-- `docs/platform/`: future platform-facing docs, not current behavior
-- `tasks/`: runtime state and artifacts; do not treat as committed source
-- `_tmp_*/`: local verification output; keep if useful, otherwise ignore
+## 环境
 
-## Documentation Rules
+- 仓库根目录：`E:\projects\mail_based_task_manager`
+- Shell：Windows PowerShell
+- 首选 Python：`.venv\Scripts\python.exe`
+- 不要依赖裸 `python`；在这台机器上它可能解析到 Windows Store stub。
 
-- If current behavior changes, update `docs/current/` first.
-- If implementation direction changes but behavior does not, update
-  `docs/plans/`.
-- If `README.md`, `state.md`, and `docs/current/` disagree, treat
-  `docs/current/` as the current protocol source of truth.
-- Write repository documentation in Chinese by default. Unless the task
-  explicitly requires another language, new docs and updated doc content should
-  use Chinese.
-- Keep documentation layered. Do not mix current runtime facts with speculative
-  platform design in the same file.
+## 常用命令
 
-## Mail And Artifact Boundaries
+- 完整测试：`.venv\Scripts\python.exe -m pytest`
+- 单模块测试：`.venv\Scripts\python.exe -m pytest tests/test_reporter.py`
+- 单次运行 mail runner：`.venv\Scripts\python.exe -m mail_runner.app --once --config .\mail_config.local.yaml`
+- 本地循环运行：`.venv\Scripts\python.exe -m mail_runner.app --loop --config .\mail_config.local.yaml`
 
-- Preserve the explicit mail protocol and state/question capsule behavior unless
-  the task explicitly changes protocol semantics.
-- Current run output delivery is local-workspace based.
-- `RunArtifact` and `artifact_index.json` are the artifact truth layer.
-- Canonical reporter authoring is Markdown-first, but outbound mail remains
-  projected to `text/plain` + `text/html`.
-- Keep a single `Artifacts` section in reporter output for now.
-- Keep `Attachment Notices` as a separate section after `Artifacts`.
-- Do not introduce mail-specific fields like `cid:` into
-  `artifact_index.json`.
+## 仓库结构
 
-## Editing Expectations
+- `mail_runner/`：运行时代码
+- `tests/`：自动化测试；行为变化时同步扩展或更新
+- `docs/current/`：当前协议与运行时行为的事实来源
+- `docs/plans/`：实现计划与演进方向
+- `docs/platform/`：未来平台相关文档，不代表当前行为
+- `tasks/`：运行时状态与产物；不要当作已提交源码
+- `_tmp_*/`：本地验证输出；有用可保留，否则忽略
 
-- Prefer small, compatibility-preserving changes.
-- Do not rewrite scheduler, reply-routing, or mail protocol behavior casually;
-  these areas have tests and layered docs.
-- When touching rendering, mail IO, parsing, or state persistence, add or
-  update tests in the same change.
-- Leave local config files such as `config.yaml` and `mail_config.local.yaml`
-  uncommitted unless the task explicitly requires changing tracked examples.
+## 文档规则
 
-## Validation
+- 读取仓库文档时显式使用 UTF-8 编码。
+- 尤其对 `AGENTS.md`、`README.md`、`state.md` 与 `docs/` 下文件，不要依赖 PowerShell 或终端默认编码。
+- 如果 `README.md`、`state.md` 与 `docs/current/` 冲突，以 `docs/current/` 为准。
+- 当前行为变化时，在同一改动中优先更新 `docs/current/`。
+- 实现方向变化但当前行为未变化时，更新 `docs/plans/`。
+- 新增或更新仓库文档时，默认使用中文；除非任务明确要求其他语言。
+- 保持文档分层：当前事实放 `docs/current/`，计划放 `docs/plans/`，未来平台内容放 `docs/platform/`。
 
-- For code changes, run targeted tests first, then the full suite if the change
-  affects shared runtime paths.
-- For documentation-only changes, tests are optional unless examples or command
-  paths were altered.
+## 稳定边界
 
-## Service Maintenance
+除非任务明确要求改变语义，否则保留以下边界：
 
-- For local Windows service maintenance, prefer the relay-enabled config
-  `.\mail_config.bot.relay.local.yaml` with runtime dir
-  `.\_tmp_live_mail_runner`.
-- Treat `.\_tmp_live_mail_runner\host_state.json` as the first liveness truth
-  for the hosted runner. Treat `.\_tmp_live_mail_runner\loop.pid` as a
-  supporting hint, not a stronger truth source than `host_state.json`.
-- If maintenance output disagrees, verify the host by checking the PID recorded
-  in `host_state.json` and then reading recent `.\_tmp_live_mail_runner\loop.stderr.log`
-  lines before assuming the runner is down.
-- In agent or other non-interactive shells, `start` / `restart` may time out
-  even after the detached host is already alive. After a timeout, check
-  `host_state.json`, then run `scripts\manage_mail_runner.ps1 status`, before
-  attempting another restart.
-- Use `scripts\manage_mail_runner.ps1` for start/stop/restart/status rather
-  than inventing ad-hoc launch commands. The script now prefers runtime
-  metadata over CIM/WMI process scans and uses an external detached PowerShell
-  launcher so service starts survive non-interactive shells used by coding
-  agents.
-- 对 relay-enabled 配置，`scripts\manage_mail_runner.ps1` 现在还会管理一个
-  `sync_relay_task_root.py --repeat-seconds 2` companion，默认使用仓库根目录
-  `work_bot.pem`，把本地 authoritative `task_root` 持续同步到 VPS relay 可见的
-  `/opt/mail_runner_relay/shared/task_root`。
-- 如果 `status` 显示 host 在跑但 `Relay task-root sync` companion 缺失，
-  不要先回头怀疑 Android direct lane；先修复 companion 或 task-root 可见性，
-  否则 `current-session` direct `reply` / `/status` 可能继续报 locator
-  resolution failure。
-- On this machine, do not switch the detached launcher back to
-  `Register-ScheduledTask` for routine maintenance. In agent/elevated shells it
-  can hang before the host starts. The maintained path is hidden
-  `Start-Process powershell.exe ...` plus `host_state.json` verification.
+- mail protocol 的语义
+- state/question capsule 行为
+- reply-routing 行为
+- 持久化状态格式
+- `RunArtifact` 与 `artifact_index.json` 作为产物真相层的角色
+- reporter 输出中只有一个 `Artifacts` section
+- `Attachment Notices` 仍位于 `Artifacts` 之后并保持独立
+- 外发邮件仍投影为 `text/plain` + `text/html`
+- 不要把 `cid:` 等 mail-specific 字段写入 `artifact_index.json`
+
+## 高风险判定
+
+出现以下情况时，先读取相关测试与 `docs/current/`，再实施修改：
+
+- 无法判断某项改动属于内部实现还是稳定边界
+- 改动会改变协议语义、状态格式、产物索引结构或服务维护路径
+- 改动需要处理迁移、兼容或历史数据读写
+- 改动会影响 scheduler、reply-routing、mail protocol 的关键控制流
+
+## 内部实现策略
+
+- 内部实现允许主动重构。
+- 不要为了保留既有内部结构而保留明显不合理的设计。
+- 大改动本身不是风险信号；是否推进，取决于是否触及稳定边界与是否改善整体结构。
+- 当较大改动能显著降低复杂度、提升可维护性、统一模型或减少重复时，可以直接推进。
+- 如果重构会触及稳定边界，必须同时更新测试与文档，并明确处理迁移或兼容问题。
+- scheduler、reply-routing、mail protocol 相关代码可以重构，但先读相关测试与 `docs/current/`，不要盲改。
+- 本地配置文件如 `config.yaml`、`mail_config.local.yaml` 默认不要提交，除非任务明确要求修改受跟踪示例。
+
+## 测试与验证
+
+- 修改 rendering、mail IO、parsing、state persistence 时，在同一改动中新增或更新测试。
+- 代码改动先跑目标测试；如果影响共享运行路径，再跑完整测试。
+- 纯文档改动通常不要求跑测试；如果文档改动了示例命令或路径，应补充验证。
+
+## 服务维护
+
+- 本地 Windows 服务维护优先使用 `.\mail_config.bot.relay.local.yaml`，运行目录使用 `.\_tmp_live_mail_runner`。
+- 启停与状态检查统一使用 `scripts\manage_mail_runner.ps1`，不要自行拼装临时启动命令。
+- runner 存活判断以 `.\_tmp_live_mail_runner\host_state.json` 为第一真相源。
+- `.\_tmp_live_mail_runner\loop.pid` 只是辅助线索，不比 `host_state.json` 更可信。
+- 如果维护输出互相矛盾，先检查 `host_state.json` 中记录的 PID，再读取最近的 `.\_tmp_live_mail_runner\loop.stderr.log`，再判断 runner 是否真的停止。
+- 在 agent 或其他非交互 shell 中，`start` / `restart` 超时不等于启动失败。超时后先检查 `host_state.json`，再运行 `scripts\manage_mail_runner.ps1 status`，再决定是否再次重启。
+- 当前脚本优先依据运行时元数据，不依赖 CIM/WMI 进程扫描，并通过外部 detached PowerShell launcher 让服务在非交互 shell 中也能启动。
+- 对 relay-enabled 配置，`scripts\manage_mail_runner.ps1` 还会管理 `sync_relay_task_root.py --repeat-seconds 2` companion，默认使用仓库根目录 `work_bot.pem`，把本地 authoritative `task_root` 持续同步到 VPS relay 可见的 `/opt/mail_runner_relay/shared/task_root`。
+- 如果 `status` 显示 host 在跑但 `Relay task-root sync` companion 缺失，先修复 companion 或 task-root 可见性，不要先怀疑 Android direct lane；否则 `current-session` direct `reply` / `/status` 可能继续报 locator resolution failure。
+- 在这台机器上，不要把 detached launcher 切回 `Register-ScheduledTask`。当前维护路径是隐藏式 `Start-Process powershell.exe ...` 加 `host_state.json` 校验；`Register-ScheduledTask` 在 agent shell 或提升权限 shell 中可能会在 host 真正启动前卡住。

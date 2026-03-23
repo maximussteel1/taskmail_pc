@@ -20,6 +20,7 @@ from pathlib import Path
 
 from .config import AppConfig
 from .models import MailAttachment, MailEnvelope, OutgoingAttachment
+from .transport_probe_mail import is_transport_probe_mail
 
 LOGGER = logging.getLogger(__name__)
 SYSTEM_MESSAGE_HEADER = "X-Mail-Runner"
@@ -680,7 +681,10 @@ class MailClient:
                 except Exception:
                     LOGGER.warning("Unable to mark mailbox message as seen for uid=%s", uid_text, exc_info=True)
 
-                if envelope.raw_headers.get(SYSTEM_MESSAGE_HEADER) == SYSTEM_MESSAGE_HEADER_VALUE:
+                if (
+                    envelope.raw_headers.get(SYSTEM_MESSAGE_HEADER) == SYSTEM_MESSAGE_HEADER_VALUE
+                    and not is_transport_probe_mail(envelope)
+                ):
                     processed_index.remember(uid, envelope.message_id)
                     processed_index.advance(uid)
                     continue

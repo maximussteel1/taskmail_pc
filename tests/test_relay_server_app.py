@@ -20,6 +20,7 @@ from mail_runner.relay_server.post_creation_actions import (
 )
 from mail_runner.relay_server.packet_store import InMemoryAcceptedPacketStore
 from mail_runner.relay_server.session_store import InMemorySessionStore
+from mail_runner.relay_server.transport_probe import RelayTaskMailTransportProbeHandler
 
 
 def test_build_health_payload_reports_server_shape() -> None:
@@ -268,12 +269,13 @@ def test_build_runtime_relay_enables_taskmail_direct_bridge_when_configured(tmp_
     )
 
     assert relay._direct_packet_handler is None
-    assert len(relay._direct_packet_handlers) == 5
+    assert len(relay._direct_packet_handlers) == 6
     assert isinstance(relay._direct_packet_handlers[0], RelayTaskMailDirectNewTaskMailBridge)
     assert isinstance(relay._direct_packet_handlers[1], RelayTaskMailDirectCurrentSessionStatusMailBridge)
     assert isinstance(relay._direct_packet_handlers[2], RelayTaskMailDirectCurrentSessionReplyMailBridge)
     assert isinstance(relay._direct_packet_handlers[3], RelayTaskMailDirectProjectSyncHandler)
     assert isinstance(relay._direct_packet_handlers[4], RelayTaskMailDirectProjectSyncMailBridge)
+    assert isinstance(relay._direct_packet_handlers[5], RelayTaskMailTransportProbeHandler)
     assert relay._direct_packet_handlers[1]._task_root == task_root
     assert relay._direct_packet_handlers[2]._task_root == task_root
 

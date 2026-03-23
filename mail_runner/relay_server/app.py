@@ -24,6 +24,18 @@ from ..config import load_config
 from ..file_surface import FileSurfaceStore, FileSurfaceUploadError
 from .auth import token_fingerprint, validate_transport_token
 from .config import RelayServerConfig, load_relay_server_config
+from .control_protocol import (
+    ControlBridgeError,
+    ControlCommandMessage,
+    ControlHelloMessage,
+    ControlPingMessage,
+    build_control_hello_ack,
+    build_control_pong,
+    build_relay_packet_from_control_command,
+    negotiate_control_payload_schemas,
+    parse_control_client_message,
+    translate_relay_response_to_control,
+)
 from .delivery import RelayPacketDeliverer
 from .direct_actions import (
     RelayTaskMailDirectNewTaskMailBridge,
@@ -37,10 +49,13 @@ from .post_creation_actions import (
     RelayTaskMailDirectCurrentSessionStatusMailBridge,
 )
 from .session_store import InMemorySessionStore, PersistentSessionStore
+from .transport_probe import RelayTaskMailTransportProbeHandler
 
 LOGGER = logging.getLogger(__name__)
 _HTTP_RESPONSE_HEADERS = [("Content-Type", "application/json; charset=utf-8")]
 _HTTP_HEADER_LIMIT_BYTES = 64 * 1024
+_RELAY_WEBSOCKET_PATH = "/relay"
+_CONTROL_WEBSOCKET_PATH = "/control"
 
 
 def _timestamp() -> str:
@@ -129,6 +144,7 @@ def build_runtime_relay(
         if str(config.task_root or "").strip():
             direct_packet_handlers.append(RelayTaskMailDirectProjectSyncHandler(config=load_config()))
         direct_packet_handlers.append(RelayTaskMailDirectProjectSyncMailBridge(config))
+        direct_packet_handlers.append(RelayTaskMailTransportProbeHandler(config))
     return LoopbackRelayServer(
         config,
         session_store=session_store,
@@ -136,6 +152,16 @@ def build_runtime_relay(
         delivery_callback=deliverer.deliver,
         direct_packet_handlers=direct_packet_handlers,
     )
+
+
+def _resolve_control_payload_schemas(relay: LoopbackRelayServer) -> list[str]:
+    accepted: list[str] = []
+    for handler in getattr(relay, "_direct_packet_handlers", ()):
+        for schema in getattr(handler, "control_payload_schemas", ()):
+            normalized = str(schema or "").strip()
+            if normalized and normalized not in accepted:
+                accepted.append(normalized)
+    return accepted
 
 
 def build_http_server(
@@ -153,6 +179,20 @@ def build_http_server(
     )
 
     class RelayRequestHandler(BaseHTTPRequestHandler):
+        def _discard_request_body(self) -> None:
+            try:
+                raw_length = str(self.headers.get("Content-Length", "") or "").strip()
+                if not raw_length:
+                    return
+                remaining = int(raw_length)
+                while remaining > 0:
+                    chunk = self.rfile.read(min(remaining, 64 * 1024))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+            except Exception:
+                return
+
         def _write_json(self, status_code: int, payload: dict[str, Any]) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status_code)
@@ -268,6 +308,7 @@ def build_http_server(
                 )
                 return
             if not self._require_transport_token():
+                self._discard_request_body()
                 return
             try:
                 raw_length = str(self.headers.get("Content-Length", "") or "").strip()
@@ -585,7 +626,7 @@ async def _handle_unified_connection(
         request_bytes, _method, raw_path, headers = request
         normalized_path = urlparse(raw_path).path
         is_websocket_upgrade = (
-            normalized_path == "/relay"
+            normalized_path in {_RELAY_WEBSOCKET_PATH, _CONTROL_WEBSOCKET_PATH}
             and headers.get("upgrade", "").lower() == "websocket"
             and "upgrade" in headers.get("connection", "").lower()
         )
@@ -690,10 +731,16 @@ async def _process_request(path: str, _request_headers: Any, *, config: RelaySer
 
 async def _websocket_handler(websocket, path: str, *, relay: LoopbackRelayServer) -> None:
     normalized_path = str(path or "").strip() or "/"
-    if normalized_path != "/relay":
-        await websocket.close(code=1008, reason="unsupported_path")
+    if normalized_path == _RELAY_WEBSOCKET_PATH:
+        await _relay_websocket_handler(websocket, relay=relay)
         return
+    if normalized_path == _CONTROL_WEBSOCKET_PATH:
+        await _control_websocket_handler(websocket, relay=relay)
+        return
+    await websocket.close(code=1008, reason="unsupported_path")
 
+
+async def _relay_websocket_handler(websocket, *, relay: LoopbackRelayServer) -> None:
     provided_token = _extract_bearer_token(getattr(websocket, "request_headers", {}))
     connection_id: str | None = None
     send_lock = asyncio.Lock()
@@ -758,6 +805,176 @@ async def _websocket_handler(websocket, path: str, *, relay: LoopbackRelayServer
                 await subscription_push_task
             except asyncio.CancelledError:
                 pass
+        if connection_id:
+            relay.clear_subscription_runtime_state(connection_id)
+            relay.session_store.close_session(connection_id, closed_at=_timestamp())
+
+
+def _handle_control_message_batch(
+    payload: dict[str, Any],
+    *,
+    relay: LoopbackRelayServer,
+    provided_token: str | None,
+    connection_id: str | None,
+    now: str,
+) -> list[dict[str, Any]]:
+    try:
+        message = parse_control_client_message(payload)
+    except Exception as exc:
+        return [
+            {
+                "message_type": "error",
+                "code": "invalid_payload",
+                "message": str(exc),
+                "sent_at": now,
+            }
+        ]
+
+    if isinstance(message, ControlHelloMessage):
+        relay_responses = relay.handle_client_message_batch(
+            {
+                "message_type": "hello",
+                "client_id": message.client_id,
+                "client_version": message.client_version,
+                "transport_token_id": message.transport_token_id,
+                "sent_at": message.sent_at,
+            },
+            provided_token=provided_token,
+            connection_id=connection_id,
+        )
+        translated: list[dict[str, Any]] = []
+        accepted_payload_schemas = negotiate_control_payload_schemas(
+            message.supported_payload_schemas,
+            supported_payload_schemas=_resolve_control_payload_schemas(relay),
+        )
+        for response in relay_responses:
+            if response.get("message_type") == "hello_ack":
+                translated.append(
+                    build_control_hello_ack(
+                        connection_id=str(response.get("connection_id") or ""),
+                        server_time=str(response.get("server_time") or ""),
+                        heartbeat_seconds=int(response.get("heartbeat_seconds") or 0),
+                        transport_token_id=token_fingerprint(relay._config.transport_token),
+                        accepted_payload_schemas=accepted_payload_schemas,
+                    )
+                )
+            else:
+                translated.append(dict(response))
+        return translated
+
+    normalized_connection_id = str(connection_id or "").strip()
+    if not normalized_connection_id:
+        return [
+            {
+                "message_type": "error",
+                "code": "missing_connection",
+                "message": "connection_id is required before command or ping",
+                "sent_at": now,
+            }
+        ]
+
+    if isinstance(message, ControlPingMessage):
+        relay.session_store.touch_session(normalized_connection_id, last_seen_at=message.sent_at)
+        return [build_control_pong(sent_at=now)]
+
+    if not isinstance(message, ControlCommandMessage):
+        return [
+            {
+                "message_type": "error",
+                "code": "unsupported_message_type",
+                "message": "unsupported control client message",
+                "sent_at": now,
+            }
+        ]
+
+    try:
+        relay_packet = build_relay_packet_from_control_command(message)
+    except ControlBridgeError as exc:
+        return [
+            {
+                "message_type": "error",
+                "code": exc.code,
+                "message": exc.message,
+                "sent_at": now,
+            }
+        ]
+
+    relay_responses = relay.handle_client_message_batch(
+        relay_packet,
+        connection_id=normalized_connection_id,
+    )
+    translated_responses: list[dict[str, Any]] = []
+    for response in relay_responses:
+        try:
+            translated_responses.append(
+                translate_relay_response_to_control(
+                    dict(response),
+                    message=message,
+                )
+            )
+        except ControlBridgeError as exc:
+            return [
+                {
+                    "message_type": "error",
+                    "code": exc.code,
+                    "message": exc.message,
+                    "sent_at": now,
+                }
+            ]
+    return translated_responses
+
+
+async def _control_websocket_handler(websocket, *, relay: LoopbackRelayServer) -> None:
+    provided_token = _extract_bearer_token(getattr(websocket, "request_headers", {}))
+    connection_id: str | None = None
+    send_lock = asyncio.Lock()
+
+    async def _send_payload(payload: dict[str, Any]) -> None:
+        async with send_lock:
+            await websocket.send(json.dumps(payload, ensure_ascii=False))
+
+    try:
+        async for raw_message in websocket:
+            now = _timestamp()
+            try:
+                payload = json.loads(raw_message)
+                if not isinstance(payload, dict):
+                    raise ValueError("payload must be an object")
+            except Exception as exc:
+                responses = [
+                    {
+                        "message_type": "error",
+                        "code": "invalid_json",
+                        "message": str(exc),
+                        "sent_at": now,
+                    }
+                ]
+            else:
+                responses = _handle_control_message_batch(
+                    payload,
+                    relay=relay,
+                    provided_token=provided_token if connection_id is None else None,
+                    connection_id=connection_id,
+                    now=now,
+                )
+            if not responses:
+                responses = [
+                    {
+                        "message_type": "error",
+                        "code": "server_error",
+                        "message": "control plane produced no response",
+                        "sent_at": now,
+                    }
+                ]
+            first_response = responses[0]
+            for response in responses:
+                if response.get("message_type") == "hello_ack":
+                    connection_id = str(response.get("connection_id") or "").strip() or None
+                await _send_payload(response)
+            if first_response.get("message_type") == "error" and connection_id is None:
+                await websocket.close(code=1008, reason=str(first_response.get("code") or "error"))
+                return
+    finally:
         if connection_id:
             relay.clear_subscription_runtime_state(connection_id)
             relay.session_store.close_session(connection_id, closed_at=_timestamp())

@@ -1,0 +1,163 @@
+{
+  "version": 1,
+  "generated_at": "2026-03-23T02:14:53",
+  "thread_id": "thread_020",
+  "task_id": "20260323_020701_9913",
+  "run_dir": {
+    "path": "_tmp_live_mail_runner\\tasks\\thread_020\\runs\\20260323_020701_9913",
+    "thread_relative_path": "runs/20260323_020701_9913"
+  },
+  "bundle_presence": {
+    "pc_canonical_outcome": true,
+    "pc_terminal_mail": true,
+    "android_latest_send_evidence": true,
+    "android_terminal_summary": true,
+    "pc_outbound_delivery_attempts": true,
+    "pc_relay_packet_store": false,
+    "pc_session_action_closeout": false
+  },
+  "pc_canonical_outcome": {
+    "source": "canonical_summary",
+    "resolution": "canonical_summary",
+    "path": "_tmp_live_mail_runner\\tasks\\thread_020\\runs\\20260323_020701_9913\\canonical_summary.json",
+    "thread_relative_path": "runs/20260323_020701_9913/canonical_summary.json",
+    "ingress_type": "direct_bridge",
+    "request_id": "req_f4cfb1c491634066b436ba1b03414529",
+    "ingress_message_id": "<177420193783.472093.4990406436383154902@mail-runner.local>",
+    "packet_id": "android-taskmail:new-task:req_f4cfb1c491634066b436ba1b03414529",
+    "action_type": null,
+    "target_session_identity": null,
+    "last_summary": "PHASE5_REPLY_SEED_20260323_B",
+    "terminal_mail_message_id": "<177420283694.472093.4039837920504111129@mail-runner.local>",
+    "terminal_mail_subject": "[DONE][S:thread_020] Phase5 reply closeout 20260323 B"
+  },
+  "pc_terminal_mail": {
+    "resolution": "terminal_mail_message_id",
+    "path": "_tmp_live_mail_runner\\tasks\\thread_020\\mail\\raw_008.json",
+    "thread_relative_path": "mail/raw_008.json",
+    "message_id": "<177420283694.472093.4039837920504111129@mail-runner.local>",
+    "subject": "[DONE][S:thread_020] Phase5 reply closeout 20260323 B",
+    "status_label": "DONE"
+  },
+  "android_latest_send_evidence": {
+    "source_path": "E:\\projects\\mail_based_task_manager\\_tmp_android_send_records_thread_020.json",
+    "selection": "target_time",
+    "action_type": "reply",
+    "target_session_identity": {
+      "workspace_id": "workspace_cb2404bf828c",
+      "session_id": "thread_020",
+      "thread_id": "thread_020"
+    },
+    "sender_account_id": null,
+    "recorded_at": 1774202785612,
+    "repo_path": null,
+    "workdir": null,
+    "bootstrap_status": "hello_ack",
+    "outcome": "MailFallbackSucceeded",
+    "switch_gate": "FallbackRequired",
+    "request_id": null,
+    "receipt_id": null,
+    "transport_message_id": null,
+    "fallback_reason": "only phase2-direct-outbound-contract-v1 is supported for direct TaskMail actions",
+    "error_message": null
+  },
+  "android_terminal_summary": {
+    "last_summary": "PHASE5_REPLY_SEED_20260323_B"
+  },
+  "pc_supporting_evidence": {
+    "thread_state": {
+      "path": "_tmp_live_mail_runner\\tasks\\thread_020\\thread_state.json",
+      "thread_relative_path": "thread_state.json",
+      "status": "done",
+      "lifecycle": "active",
+      "root_message_id": "<177420193783.472093.4990406436383154902@mail-runner.local>",
+      "latest_message_id": "<177420283694.472093.4039837920504111129@mail-runner.local>",
+      "current_task_id": "20260323_020701_9913",
+      "last_summary": "PHASE5_REPLY_SEED_20260323_B"
+    },
+    "run_result": {
+      "path": "_tmp_live_mail_runner\\tasks\\thread_020\\runs\\20260323_020701_9913\\result.json",
+      "thread_relative_path": "runs/20260323_020701_9913/result.json",
+      "status": "success",
+      "exit_code": 0,
+      "started_at": "2026-03-23T02:07:05",
+      "finished_at": "2026-03-23T02:07:16",
+      "summary_file": "runs/20260323_020701_9913/summary.md",
+      "error_type": null,
+      "error_message": null
+    },
+    "pc_ingress_mail": {
+      "resolution": "ingress_message_id",
+      "path": "_tmp_live_mail_runner\\tasks\\thread_020\\mail\\raw_001.json",
+      "thread_relative_path": "mail/raw_001.json",
+      "message_id": "<177420193783.472093.4990406436383154902@mail-runner.local>",
+      "subject": "[CX] Phase5 reply closeout 20260323 B",
+      "status_label": "CX",
+      "request_id": "req_f4cfb1c491634066b436ba1b03414529",
+      "packet_id": "android-taskmail:new-task:req_f4cfb1c491634066b436ba1b03414529",
+      "direct_header": "1"
+    },
+    "session_action_closeout": null,
+    "outbound_delivery_attempts": {
+      "path": "_tmp_live_mail_runner\\tasks\\thread_020\\outbound\\delivery_attempts.jsonl",
+      "thread_relative_path": "outbound/delivery_attempts.jsonl",
+      "matched_attempt_count": 3,
+      "matched_attempts": [
+        {
+          "packet_id": "packet:20260323_020701_9913:0a29432a",
+          "thread_id": "thread_020",
+          "task_id": "20260323_020701_9913",
+          "transport_name": "relay",
+          "sent_at": "2026-03-23T02:07:02",
+          "success": true,
+          "to_addr": "jiangchun@tongji.edu.cn",
+          "subject": "[ACCEPTED][S:thread_020] Phase5 reply closeout 20260323 B",
+          "transport_message_id": "<177420282134.472093.3202324985422278034@mail-runner.local>",
+          "error_message": null,
+          "client_trace_id": "20260323_020701_9913"
+        },
+        {
+          "packet_id": "packet:20260323_020701_9913:27d53220",
+          "thread_id": "thread_020",
+          "task_id": "20260323_020701_9913",
+          "transport_name": "relay",
+          "sent_at": "2026-03-23T02:07:04",
+          "success": true,
+          "to_addr": "jiangchun@tongji.edu.cn",
+          "subject": "[RUNNING][S:thread_020] Phase5 reply closeout 20260323 B",
+          "transport_message_id": "<177420282312.472093.9936387668014129514@mail-runner.local>",
+          "error_message": null,
+          "client_trace_id": "20260323_020701_9913"
+        },
+        {
+          "packet_id": "packet:20260323_020701_9913:886e922a",
+          "thread_id": "thread_020",
+          "task_id": "20260323_020701_9913",
+          "transport_name": "relay",
+          "sent_at": "2026-03-23T02:07:18",
+          "success": true,
+          "to_addr": "jiangchun@tongji.edu.cn",
+          "subject": "[DONE][S:thread_020] Phase5 reply closeout 20260323 B",
+          "transport_message_id": "<177420283694.472093.4039837920504111129@mail-runner.local>",
+          "error_message": null,
+          "client_trace_id": "20260323_020701_9913"
+        }
+      ]
+    },
+    "relay_packet_store": null
+  },
+  "same_run_bind": {
+    "effective_bind_level": "last_summary",
+    "matched_fields": [
+      "last_summary"
+    ],
+    "mismatched_fields": [],
+    "strong_bind": false,
+    "weak_bind_only": true,
+    "can_promote_to_mismatch_candidate": false,
+    "notes": [
+      "android_request_id_missing",
+      "android_transport_message_id_missing"
+    ]
+  }
+}

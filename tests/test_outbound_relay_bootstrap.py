@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import urllib.request
 
+from mail_runner.outbound import relay_bootstrap
 from mail_runner.outbound.relay_bootstrap import derive_healthz_url, probe_healthz, probe_relay_bootstrap
 from mail_runner.outbound.contract import TransportReceipt
 from mail_runner.relay_server.app import start_relay_server
@@ -54,6 +55,18 @@ def test_probe_healthz_disables_environment_proxy(monkeypatch) -> None:
     assert len(proxy_handlers) == 1
     assert proxy_handlers[0].proxies == {}
     assert captured["timeout"] == 7
+
+
+def test_direct_websocket_connect_kwargs_disable_proxy_when_supported(monkeypatch) -> None:
+    monkeypatch.setattr(relay_bootstrap, "_WEBSOCKETS_CONNECT_SUPPORTS_PROXY", True)
+
+    assert relay_bootstrap._direct_websocket_connect_kwargs() == {"proxy": None}
+
+
+def test_direct_websocket_connect_kwargs_stays_empty_when_proxy_kwarg_is_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(relay_bootstrap, "_WEBSOCKETS_CONNECT_SUPPORTS_PROXY", False)
+
+    assert relay_bootstrap._direct_websocket_connect_kwargs() == {}
 
 
 def test_probe_relay_bootstrap_reports_hello_ack_for_plaintext_runtime(tmp_path) -> None:

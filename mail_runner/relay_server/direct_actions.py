@@ -18,6 +18,7 @@ from ..project_folder_sync import build_project_folder_sync_body, list_project_f
 from ..runner import SerialTaskRunner
 from ..status import BACKEND_CODEX, BACKEND_OPENCODE
 from .config import RelayServerConfig
+from .control_protocol import CONTROL_BOOTSTRAP_PAYLOAD_SCHEMA
 from .packet_store import AcceptedRelayPacket
 from .protocol import (
     RelayErrorMessage,
@@ -520,6 +521,7 @@ class RelayTaskMailDirectProjectSyncHandler:
     """Accepts direct `[SYNC]` packets and returns the project-folder listing over relay."""
 
     transport_name = _DIRECT_PROJECT_SYNC_TRANSPORT_NAME
+    control_payload_schemas = (CONTROL_BOOTSTRAP_PAYLOAD_SCHEMA,)
 
     def __init__(self, *, config: AppConfig, clock: Callable[[], str] | None = None) -> None:
         self._config = config

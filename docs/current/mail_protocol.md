@@ -2,7 +2,7 @@
 
 ## Status
 
-- Date: 2026-03-21
+- Date: 2026-03-24
 - Scope: current `mail_based_task_manager` mail control plane
 - Role: canonical current protocol document for task mail ingress, reply routing, and user-visible mail actions
 
@@ -10,7 +10,7 @@
 
 当前仓库是邮件驱动的任务执行适配层，不是完整 Task Manager 平台。
 
-Mail 是当前唯一正式控制面，用于：
+Mail 是当前 canonical 默认控制面，用于：
 
 - 新任务创建
 - 首封只读环境发现
@@ -19,6 +19,11 @@ Mail 是当前唯一正式控制面，用于：
 - status 查询
 - rerun / kill
 - 当前 workspace 内的 session listing
+
+补充说明：
+
+- 当前系统已经存在窄范围 relay direct surface，但 mail 仍是默认入口与默认用户可见结果载体
+- direct surface 的当前事实以 [taskmail_direct_control_file_contract.md](taskmail_direct_control_file_contract.md) 为准
 
 ### 1.1 Recommended Mailbox Topology
 
@@ -47,12 +52,30 @@ Current relay boundary:
 - the Android-facing mail contract does not change when relay is enabled
 - when relay delivery fails and `relay_auto_fallback_email` is enabled, the PC may automatically fall back to direct `email` delivery in the same outbound flow
 
-Current optional direct TaskMail ingress boundary:
+Current optional direct TaskMail boundary:
 
-- when the relay operator configures TaskMail direct ingress, the relay may accept one `phase2-direct-outbound-contract-v1` `new_task` packet on `/relay`
-- the relay then bridges that accepted packet back into the current bot-mailbox first-mail ingress instead of becoming task-execution truth
-- the canonical task-creation semantics still remain the current `Repo:` / `Task:` first-mail contract
-- reply routing, waiting-state answers, and post-creation control actions remain mail-based
+- relay 当前可接受窄范围 direct `new_task`
+- relay 当前可接受 bootstrap `[SYNC]` `v1` / `v2`
+- relay 当前还暴露 shared `/control` websocket；当前已落地 bootstrap `sync_project_folders` `v2` 与 relay-side `transport_probe`
+- `/control` 与 `/relay`、`/v1/files` 当前复用同一 `Authorization: Bearer <transport_token>` 认证路径
+- `/control` 首刀保留 `hello / hello_ack`，并在 `hello_ack` 里回告 `accepted_payload_schemas`
+- `/control` 当前支持三类 frame 流：
+  - `ping -> pong`
+  - bootstrap `command(sync_project_folders) -> command_ack -> result(sync_project_folders_result)`
+  - `transport_probe command -> command_ack -> event* -> result(transport_probe_result)`
+- `/control` accepted/replay 当前复用 relay packet store；同一 `packet_id` replay 会返回同一 `receipt_id`，已物化的 bootstrap / `transport_probe` final result replay 会返回同一 `result_id`
+- `transport_probe_result` 当前仍是 relay-side harness/debug result，但它已不再只证明 mail bridge submission
+- relay 现在会在 mail 提交成功后按 `timeout_seconds` 等待 relay-visible `tasks/_mailbox/transport_probes/<probe_id>.json`：
+- `status=completed` + `outcome=observed` 表示 relay 已读到与当前 `request_id/packet_id/trace_id/transport_message_id` 对齐的 PC mailbox observation
+- `status=partial` + `outcome=timed_out` 表示 relay 已提交 probe mail，但在超时前未观测到匹配 evidence
+- `status=partial` + `outcome=submitted` 表示 relay 已提交 probe mail，但当前 runtime 没有可用的 PC observation lookup 能力
+- `status=failed` + `outcome=failed` 表示 relay 在 mail submission 阶段失败
+- `transport_probe_result.payload.observation` 现在会携带 projected observation summary 或当前 wait/skip state；PC host 仍继续把原始 mailbox observation sidecar 写到 `tasks/_mailbox/transport_probes/<probe_id>.json`
+- relay 当前可接受 current-session direct `/status` 与 plain `reply`
+- 这些 direct surface 的 task execution truth 仍留在 PC，不把 relay 提升成执行真相层
+- direct `new_task` 与 current-session direct action 当前都走 bridge-to-mail；`/control` bootstrap `v2` 与 relay-side `transport_probe` 是当前两个 direct result surface
+- `/relay` 当前仍是 direct `new_task`、current-session direct `/status` / `reply` 与 Phase 3 detail sidecar 的 carrier；`/control` 还不是它们的通用替代
+- 具体 schema、限制条件、closeout/evidence 与 `/v1/files` file surface 规则，以 [taskmail_direct_control_file_contract.md](taskmail_direct_control_file_contract.md) 为准
 
 Current optional direct TaskMail active-detail sidecar boundary:
 
@@ -60,7 +83,7 @@ Current optional direct TaskMail active-detail sidecar boundary:
 - this direct path is read-side only and is limited to `active session detail` freshness (`session_snapshot` / `session_delta`)
 - the relay resolves the current runtime `session_state` / `thread_state` and projects them into the frozen Phase 3 wire shape
 - mail remains the receipt/artifact/attachment truth layer even when this sidecar is enabled
-- direct detail sidecar does not authorize direct reply, `/status`, `/pause`, `/resume`, `/end`, or other post-creation control actions
+- direct detail sidecar 本身仍是 read-side only；其他 direct post-creation action 是否受支持，不由 sidecar 推导，而是由 [taskmail_direct_control_file_contract.md](taskmail_direct_control_file_contract.md) 单独定义
 
 ## 2. Authority
 
@@ -98,6 +121,9 @@ Current optional direct TaskMail active-detail sidecar boundary:
 - 当 relay operator 显式开启 TaskMail direct ingress 时，Android 可通过 `/relay` 提交 bootstrap `sync_project_folders` packet
 - `taskmail-bootstrap-control-contract-v1` 仍表示 bridge-to-mail：relay 接受后把请求桥接回 canonical `[SYNC]` mail ingress，最终结果仍是邮箱中的 `[SYNC] Project Folder List`
 - `taskmail-bootstrap-control-contract-v2` 表示 direct request + direct result：当前 relay runtime 在具备本地 PC truth 时会直接返回 `packet_ack + bootstrap_result`
+- 当 relay operator provision 了 shared `/control` 当前切片时，Android 也可通过 `/control` 提交同一业务动作；bootstrap client 仍必须检查 `hello_ack.accepted_payload_schemas` 里是否出现 `taskmail-bootstrap-control-contract-v2`
+- 在 `/control` 上，同一业务语义当前投影为 `command(sync_project_folders) -> command_ack -> result(sync_project_folders_result)`
+- `/control.hello_ack.accepted_payload_schemas` 当前按 runtime 已 provision 的 handler 动态回告；若 relay 同时 provision 了 `transport_probe` harness，则该列表还会额外出现 `taskmail-transport-probe-payload-v1`
 - current repo 中，runtime 以已配置 `task_root` 作为本地 truth 可用的运行时信号；v2 handler 读取 runner config 中的 `project_sync_roots`，而不是扫描 relay/VPS 自己的临时目录
 - accepted v2 path 不会额外生成 `[SYNC] Project Folder List` 回复邮件
 
