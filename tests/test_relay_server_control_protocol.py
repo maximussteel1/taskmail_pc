@@ -5,6 +5,9 @@ import pytest
 from mail_runner.relay_server.control_protocol import (
     CONTROL_BOOTSTRAP_COMMAND_TYPE,
     CONTROL_BOOTSTRAP_PAYLOAD_SCHEMA,
+    CONTROL_POST_CREATION_PAYLOAD_SCHEMA,
+    CONTROL_POST_CREATION_REPLY_COMMAND_TYPE,
+    CONTROL_POST_CREATION_STATUS_COMMAND_TYPE,
     CONTROL_TRANSPORT_PROBE_COMMAND_TYPE,
     CONTROL_TRANSPORT_PROBE_PAYLOAD_SCHEMA,
     ControlBridgeError,
@@ -293,6 +296,59 @@ def test_transport_probe_command_mapping_enforces_probe_identity_and_no_fallback
         )
 
 
+def test_post_creation_command_mapping_projects_current_session_status_and_reply_packets() -> None:
+    status_message = ControlCommandMessage(**_post_creation_status_command_payload())
+    reply_message = ControlCommandMessage(**_post_creation_reply_command_payload())
+
+    status_packet = build_relay_packet_from_control_command(status_message)
+    reply_packet = build_relay_packet_from_control_command(reply_message)
+
+    assert status_packet["task_run_packet"] == {
+        "schema_version": CONTROL_POST_CREATION_PAYLOAD_SCHEMA,
+        "action": CONTROL_POST_CREATION_STATUS_COMMAND_TYPE,
+        "request_id": "req_status_001",
+        "origin": {
+            "client": "android_taskmail",
+            "sender_account_uuid": "acc-001",
+        },
+        "target": {
+            "scope": "current_session",
+            "workspace_id": "workspace_demo",
+            "session_id": "session_001",
+            "thread_id": "thread_001",
+        },
+        "status": {},
+    }
+    assert status_packet["dispatch_metadata"]["fallback_policy"] == "mail"
+    assert status_packet["dispatch_metadata"]["control_trace"] == {
+        "trace_id": "trace-status-001",
+    }
+    assert status_packet["dispatch_metadata"]["control_related"] == {"ui_surface": "session_sheet"}
+
+    assert reply_packet["task_run_packet"] == {
+        "schema_version": CONTROL_POST_CREATION_PAYLOAD_SCHEMA,
+        "action": CONTROL_POST_CREATION_REPLY_COMMAND_TYPE,
+        "request_id": "req_reply_001",
+        "origin": {
+            "client": "android_taskmail",
+            "sender_account_uuid": "acc-001",
+        },
+        "target": {
+            "scope": "current_session",
+            "workspace_id": "workspace_demo",
+            "session_id": "session_001",
+            "thread_id": "thread_001",
+        },
+        "reply": {
+            "reply_text": "Please continue with the cleanup.",
+        },
+    }
+    assert reply_packet["dispatch_metadata"]["fallback_policy"] == "mail"
+    assert reply_packet["dispatch_metadata"]["control_trace"] == {
+        "trace_id": "trace-reply-001",
+    }
+
+
 def _control_command_payload() -> dict[str, object]:
     return {
         "message_type": "command",
@@ -341,6 +397,68 @@ def _transport_probe_command_payload() -> dict[str, object]:
             "ui_surface": "transport_probe_sheet",
         },
         "sent_at": "2026-03-24T10:00:00",
+    }
+
+
+def _post_creation_status_command_payload() -> dict[str, object]:
+    return {
+        "message_type": "command",
+        "request_id": "req_status_001",
+        "packet_id": "android-control:session-action:req_status_001",
+        "command_type": CONTROL_POST_CREATION_STATUS_COMMAND_TYPE,
+        "payload_schema": CONTROL_POST_CREATION_PAYLOAD_SCHEMA,
+        "trace": {
+            "trace_id": "trace-status-001",
+        },
+        "payload": {
+            "origin": {
+                "client": "android_taskmail",
+                "sender_account_uuid": "acc-001",
+            },
+            "target": {
+                "scope": "current_session",
+                "workspace_id": "workspace_demo",
+                "session_id": "session_001",
+                "thread_id": "thread_001",
+            },
+            "status": {},
+        },
+        "related": {
+            "ui_surface": "session_sheet",
+        },
+        "sent_at": "2026-03-24T12:00:00",
+    }
+
+
+def _post_creation_reply_command_payload() -> dict[str, object]:
+    return {
+        "message_type": "command",
+        "request_id": "req_reply_001",
+        "packet_id": "android-control:session-action:req_reply_001",
+        "command_type": CONTROL_POST_CREATION_REPLY_COMMAND_TYPE,
+        "payload_schema": CONTROL_POST_CREATION_PAYLOAD_SCHEMA,
+        "trace": {
+            "trace_id": "trace-reply-001",
+        },
+        "payload": {
+            "origin": {
+                "client": "android_taskmail",
+                "sender_account_uuid": "acc-001",
+            },
+            "target": {
+                "scope": "current_session",
+                "workspace_id": "workspace_demo",
+                "session_id": "session_001",
+                "thread_id": "thread_001",
+            },
+            "reply": {
+                "reply_text": "Please continue with the cleanup.",
+            },
+        },
+        "related": {
+            "ui_surface": "session_sheet",
+        },
+        "sent_at": "2026-03-24T12:01:00",
     }
 
 

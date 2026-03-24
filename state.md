@@ -2,7 +2,7 @@
 
 ## Current Snapshot
 
-- Updated At: 2026-03-23
+- Updated At: 2026-03-24
 - Current Runtime Stage: post-Phase-8 / TaskMail direct relay-control-file mainline in progress
 - Status: Active
 - Current Truth Layer: `docs/current/*`
@@ -10,8 +10,8 @@
 - Hosted Loop Entry: `.\.venv\Scripts\python.exe -m mail_runner.host --config <mail_config.bot.local.yaml> --runtime-dir <_tmp_live_mail_runner>`
 - Observability Entry: `.\.venv\Scripts\python.exe -m mail_runner.observe --config <_tmp_live_mail_runner\mail_config.loop_30s.yaml> status`
 - Test Command: `.\.venv\Scripts\python.exe -m pytest`
-- Latest Recorded Full-Suite Validation: `2026-03-20` -> `272 passed`
-- Note: `2026-03-23` 之后仓库又继续落地了 direct relay/control/file 相关切片；本次文档重整没有顺带重跑测试
+- Latest Recorded Full-Suite Validation: `2026-03-24` -> `452 passed`
+- Note: `2026-03-24` 已为 shared `/control` current-session session-action 扩展补跑 `.\.venv\Scripts\python.exe -m pytest`，结果 `452 passed`
 
 ## Current Runtime Facts
 
@@ -20,12 +20,19 @@
 - 当前正式 direct surface 仅限：
   - direct `new_task`
   - bootstrap `[SYNC]` `v1` / `v2`
+  - shared `/control` current-session direct `/status`
+  - shared `/control` current-session plain direct `reply`
+  - shared `/control` relay-side `transport_probe`
   - current-session direct `/status`
   - current-session plain direct `reply`
   - active-session detail read sidecar
   - relay `/v1/files` oversized-artifact file surface
 - current-session direct `/status` 与 plain `reply` 当前仍是 bridge-to-mail，不是新的 direct terminal-result API
-- bootstrap `[SYNC]` `v2` 当前是唯一 direct-result 特例；它返回 `packet_ack + bootstrap_result`，且不创建 task/thread/session
+- `/control` 当前会返回三类 direct result frame：
+  - bootstrap `[SYNC]` `v2` 的 `bootstrap_result`
+  - current-session direct `/status` / plain `reply` 的 `session_action_result`
+  - relay-side `transport_probe` 的 `transport_probe_result`
+- 其中 `session_action_result` 当前只表示 `mail_ingress_submission` 与 `session_action_closeout` 锚点快照，不替代最终 canonical mail outcome
 - relay `/v1/files` 当前用于超阈值 artifact 的 relay-hosted external delivery；本地 artifact truth 仍保持在 `RunArtifact` + `artifact_index.json`
 - 每轮 run 当前会落 `runs/<task_id>/canonical_summary.json`
 - current-session direct `/status` 与 plain `reply` 当前会落 `session_actions/<request_id>/session_action_closeout.json`

@@ -25,7 +25,11 @@
 
 - PC 仍然是 task execution truth
 - mail 仍然是默认控制面、receipt truth、artifact/history truth
-- direct result 当前只出现在 `/control` bootstrap `[SYNC]` `v2` 与 relay-side `transport_probe`
+- `/control` 当前会为三类切片返回 direct result frame：
+  - bootstrap `[SYNC]` `v2`
+  - current-session direct `/status` / plain `reply` 的 bridge-result
+  - relay-side `transport_probe`
+- 其中 current-session direct `/status` / plain `reply` 的 `session_action_result` 只表示 canonical mail ingress 提交与 closeout anchor snapshot，不表示 direct terminal business result
 - 任何未在本文件中列出的 direct surface，都不应视为当前行为
 
 ## 2. 当前已支持的 Direct Surface
@@ -62,13 +66,18 @@
 - `hello_ack` 当前额外回告：
   - `transport_token_id`
   - `accepted_payload_schemas`
-- 当前 `accepted_payload_schemas` 按 runtime 已 provision 的 handler 动态回告；当前已实现的 schema 只有：
+- 当前 `accepted_payload_schemas` 按 runtime 已 provision 的 handler 动态回告；当前已实现的 schema 包括：
+  - `post-creation-session-action-contract-v1`
   - `taskmail-bootstrap-control-contract-v2`
   - `taskmail-transport-probe-payload-v1`
-- 当前 `/control` 只支持三类 business frame：
+- 当前 `/control` 只支持四类 business frame：
   - `ping -> pong`
+  - `command(status|reply) -> command_ack -> result(session_action_result)`
   - `command(sync_project_folders) -> command_ack -> result(sync_project_folders_result)`
   - `command(transport_probe) -> command_ack -> event* -> result(transport_probe_result)`
+- 当前 `/control` 上的 current-session direct `/status` / plain `reply` 仍是 bridge-to-mail：
+  - `command_ack.accepted=true` 只表示 relay 已拿到 durable accepted lane 并把 canonical mail ingress 提交结果物化到 replay authority
+  - 后续 `result(session_action_result)` 只回告 `mail_ingress_submission` 与 `session_action_closeout` snapshot，不替代 canonical status/terminal mail
 - 当前 `/control` 的 bootstrap `command` 语义仍映射到 `taskmail-bootstrap-control-contract-v2`
 - 当前 `/control transport_probe` 的 direct result 仍只落 relay-side mail-bridge harness：
   - 只支持 `scenario=android_direct_ping_to_vps_to_pc`
@@ -83,9 +92,10 @@
   - `result.payload.observation` 当前会回告 projected PC observation summary 或 wait/skip state；operator 仍可直接读取 sidecar 做更底层对账
 - accepted/replay continuity 当前直接复用 relay packet store：
   - 同一 `packet_id` replay 返回同一 `receipt_id`
+  - 同一 current-session `session_action_result` replay 返回同一 `result_id`
   - 同一 bootstrap final result replay 返回同一 `result_id`
   - 同一 `transport_probe` replay 返回同一组 `event_id` / `result_id`
-- `/control` 当前还不是 direct `new_task`、current-session direct `/status` / `reply`、Phase 3 detail subscribe 或 generic control payload 的通用替代
+- `/control` 当前还不是 direct `new_task`、Phase 3 detail subscribe 或 generic control payload 的通用替代
 
 ### 2.4 Current-Session Direct `/status` And Plain `reply`
 
@@ -102,6 +112,20 @@
   - relay 先接受 packet
   - 再把请求桥接进 canonical mail status/reply 路径
   - user-visible 结果仍由正常状态邮件或 terminal mail 给出
+- 当 shared `/control` 当前切片被 provision 时，同一 schema 也可投影为：
+  - `command(status|reply) -> command_ack -> result(session_action_result)`
+  - `session_action_result.payload.session_action_result.result_scope = mail_ingress_submission`
+  - `session_action_result.payload.session_action_result.session_action_closeout` 当前回告：
+    - `action_type`
+    - `target_session_identity`
+    - `request_id`
+    - `ingress_message_id`
+    - `packet_id`
+    - `receipt_id`
+    - `last_summary`
+    - `terminal_mail_message_id`
+    - `terminal_mail_subject`
+  - 这些字段是 replay/closeout 锚点，不是 direct terminal business result
 
 resolver 规则：
 
@@ -170,7 +194,6 @@ plain `reply` 当前边界：
 - direct `/last`
 - direct `/sessions`
 - `/control` 上的 direct `new_task`
-- `/control` 上的 current-session direct `/status` / `reply`
 - `/control` 上的 `subscribe_session_detail`
 - cross-workspace direct session switching
 - direct structured question answers

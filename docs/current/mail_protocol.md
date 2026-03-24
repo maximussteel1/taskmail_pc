@@ -56,14 +56,15 @@ Current optional direct TaskMail boundary:
 
 - relay 当前可接受窄范围 direct `new_task`
 - relay 当前可接受 bootstrap `[SYNC]` `v1` / `v2`
-- relay 当前还暴露 shared `/control` websocket；当前已落地 bootstrap `sync_project_folders` `v2` 与 relay-side `transport_probe`
+- relay 当前还暴露 shared `/control` websocket；当前已落地 bootstrap `sync_project_folders` `v2`、current-session direct `/status` / plain `reply`，以及 relay-side `transport_probe`
 - `/control` 与 `/relay`、`/v1/files` 当前复用同一 `Authorization: Bearer <transport_token>` 认证路径
 - `/control` 首刀保留 `hello / hello_ack`，并在 `hello_ack` 里回告 `accepted_payload_schemas`
-- `/control` 当前支持三类 frame 流：
+- `/control` 当前支持四类 frame 流：
   - `ping -> pong`
+  - `command(status|reply) -> command_ack -> result(session_action_result)`
   - bootstrap `command(sync_project_folders) -> command_ack -> result(sync_project_folders_result)`
   - `transport_probe command -> command_ack -> event* -> result(transport_probe_result)`
-- `/control` accepted/replay 当前复用 relay packet store；同一 `packet_id` replay 会返回同一 `receipt_id`，已物化的 bootstrap / `transport_probe` final result replay 会返回同一 `result_id`
+- `/control` accepted/replay 当前复用 relay packet store；同一 `packet_id` replay 会返回同一 `receipt_id`，已物化的 `session_action_result` / bootstrap / `transport_probe` final result replay 会返回同一 `result_id`
 - `transport_probe_result` 当前仍是 relay-side harness/debug result，但它已不再只证明 mail bridge submission
 - relay 现在会在 mail 提交成功后按 `timeout_seconds` 等待 relay-visible `tasks/_mailbox/transport_probes/<probe_id>.json`：
 - `status=completed` + `outcome=observed` 表示 relay 已读到与当前 `request_id/packet_id/trace_id/transport_message_id` 对齐的 PC mailbox observation
@@ -73,8 +74,9 @@ Current optional direct TaskMail boundary:
 - `transport_probe_result.payload.observation` 现在会携带 projected observation summary 或当前 wait/skip state；PC host 仍继续把原始 mailbox observation sidecar 写到 `tasks/_mailbox/transport_probes/<probe_id>.json`
 - relay 当前可接受 current-session direct `/status` 与 plain `reply`
 - 这些 direct surface 的 task execution truth 仍留在 PC，不把 relay 提升成执行真相层
-- direct `new_task` 与 current-session direct action 当前都走 bridge-to-mail；`/control` bootstrap `v2` 与 relay-side `transport_probe` 是当前两个 direct result surface
-- `/relay` 当前仍是 direct `new_task`、current-session direct `/status` / `reply` 与 Phase 3 detail sidecar 的 carrier；`/control` 还不是它们的通用替代
+- `/control session_action_result` 当前只回告 canonical mail ingress 已提交以及当前 `session_action_closeout` 锚点快照；user-visible final outcome 仍以正常 status / terminal mail 为准
+- direct `new_task` 与 current-session direct action 当前都走 bridge-to-mail；`/control` bootstrap `v2`、current-session direct `session_action_result` 与 relay-side `transport_probe` 是当前三类 direct result surface
+- `/relay` 当前仍是 direct `new_task`、current-session direct `/status` / `reply` 与 Phase 3 detail sidecar 的 carrier；`/control` 现在也可承载 current-session direct `/status` / `reply`，但它仍不是这些能力的通用替代
 - 具体 schema、限制条件、closeout/evidence 与 `/v1/files` file surface 规则，以 [taskmail_direct_control_file_contract.md](taskmail_direct_control_file_contract.md) 为准
 
 Current optional direct TaskMail active-detail sidecar boundary:
@@ -123,7 +125,10 @@ Current optional direct TaskMail active-detail sidecar boundary:
 - `taskmail-bootstrap-control-contract-v2` 表示 direct request + direct result：当前 relay runtime 在具备本地 PC truth 时会直接返回 `packet_ack + bootstrap_result`
 - 当 relay operator provision 了 shared `/control` 当前切片时，Android 也可通过 `/control` 提交同一业务动作；bootstrap client 仍必须检查 `hello_ack.accepted_payload_schemas` 里是否出现 `taskmail-bootstrap-control-contract-v2`
 - 在 `/control` 上，同一业务语义当前投影为 `command(sync_project_folders) -> command_ack -> result(sync_project_folders_result)`
-- `/control.hello_ack.accepted_payload_schemas` 当前按 runtime 已 provision 的 handler 动态回告；若 relay 同时 provision 了 `transport_probe` harness，则该列表还会额外出现 `taskmail-transport-probe-payload-v1`
+- `/control.hello_ack.accepted_payload_schemas` 当前按 runtime 已 provision 的 handler 动态回告；该列表当前可出现：
+  - `post-creation-session-action-contract-v1`
+  - `taskmail-bootstrap-control-contract-v2`
+  - `taskmail-transport-probe-payload-v1`
 - current repo 中，runtime 以已配置 `task_root` 作为本地 truth 可用的运行时信号；v2 handler 读取 runner config 中的 `project_sync_roots`，而不是扫描 relay/VPS 自己的临时目录
 - accepted v2 path 不会额外生成 `[SYNC] Project Folder List` 回复邮件
 

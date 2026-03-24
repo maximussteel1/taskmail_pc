@@ -9,19 +9,30 @@ from .protocol import ProtocolValidationError, RelayErrorMessage
 
 CONTROL_BOOTSTRAP_PAYLOAD_SCHEMA = "taskmail-bootstrap-control-contract-v2"
 CONTROL_BOOTSTRAP_COMMAND_TYPE = "sync_project_folders"
+CONTROL_POST_CREATION_PAYLOAD_SCHEMA = "post-creation-session-action-contract-v1"
+CONTROL_POST_CREATION_STATUS_COMMAND_TYPE = "status"
+CONTROL_POST_CREATION_REPLY_COMMAND_TYPE = "reply"
 CONTROL_TRANSPORT_PROBE_PAYLOAD_SCHEMA = "taskmail-transport-probe-payload-v1"
 CONTROL_TRANSPORT_PROBE_COMMAND_TYPE = "transport_probe"
+CONTROL_SESSION_ACTION_RESULT_TYPE = "session_action_result"
 CONTROL_CHANNEL = "taskmail_android_direct"
 CONTROL_FALLBACK_POLICY = "mail"
 CONTROL_NO_FALLBACK_POLICY = "none"
 SUPPORTED_CONTROL_PAYLOAD_SCHEMAS = (
-    CONTROL_TRANSPORT_PROBE_PAYLOAD_SCHEMA,
+    CONTROL_POST_CREATION_PAYLOAD_SCHEMA,
     CONTROL_BOOTSTRAP_PAYLOAD_SCHEMA,
+    CONTROL_TRANSPORT_PROBE_PAYLOAD_SCHEMA,
 )
 _CONTROL_RESULT_TYPE_BOOTSTRAP = "sync_project_folders_result"
 _CONTROL_RESULT_TYPE_TRANSPORT_PROBE = "transport_probe_result"
 _CONTROL_RESULT_STATUSES = {"partial", "completed", "failed"}
 _CONTROL_ROUTE_METADATA = {
+    (CONTROL_POST_CREATION_PAYLOAD_SCHEMA, CONTROL_POST_CREATION_STATUS_COMMAND_TYPE): {
+        "fallback_policy": CONTROL_FALLBACK_POLICY,
+    },
+    (CONTROL_POST_CREATION_PAYLOAD_SCHEMA, CONTROL_POST_CREATION_REPLY_COMMAND_TYPE): {
+        "fallback_policy": CONTROL_FALLBACK_POLICY,
+    },
     (CONTROL_BOOTSTRAP_PAYLOAD_SCHEMA, CONTROL_BOOTSTRAP_COMMAND_TYPE): {
         "fallback_policy": CONTROL_FALLBACK_POLICY,
     },
@@ -477,6 +488,8 @@ def build_relay_packet_from_control_command(message: ControlCommandMessage) -> d
                 f"{message.payload_schema} / {message.command_type}"
             ),
         )
+    if message.payload_schema == CONTROL_POST_CREATION_PAYLOAD_SCHEMA:
+        _validate_control_post_creation_payload(message)
     if message.payload_schema == CONTROL_TRANSPORT_PROBE_PAYLOAD_SCHEMA:
         _validate_control_transport_probe_payload(message)
     overlapping_keys = sorted(
@@ -596,3 +609,21 @@ def _validate_control_transport_probe_payload(message: ControlCommandMessage) ->
     if "\n" in payload_text or "\r" in payload_text:
         raise ControlBridgeError("invalid_payload", "payload.payload_text must be single-line text")
     _require_positive_int(message.payload.get("timeout_seconds"), "payload.timeout_seconds")
+
+
+def _validate_control_post_creation_payload(message: ControlCommandMessage) -> None:
+    _require_mapping(message.payload.get("origin"), "payload.origin")
+    target = _require_mapping(message.payload.get("target"), "payload.target")
+    _require_text(target.get("scope"), "payload.target.scope")
+    _require_text(target.get("workspace_id"), "payload.target.workspace_id")
+    _require_text(target.get("session_id"), "payload.target.session_id")
+    if target.get("thread_id") is not None:
+        _require_text(target.get("thread_id"), "payload.target.thread_id")
+
+    if message.command_type == CONTROL_POST_CREATION_STATUS_COMMAND_TYPE:
+        _require_mapping(message.payload.get("status"), "payload.status")
+        return
+
+    if message.command_type == CONTROL_POST_CREATION_REPLY_COMMAND_TYPE:
+        reply = _require_mapping(message.payload.get("reply"), "payload.reply")
+        _require_text(reply.get("reply_text"), "payload.reply.reply_text")

@@ -24,11 +24,13 @@ Current direct exceptions:
 - when the relay operator enables TaskMail direct ingress, Android may submit the first `new_task` action to `/relay`
 - when the relay operator enables TaskMail direct ingress, Android may also submit the bootstrap `sync_project_folders` action to `/relay`
 - when the relay operator provisions the current shared `/control` slice, Android may also submit bootstrap `sync_project_folders` to `/control`
+- when the relay operator provisions the current shared `/control` session-action slice, Android may also submit current-session direct `/status` and plain `reply` to `/control`
 - when the relay operator provisions the current shared `/control` harness slice, operator/debug builds may also submit relay-side `transport_probe` to `/control`
 - bootstrap `sync_project_folders` currently has two direct variants:
 - `taskmail-bootstrap-control-contract-v1` is bridge-to-mail; the relay bridges the accepted packet back into canonical `[SYNC]` mail ingress
 - `taskmail-bootstrap-control-contract-v2` is direct-result; when the relay is provisioned with local PC truth, the server returns `packet_ack` followed by `bootstrap_result`
 - on `/control`, the current first slice keeps `hello / hello_ack` and projects that same bootstrap v2 business action as `command -> command_ack -> result`
+- on `/control`, the current post-creation slice projects current-session direct `status|reply` as `command -> command_ack -> result(session_action_result)`
 - `/control.hello_ack.accepted_payload_schemas` now depends on the provisioned relay handlers; bootstrap clients must still gate on `taskmail-bootstrap-control-contract-v2`
 - current `/control transport_probe` is a harness/debug slice, not a normal end-user action; it currently returns `command_ack -> event* -> result(transport_probe_result)`
 - current `transport_probe_result` now distinguishes four relay-native outcomes:
@@ -38,7 +40,9 @@ Current direct exceptions:
 - `outcome=failed` means the relay failed before mail submission completed; the result status is `failed`
 - `transport_probe_result.payload.observation` now carries either the projected PC mailbox observation summary or the current wait/skip state; Android should still treat the whole slice as operator/debug harness only
 - when the relay operator enables the current post-creation slice, Android may submit current-session direct `/status` and current-session plain direct `reply` to `/relay`
+- when the relay operator provisions the current shared `/control` session-action slice, Android may submit the same current-session `status|reply` semantics to `/control`
 - this post-creation slice is bridge-to-mail only; accepted packets still resolve to normal status or terminal mail on the canonical thread/session chain
+- `session_action_result` is not a direct terminal business result; it only confirms `mail_ingress_submission` plus the current `session_action_closeout` anchor snapshot
 - when the relay operator provisions the current Phase 3 direct inbound wire, Android may subscribe the current active session detail on `/relay`
 - this Phase 3 path is read-side only and is limited to `session_snapshot` / `session_delta` freshness for one active session detail view
 - oversized relay-hosted artifacts may now surface to Android as `/v1/files` download links inside normal task mail, but `/v1/files` is not a general Android control API
@@ -120,6 +124,19 @@ Android operator / harness
   -> ws /control command_ack
   -> ws /control event*
   -> ws /control result(transport_probe_result)
+```
+
+Optional shared `/control` current-session direct `status` or plain `reply`:
+
+```text
+Android user
+  -> ws /control hello
+  -> ws /control hello_ack
+  -> ws /control command(status|reply)
+  -> ws /control command_ack
+  -> ws /control result(session_action_result)
+  -> canonical mail status / terminal outcome continues on the normal mail chain
+  -> Android user
 ```
 
 Optional current-session direct `/status` or plain `reply`:
@@ -257,21 +274,30 @@ Current shared `/control` note:
 - `/control` is on the same relay host/port as `/relay`
 - `/control` and `/v1/files` reuse the same `Authorization: Bearer <transport_token>` path
 - Android must still start with `hello` and wait for `hello_ack`
-- Android should read `accepted_payload_schemas` from `hello_ack`; the current slice may advertise `taskmail-bootstrap-control-contract-v2` and/or `taskmail-transport-probe-payload-v1` depending on provisioned handlers
+- Android should read `accepted_payload_schemas` from `hello_ack`; the current slice may advertise:
+  - `post-creation-session-action-contract-v1`
+  - `taskmail-bootstrap-control-contract-v2`
+  - `taskmail-transport-probe-payload-v1`
 - current bootstrap `/control` business flow is `command(sync_project_folders) -> command_ack -> result(sync_project_folders_result)`
+- current current-session `/control` business flow is `command(status|reply) -> command_ack -> result(session_action_result)`
 - current `transport_probe` `/control` business flow is `command(transport_probe) -> command_ack -> event* -> result(transport_probe_result)`
+- current `session_action_result` means:
+  - the relay has already materialized durable accepted/result replay authority for this bridge action
+  - `payload.session_action_result.result_scope = mail_ingress_submission`
+  - `payload.session_action_result.session_action_closeout` carries the current closeout anchors such as `action_type` / `target_session_identity` / `request_id` / `ingress_message_id` / `last_summary` / `terminal_mail_subject`
+  - Android must still read the final business outcome from the normal mail chain
 - current `transport_probe` is harness/debug only; Android must not treat it as a user-facing control primitive
 - when `transport_probe_result.status=completed` and `outcome=observed`, the relay has already read a matching PC mailbox observation from `tasks/_mailbox/transport_probes/<probe_id>.json`
 - when `status=partial`, Android should read `outcome=submitted|timed_out` plus `payload.observation` as operator diagnostics rather than as business success
 - the PC host still writes the mailbox observation sidecar under `tasks/_mailbox/transport_probes/<probe_id>.json`; relay-side projection now reuses that same evidence instead of inventing a second proof surface
 - after `command_ack.accepted=true`, reconnect/replay must reuse the same `packet_id` / `request_id`
-- current `/control` does not replace `/relay` for `new_task`, current-session direct `/status` / `reply`, or Phase 3 detail subscribe
+- current `/control` does not replace `/relay` for `new_task` or Phase 3 detail subscribe, and it still does not replace mail as the final outcome truth for current-session direct `/status` / `reply`
 
 - for both v1 and v2, relay-level retry must reuse the same `packet_id` / `request_id`; only a fresh user tap creates a new pair
 
-#### D. Current-session direct relay actions
+#### D. Current-session direct relay/control actions
 
-When the relay operator enables the current post-creation slice, Android may submit a narrow current-session direct packet over `/relay`.
+When the relay operator enables the current post-creation slice, Android may submit a narrow current-session direct packet over `/relay`; when the shared `/control` session-action slice is also provisioned, Android may submit the same business action over `/control`.
 
 Current scope:
 
@@ -292,6 +318,7 @@ Current `status` rules:
 - semantic equivalent is canonical mail `/status`
 - `task_run_packet.status` must be an empty object in `v1`
 - accepted packet means the bridge mail was accepted; Android should still read the user-visible result from the normal status mail chain
+- on `/control`, accepted `status` currently continues as `command_ack -> result(session_action_result)`; that result only confirms `mail_ingress_submission` plus current closeout anchors
 
 Current plain `reply` rules:
 
@@ -302,11 +329,13 @@ Current plain `reply` rules:
   - structured question answers
   - attachments
 - if the target session is `paused` or `awaiting_user_input`, Android should stay on the current mail path instead of trying to force direct plain `reply`
+- on `/control`, accepted plain `reply` currently continues as `command_ack -> result(session_action_result)`; that result is still bridge-to-mail, not the terminal business reply result
 
 Current result reading:
 
 - accepted packet is not the final business result
 - current-session direct `/status` and plain `reply` still resolve to normal mail-visible status or terminal outcomes on the target thread/session chain
+- `session_action_result` should be read as accepted/result continuity plus closeout-anchor projection, not as a replacement for the eventual mail-visible outcome
 
 For reply body serialization:
 

@@ -2,7 +2,7 @@
 
 仓库级协作约定见 [AGENTS.md](AGENTS.md)。
 
-本项目当前代码已经超出早期 `Phase 8` 范围：在保留 mail-first 执行语义与现有邮件输出合同的前提下，仓库已经落地 direct `new_task`、bootstrap `[SYNC]` `v1/v2`、current-session direct `/status` / plain `reply`、active-session detail read sidecar、relay-hosted `/v1/files` 大文件交付，以及 `canonical_summary.json` / `session_action_closeout.json` / `taskmail_daily_closeout_bundle.json` 这组 closeout 证据层。运行产物仍按 `thread` 目录落盘，PC 仍是 task execution truth，mail 仍是默认控制面与 receipt/artifact/history truth；relay direct surface 只是窄范围附加面，不把 VPS 提升为执行真相层。`codex + sdk` 路径仍会落盘 `stream.events.jsonl` 供 PC 侧只读观察，bot mailbox receive 仍支持 best-effort IMAP `IDLE` 唤醒并保留 UID-based polling 作为 truth layer，COS 交付继续走直连 HTTPS，不继承 ambient proxy env vars。当前工作区最近一次有记录的 full suite 是 `2026-03-20` 的 `272 passed`；`2026-03-23` 之后又继续落地了 relay/control/file 相关切片。
+本项目当前代码已经超出早期 `Phase 8` 范围：在保留 mail-first 执行语义与现有邮件输出合同的前提下，仓库已经落地 direct `new_task`、bootstrap `[SYNC]` `v1/v2`、shared `/control` bootstrap `v2`、shared `/control` current-session direct `/status` / plain `reply` bridge-result、shared `/control` relay-side `transport_probe`、active-session detail read sidecar、relay-hosted `/v1/files` 大文件交付，以及 `canonical_summary.json` / `session_action_closeout.json` / `taskmail_daily_closeout_bundle.json` 这组 closeout 证据层。运行产物仍按 `thread` 目录落盘，PC 仍是 task execution truth，mail 仍是默认控制面与 receipt/artifact/history truth；relay direct surface 只是窄范围附加面，不把 VPS 提升为执行真相层。`codex + sdk` 路径仍会落盘 `stream.events.jsonl` 供 PC 侧只读观察，bot mailbox receive 仍支持 best-effort IMAP `IDLE` 唤醒并保留 UID-based polling 作为 truth layer，COS 交付继续走直连 HTTPS，不继承 ambient proxy env vars。当前工作区最近一次有记录的 full suite 是 `2026-03-24` 的 `452 passed`；`2026-03-23` 之后又继续落地了 relay/control/file 相关切片。
 
 ## 当前能力
 
@@ -21,7 +21,7 @@
 - task thread 的 live mailbox 现在按三类保留：`[ACCEPTED]` / `[RUNNING]` / `[STATUS]` 只保留最新进度邮件；`[QUESTION]` / `[PAUSED]` 和 `[DONE]` / `[FAILED]` / `[KILLED]` 作为 action-required / receipt 邮件保留；完整历史仍保留在 `tasks/<thread_id>/mail/raw_*.json`
 - 真实 CLI / SDK 回复现在支持 structured run-result capsule：adapter 会回填 `RunResult.changed_files`、`tests_passed`、`error_type`、`error_message`，并把结果块从用户可见回复与状态邮件正文里剥离
 - 提供超大产物 COS 外链交付：小文件继续作为邮件附件，超阈值文件改为预签名下载链接并展示在单独的 `External Deliveries` 区域；`APK/IPA` 会自动改用 `.bin` 对象名绕过 COS 默认域名分发限制；COS 上传当前强制走直连 HTTPS，不继承宿主进程里的 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`
-- 提供窄范围 TaskMail direct relay surface：direct `new_task`、bootstrap `[SYNC]` `v1/v2`、current-session direct `/status` 与 plain `reply`，以及 active-session detail read sidecar
+- 提供窄范围 TaskMail direct relay/control surface：direct `new_task`、bootstrap `[SYNC]` `v1/v2`、shared `/control` current-session direct `/status` 与 plain `reply` bridge-result、shared `/control` relay-side `transport_probe`，以及 active-session detail read sidecar
 - 提供 relay `/v1/files` external delivery：当 `outbound_transport=relay` 且未使用 COS 时，超阈值 artifact 会上传到 relay file surface，并把 `artifact_id -> file_id` 绑定单独写入 `artifact_file_binding_index.json`
 - 提供 direct-action / parity closeout 证据层：每轮 run 会落 `canonical_summary.json`，current-session direct `/status` 与 plain `reply` 会落 `session_action_closeout.json`，并可由 `scripts/build_taskmail_closeout_bundle.py` 组装 `taskmail_daily_closeout_bundle.json`
 - 提供首封 `[SYNC]` 项目目录同步入口：直接回复 `D:\projects` / `E:\projects` 或配置根路径下的一级文件夹清单，不触发 backend run，也不创建 task/session
@@ -491,7 +491,7 @@ question_id: phase2_device_validation
 
 ## 验证现状
 
-- 最近一次有记录的 full-suite 自动化验证是 `2026-03-20`：`.\.venv\Scripts\python.exe -m pytest` -> `272 passed`
+- 最近一次有记录的 full-suite 自动化验证是 `2026-03-24`：`.\.venv\Scripts\python.exe -m pytest` -> `452 passed`
 - `2026-03-23` 之后仓库又继续落地了 relay/control/file 相关切片；本次 README 重整没有顺带重跑测试
 - 当前自动化覆盖已经包含：
   - 新任务与 `[SYNC]` 路径

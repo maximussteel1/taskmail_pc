@@ -31,7 +31,12 @@ from ..state_capsule import render_state_capsule
 from ..thread_store import build_workspace_id
 from ..thread_store import list_all_thread_states, load_session_state, load_thread_state
 from .config import RelayServerConfig
-from .direct_actions import RelayDirectActionError, RelayDirectPacketHandler
+from .control_protocol import (
+    CONTROL_POST_CREATION_PAYLOAD_SCHEMA,
+    CONTROL_SESSION_ACTION_RESULT_TYPE,
+    build_control_result,
+)
+from .direct_actions import RelayDirectActionError, RelayDirectActionResult, RelayDirectPacketHandler
 from .packet_store import AcceptedRelayPacket
 from .protocol import RelayErrorMessage, RelayPacketAckMessage, RelayPacketMessage
 
@@ -47,6 +52,8 @@ _BOT_MESSAGE_ID_DOMAIN = "mail-runner.local"
 _SAFE_MESSAGE_ID_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _STRUCTURED_ANSWER_RE = re.compile(r"(?im)^\s*answers\s*:\s*$|^\s*question_id\s*[:：]")
 _LEADING_COMMAND_RE = re.compile(r"^\s*/([a-z][a-z0-9_-]*)\b", re.IGNORECASE)
+_CONTROL_SESSION_ACTION_RESULT_SCOPE = "mail_ingress_submission"
+_CONTROL_SESSION_ACTION_DELIVERY_STATUS = "submitted"
 
 _DIRECT_POST_CREATION_FALLBACK_REQUIRED_ERROR_CODES = frozenset(
     {"unsupported_action", "direct_temporarily_unavailable"}
@@ -621,10 +628,119 @@ def _maybe_upsert_post_creation_closeout(
         )
 
 
+def _packet_uses_control_result_lane(packet: AcceptedRelayPacket) -> bool:
+    trace = packet.dispatch_metadata.get("control_trace")
+    if not isinstance(trace, dict):
+        return False
+    trace_id = str(trace.get("trace_id") or "").strip()
+    schema_version = str(packet.dispatch_metadata.get("schema_version") or "").strip()
+    return bool(trace_id and schema_version == CONTROL_POST_CREATION_PAYLOAD_SCHEMA)
+
+
+def _build_post_creation_control_related(
+    packet: AcceptedRelayPacket,
+    *,
+    result_id: str,
+) -> dict[str, Any]:
+    related = dict(packet.dispatch_metadata.get("control_related") or {})
+    trace = packet.dispatch_metadata.get("control_trace") or {}
+    trace_id = str(trace.get("trace_id") or "").strip()
+    if trace_id:
+        related["trace_id"] = trace_id
+    related["request_id"] = packet.client_trace_id
+    related["packet_id"] = packet.packet_id
+    related["receipt_id"] = packet.receipt_id
+    related["result_id"] = result_id
+    return related
+
+
+def _build_post_creation_control_result(
+    packet: AcceptedRelayPacket,
+    *,
+    action_type: str,
+    request_id: str,
+    ingress_message_id: str | None,
+    transport_message_id: str | None,
+    target_session_identity: dict[str, str] | None,
+    terminal_mail_subject: str | None,
+    terminal_mail_message_id: str | None,
+    last_summary: str | None,
+    sent_at: str,
+) -> dict[str, Any]:
+    result_id = f"session-action-result:{request_id}"
+    closeout = {
+        "action_type": action_type,
+        "target_session_identity": target_session_identity,
+        "ingress_type": "direct_bridge",
+        "request_id": request_id,
+        "ingress_message_id": ingress_message_id,
+        "packet_id": packet.packet_id,
+        "receipt_id": packet.receipt_id,
+        "last_summary": last_summary,
+        "terminal_mail_message_id": terminal_mail_message_id,
+        "terminal_mail_subject": terminal_mail_subject,
+    }
+    return build_control_result(
+        request_id=request_id,
+        packet_id=packet.packet_id,
+        command_type=action_type,
+        payload_schema=CONTROL_POST_CREATION_PAYLOAD_SCHEMA,
+        result_type=CONTROL_SESSION_ACTION_RESULT_TYPE,
+        status="completed",
+        receipt_id=packet.receipt_id,
+        result_id=result_id,
+        sent_at=sent_at,
+        payload={
+            "session_action_result": {
+                "action_type": action_type,
+                "result_scope": _CONTROL_SESSION_ACTION_RESULT_SCOPE,
+                "canonical_outcome_via": "mail",
+                "delivery_status": _CONTROL_SESSION_ACTION_DELIVERY_STATUS,
+                "submitted_at": sent_at,
+                "transport_message_id": transport_message_id,
+                "session_action_closeout": closeout,
+            }
+        },
+        related=_build_post_creation_control_related(packet, result_id=result_id),
+    )
+
+
+def _build_post_creation_control_server_messages(
+    packet: AcceptedRelayPacket,
+    *,
+    action_type: str,
+    request_id: str,
+    ingress_message_id: str | None,
+    transport_message_id: str | None,
+    target_session_identity: dict[str, str] | None,
+    terminal_mail_subject: str | None,
+    terminal_mail_message_id: str | None,
+    last_summary: str | None,
+    sent_at: str,
+) -> list[dict[str, Any]]:
+    if not _packet_uses_control_result_lane(packet):
+        return []
+    return [
+        _build_post_creation_control_result(
+            packet,
+            action_type=action_type,
+            request_id=request_id,
+            ingress_message_id=ingress_message_id,
+            transport_message_id=transport_message_id,
+            target_session_identity=target_session_identity,
+            terminal_mail_subject=terminal_mail_subject,
+            terminal_mail_message_id=terminal_mail_message_id,
+            last_summary=last_summary,
+            sent_at=sent_at,
+        )
+    ]
+
+
 class RelayTaskMailDirectCurrentSessionStatusHandler:
     """Accepts direct current-session /status packets and reuses the existing-thread mail path locally."""
 
     transport_name = "relay_direct_post_creation_status"
+    control_payload_schemas = (CONTROL_POST_CREATION_PAYLOAD_SCHEMA,)
 
     def __init__(
         self,
@@ -721,17 +837,34 @@ class RelayTaskMailDirectCurrentSessionStatusHandler:
             last_summary=updated_state.last_summary,
             target_session_identity=_build_post_creation_target_identity(payload, updated_state),
         )
-        return TransportReceipt(
+        sent_at = _timestamp()
+        receipt = TransportReceipt(
             success=True,
             transport_name=self.transport_name,
-            sent_at=_timestamp(),
+            sent_at=sent_at,
         )
+        server_messages = _build_post_creation_control_server_messages(
+            packet,
+            action_type=_DIRECT_ACTION_STATUS,
+            request_id=payload.request_id,
+            ingress_message_id=envelope.message_id,
+            transport_message_id=None,
+            target_session_identity=_build_post_creation_target_identity(payload, updated_state),
+            terminal_mail_subject=_build_post_creation_status_closeout_subject(updated_state),
+            terminal_mail_message_id=updated_state.latest_message_id,
+            last_summary=updated_state.last_summary,
+            sent_at=sent_at,
+        )
+        if server_messages:
+            return RelayDirectActionResult(receipt=receipt, server_messages=server_messages)
+        return receipt
 
 
 class RelayTaskMailDirectCurrentSessionStatusMailBridge:
     """Bridges accepted direct current-session /status packets into the bot mailbox mail ingress."""
 
     transport_name = "relay_direct_post_creation_mail_bridge"
+    control_payload_schemas = (CONTROL_POST_CREATION_PAYLOAD_SCHEMA,)
 
     def __init__(
         self,
@@ -815,18 +948,39 @@ class RelayTaskMailDirectCurrentSessionStatusMailBridge:
                 last_summary=target_state.last_summary,
                 target_session_identity=target_session_identity,
             )
-        return TransportReceipt(
+        sent_at = _timestamp()
+        receipt = TransportReceipt(
             success=True,
             transport_name=self.transport_name,
-            sent_at=_timestamp(),
+            sent_at=sent_at,
             transport_message_id=message_id,
         )
+        server_messages = _build_post_creation_control_server_messages(
+            packet,
+            action_type=_DIRECT_ACTION_STATUS,
+            request_id=payload.request_id,
+            ingress_message_id=message_id,
+            transport_message_id=message_id,
+            target_session_identity=target_session_identity,
+            terminal_mail_subject=(
+                _build_post_creation_status_closeout_subject(target_state)
+                if target_state is not None
+                else None
+            ),
+            terminal_mail_message_id=None,
+            last_summary=target_state.last_summary if target_state is not None else None,
+            sent_at=sent_at,
+        )
+        if server_messages:
+            return RelayDirectActionResult(receipt=receipt, server_messages=server_messages)
+        return receipt
 
 
 class RelayTaskMailDirectCurrentSessionReplyHandler:
     """Accepts direct current-session plain reply packets and reuses the existing-thread mail path locally."""
 
     transport_name = "relay_direct_post_creation_reply"
+    control_payload_schemas = (CONTROL_POST_CREATION_PAYLOAD_SCHEMA,)
 
     def __init__(
         self,
@@ -945,17 +1099,38 @@ class RelayTaskMailDirectCurrentSessionReplyHandler:
             target_session_identity=_build_post_creation_target_identity(payload, updated_state),
         )
 
-        return TransportReceipt(
+        sent_at = _timestamp()
+        receipt = TransportReceipt(
             success=True,
             transport_name=self.transport_name,
-            sent_at=_timestamp(),
+            sent_at=sent_at,
         )
+        server_messages = _build_post_creation_control_server_messages(
+            packet,
+            action_type=_DIRECT_ACTION_REPLY,
+            request_id=payload.request_id,
+            ingress_message_id=envelope.message_id,
+            transport_message_id=None,
+            target_session_identity=_build_post_creation_target_identity(payload, updated_state),
+            terminal_mail_subject=(
+                _build_post_creation_reply_closeout_subject(updated_state)
+                if terminal_mail_message_id is not None
+                else None
+            ),
+            terminal_mail_message_id=terminal_mail_message_id,
+            last_summary=updated_state.last_summary,
+            sent_at=sent_at,
+        )
+        if server_messages:
+            return RelayDirectActionResult(receipt=receipt, server_messages=server_messages)
+        return receipt
 
 
 class RelayTaskMailDirectCurrentSessionReplyMailBridge:
     """Bridges accepted direct current-session plain reply packets into the bot mailbox mail ingress."""
 
     transport_name = "relay_direct_post_creation_reply_mail_bridge"
+    control_payload_schemas = (CONTROL_POST_CREATION_PAYLOAD_SCHEMA,)
 
     def __init__(
         self,
@@ -1049,9 +1224,25 @@ class RelayTaskMailDirectCurrentSessionReplyMailBridge:
                 target_session_identity=target_session_identity,
             )
 
-        return TransportReceipt(
+        sent_at = _timestamp()
+        receipt = TransportReceipt(
             success=True,
             transport_name=self.transport_name,
-            sent_at=_timestamp(),
+            sent_at=sent_at,
             transport_message_id=message_id,
         )
+        server_messages = _build_post_creation_control_server_messages(
+            packet,
+            action_type=_DIRECT_ACTION_REPLY,
+            request_id=payload.request_id,
+            ingress_message_id=message_id,
+            transport_message_id=message_id,
+            target_session_identity=target_session_identity,
+            terminal_mail_subject=None,
+            terminal_mail_message_id=None,
+            last_summary=target_state.last_summary if target_state is not None else None,
+            sent_at=sent_at,
+        )
+        if server_messages:
+            return RelayDirectActionResult(receipt=receipt, server_messages=server_messages)
+        return receipt
