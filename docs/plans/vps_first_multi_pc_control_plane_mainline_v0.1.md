@@ -25,6 +25,9 @@
 - `session` 一旦创建就固定绑定到 `workspace + pc`
 - `backend/profile/permission` 必须作为控制面一等字段进入主线，而不是继续散落在旧 mail 语义里
 - 控制面全量字段形状现在已经足够冻结成 Android 与 PC/VPS 的共享开发 baseline
+- 近期开发目标应按“直接切入 `VPS` 主控制面”读取，而不是继续设计长期 mail 共存
+- mail 只作为 cutover 前兼容/迁移层保留，不是长期 backup/fallback 常驻架构
+- artifact external delivery 的 owner lane 应收敛到 `VPS /v1/files`；`COS` 目前只可按 cutover 前兼容线读取，不应再被读成长期并存的第二 owner lane
 
 ## First-Stage Scope
 
@@ -73,4 +76,7 @@
 2. 再冻结 `PC <-> VPS` 最小协议。
 3. 然后按 `docs/plans/vps_first_multi_pc_phase1_execution_plan_v0.1.md` 落地 node registration 与 workspace inventory。
 4. 再落地 command/event/result 骨架。
-5. 最后再逐步把 mail 从主控制面降级为 backup/export/notification。
+5. 把 artifact external-delivery 的 owner lane 收敛到 `VPS /v1/files`，并把 `COS` 保持在 cutover 前兼容范围内。
+   具体执行口径见 `docs/plans/vps_file_surface_cutover_and_cos_decommission_checklist_v0.1.md`
+6. 在 `VPS-first` cutover 条件满足后，按清单退场 mail control-plane / fallback 线；是否保留纯导出或归档能力，必须另开文档单独论证。
+7. 在 `VPS /v1/files` cutover 条件满足后，按清单退场 `COS` external-delivery 线，而不是长期保留双通道。

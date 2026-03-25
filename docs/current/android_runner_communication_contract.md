@@ -6,7 +6,7 @@
 
 ## Status
 
-- Date: 2026-03-24
+- Date: 2026-03-25
 - Purpose: handoff document for the Android side that needs to communicate with the current `mail_based_task_manager`
 - Scope: current Android send/read contract, current relay boundary, the optional direct `new_task` ingress, the optional bootstrap `[SYNC]` direct v1/v2 slices, the optional shared `/control` bootstrap v2 slice, the optional relay-side `/control transport_probe` harness slice, the optional current-session direct `/status` / plain `reply` slice, the optional Phase 3 v1 active-session-detail direct read sidecar, and current relay-hosted file-surface delivery notes
 
@@ -235,6 +235,12 @@ Use the current first-mail protocol:
 
 If the optional direct Phase 2 v1 ingress is used, Android must still compile to these same first-mail semantics. The relay currently accepts only the shared `phase2-direct-outbound-contract-v1` `new_task` packet shape and bridges it back into this existing first-mail path.
 
+Current `dispatch_metadata.fallback_policy` note for this `new_task` packet:
+
+- `mail` remains accepted as the legacy-compatible value
+- `none` is also accepted as the current no-legacy direct-only declaration
+- for this Phase 2 v1 slice, accepting `none` does not by itself change server-side runtime, canonical mail, or error-taxonomy behavior; it only removes the old parser-level hard rejection
+
 #### B. Continue or control an existing session
 
 Android must send a real reply mail that preserves:
@@ -312,6 +318,12 @@ Current target identity:
 - `workspace_id`
 - `session_id`
 - optional `thread_id`
+
+Current `dispatch_metadata.fallback_policy` note for this post-creation packet:
+
+- `mail` remains accepted as the legacy-compatible value
+- `none` is also accepted as the current no-legacy direct-only declaration
+- for this current-session `status|reply` slice, accepting `none` does not by itself change server-side bridge runtime, closeout mail, canonical mail, or error-taxonomy behavior; it only removes the old parser-level hard rejection
 
 Current `status` rules:
 

@@ -9,8 +9,9 @@
 1. `pc_hello -> hello_ack`
 2. `workspace_snapshot`
 3. `command_dispatch -> command_ack`
-4. `connection_epoch` fencing
-5. 基础拒绝语义，例如 `unsupported_backend`
+4. `command_ack -> event -> output_chunk -> reconnect -> output_resume_request -> selective replay -> result -> artifact_manifest`
+5. `connection_epoch` fencing
+6. 基础拒绝语义，例如 `unsupported_backend`
 
 同时，这条 smoke 会把当前还没实现的 control-plane 对象显式记成 gap，而不是假装已经存在。
 
@@ -47,17 +48,31 @@
 3. 发送 `workspace_snapshot`
 4. 下发一条合法 `command_dispatch`
 5. PC 侧做本地 admission，并返回 `command_ack=accepted`
-6. 再下发一条合法 `command_dispatch`
-7. 在 runner 忙碌条件下返回 `command_ack=accepted_but_queued`
-8. 直接验证一条 `unsupported_backend` 拒绝路径
-9. 通过第二次 hello + 旧 heartbeat 验证 `stale_connection_epoch`
+6. 对已接受命令补一条 canonical `event`
+7. 对已接受命令先补一条 canonical `output_chunk(seq=1)`
+8. 通过第二次 `pc_hello` 模拟重连
+9. 由 server 侧按已有 `stream_id + seq` cursor 生成 `output_resume_request(after_seq=1)`
+10. 由 client 侧基于已落盘 `stream.events.jsonl` 只补发缺失尾段 `output_chunk(seq=2)`
+11. 对已接受命令补一条 canonical `result`
+12. 基于真实 `artifact_index.json + artifact_file_binding_index.json` 投影一条 canonical `artifact_manifest`
+13. 再下发一条合法 `command_dispatch`
+14. 在 runner 忙碌条件下返回 `command_ack=accepted_but_queued`
+15. 直接验证一条 `unsupported_backend` 拒绝路径
+16. 通过旧 heartbeat 验证 `stale_connection_epoch`
 
 脚本还会额外记录当前 gap：
 
-- `event`
-- `result`
-- `output_chunk`
-- capability 层宣称存在 `artifact_manifest`，但还没有 canonical control-plane packet
+- 真实 websocket 往返下的 `output_resume_request` roundtrip
+- 多 `PC` 路由与订阅
+- live `/v1/files` / COS external-delivery roundtrip 的 artifact evidence
+
+补充说明：
+
+- client 侧基于已落盘 `stream.events.jsonl` 的 reconnect resend 当前已由 `tests/test_pc_control_plane_client.py` 覆盖
+- `output_resume_request` / `server-driven resume` 的 protocol/runtime/client first-pass 与 websocket roundtrip 当前已由定向 pytest 覆盖
+- 这条 fixture smoke 当前已经改为走真实 `artifact_index.json + artifact_file_binding_index.json` 本地 truth-projection
+- 这条 fixture smoke 当前已经覆盖 in-memory loopback 下的 reconnect -> `output_resume_request` -> selective replay
+- 但它本身仍然不覆盖真实 websocket roundtrip、多 `PC` 订阅面，也不覆盖 live external-delivery roundtrip
 
 ## 与 pytest 的关系
 
@@ -83,4 +98,4 @@
 
 - `pc_control_plane_fixture_smoke.py` 的步骤或断言变化
 - control-plane 已实现消息类型变化
-- 仓库开始落地 canonical `event / result / output_chunk / artifact_manifest` packet
+- replay、truth-projection 或 higher-level evidence 级 gap 被关闭或改写

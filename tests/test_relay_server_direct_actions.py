@@ -139,6 +139,50 @@ def test_direct_new_task_packet_is_accepted_and_reuses_mail_task_start_path(tmp_
     assert canonical_summary["terminal_mail_subject"] == "[DONE][S:thread_001] Audit the direct-send handoff path"
 
 
+def test_direct_new_task_packet_accepts_none_fallback_policy_and_reuses_mail_task_start_path(tmp_path) -> None:
+    task_root = tmp_path / "tasks"
+    relay_state = tmp_path / "relay_state"
+    mail_client = FakeMailClient()
+    runner = SerialTaskRunner(task_root, Dispatcher(MockAdapter(0), MockAdapter(0)))
+    handler = RelayTaskMailDirectNewTaskHandler(
+        config=AppConfig(from_addr="bot@example.com", from_name="Mail Runner", task_root=str(task_root)),
+        task_root=task_root,
+        mail_client=mail_client,
+        runner=runner,
+        recipient_addr="user@example.com",
+        background=True,
+    )
+    server = LoopbackRelayServer(
+        RelayServerConfig(
+            host="127.0.0.1",
+            port=8787,
+            transport_token="relay-secret",
+            state_dir=str(relay_state),
+        ),
+        direct_packet_handler=handler,
+        clock=lambda: "2026-03-21T12:30:00",
+    )
+    connection_id = _connect(server)
+
+    response = server.handle_client_message(
+        _canonical_direct_packet(fallback_policy="none"),
+        connection_id=connection_id,
+    )
+    runner.wait_until_idle()
+
+    parsed = parse_server_message(response)
+    packet = server.packet_store.get_packet("android-taskmail:new-task:req_001")
+    state = load_thread_state("thread_001", task_root)
+
+    assert isinstance(parsed, RelayPacketAckMessage)
+    assert parsed.accepted is True
+    assert classify_direct_new_task_server_outcome(parsed) == DIRECT_NEW_TASK_OUTCOME_ACCEPTED
+    assert packet is not None
+    assert packet.delivery_status == "delivered"
+    assert state.status == "done"
+    assert len(mail_client.sent_messages) == 3
+
+
 def test_direct_packet_returns_unsupported_action_for_non_new_task_phase2_payload(tmp_path) -> None:
     server = LoopbackRelayServer(
         RelayServerConfig(
@@ -178,6 +222,29 @@ def test_direct_packet_returns_invalid_payload_for_missing_task_text(tmp_path) -
     connection_id = _connect(server)
     packet = _canonical_direct_packet()
     packet["task_run_packet"]["new_task"]["task_text"] = ""
+
+    response = server.handle_client_message(packet, connection_id=connection_id)
+
+    parsed = parse_server_message(response)
+    assert isinstance(parsed, RelayErrorMessage)
+    assert parsed.code == "invalid_payload"
+    assert classify_direct_new_task_server_outcome(parsed) == DIRECT_NEW_TASK_OUTCOME_HARD_REJECTION
+    assert server.packet_store.get_packet("android-taskmail:new-task:req_001") is None
+
+
+def test_direct_packet_returns_invalid_payload_for_unknown_fallback_policy(tmp_path) -> None:
+    server = LoopbackRelayServer(
+        RelayServerConfig(
+            host="127.0.0.1",
+            port=8787,
+            transport_token="relay-secret",
+            state_dir=str(tmp_path / "relay_state"),
+        ),
+        direct_packet_handler=_build_direct_handler(tmp_path),
+        clock=lambda: "2026-03-21T12:30:00",
+    )
+    connection_id = _connect(server)
+    packet = _canonical_direct_packet(fallback_policy="relay_email")
 
     response = server.handle_client_message(packet, connection_id=connection_id)
 
@@ -599,6 +666,53 @@ def test_direct_current_session_status_packet_is_accepted_and_reuses_mail_status
     }
 
 
+def test_direct_current_session_status_packet_accepts_none_fallback_policy_and_reuses_mail_status_query_path(tmp_path) -> None:
+    task_root = tmp_path / "tasks"
+    relay_state = tmp_path / "relay_state"
+    mail_client = FakeMailClient()
+    runner = _setup_existing_thread(task_root)
+    state = load_thread_state("thread_001", task_root)
+    handler = RelayTaskMailDirectCurrentSessionStatusHandler(
+        config=AppConfig(from_addr="bot@example.com", from_name="Mail Runner", task_root=str(task_root)),
+        task_root=task_root,
+        mail_client=mail_client,
+        runner=runner,
+        recipient_addr="user@example.com",
+        background=False,
+    )
+    server = LoopbackRelayServer(
+        RelayServerConfig(
+            host="127.0.0.1",
+            port=8787,
+            transport_token="relay-secret",
+            state_dir=str(relay_state),
+        ),
+        direct_packet_handler=handler,
+        clock=lambda: "2026-03-22T12:30:00",
+    )
+    connection_id = _connect(server)
+
+    response = server.handle_client_message(
+        _canonical_direct_status_packet(
+            workspace_id=state.workspace_id,
+            session_id=state.session_id or state.thread_id,
+            thread_id=state.thread_id,
+            fallback_policy="none",
+        ),
+        connection_id=connection_id,
+    )
+
+    parsed = parse_server_message(response)
+    packet = server.packet_store.get_packet("android-taskmail:session-action:req_001")
+
+    assert isinstance(parsed, RelayPacketAckMessage)
+    assert parsed.accepted is True
+    assert classify_direct_post_creation_server_outcome(parsed) == DIRECT_POST_CREATION_OUTCOME_ACCEPTED
+    assert packet is not None
+    assert packet.delivery_status == "delivered"
+    assert [item["subject"] for item in mail_client.sent_messages] == ["[STATUS][S:thread_001] demo task"]
+
+
 def test_direct_current_session_status_packet_falls_back_to_thread_state_when_session_state_is_missing(tmp_path) -> None:
     task_root = tmp_path / "tasks"
     relay_state = tmp_path / "relay_state"
@@ -695,6 +809,46 @@ def test_direct_post_creation_status_bridge_sends_status_query_mail_with_capsule
     assert "workspace_id: workspace_demo" in mail_client.sent_messages[0]["body"]
     assert mail_client.sent_messages[0]["headers"]["X-TaskMail-Direct"] == "1"
     assert mail_client.sent_messages[0]["headers"]["X-TaskMail-Relay-Receipt-Id"] == parsed.receipt_id
+
+
+def test_direct_post_creation_status_packet_returns_invalid_payload_for_unknown_fallback_policy(tmp_path) -> None:
+    config = RelayServerConfig(
+        host="127.0.0.1",
+        port=8787,
+        transport_token="relay-secret",
+        state_dir=str(tmp_path / "relay_state"),
+        smtp_host="smtp.example.com",
+        smtp_user="relay@example.com",
+        smtp_password="secret",
+        from_addr="relay@example.com",
+        taskmail_bot_mailbox_addr="bot@example.com",
+        taskmail_direct_from_addr="taskmail-user@example.com",
+    )
+    server = LoopbackRelayServer(
+        config,
+        direct_packet_handler=RelayTaskMailDirectCurrentSessionStatusMailBridge(
+            config,
+            mail_client=FakeMailClient(),
+        ),
+        clock=lambda: "2026-03-22T12:30:00",
+    )
+    connection_id = _connect(server)
+
+    response = server.handle_client_message(
+        _canonical_direct_status_packet(
+            workspace_id="workspace_demo",
+            session_id="thread_001",
+            thread_id="thread_001",
+            fallback_policy="relay_email",
+        ),
+        connection_id=connection_id,
+    )
+
+    parsed = parse_server_message(response)
+    assert isinstance(parsed, RelayErrorMessage)
+    assert parsed.code == "invalid_payload"
+    assert classify_direct_post_creation_server_outcome(parsed) == DIRECT_POST_CREATION_OUTCOME_HARD_STOP
+    assert server.packet_store.get_packet("android-taskmail:session-action:req_001") is None
 
 
 def test_direct_current_session_reply_packet_is_accepted_and_reuses_mail_reply_path(tmp_path) -> None:
@@ -797,6 +951,64 @@ def test_direct_current_session_reply_packet_is_accepted_and_reuses_mail_reply_p
         "session_id": state.session_id,
         "thread_id": state.thread_id,
     }
+
+
+def test_direct_current_session_reply_packet_accepts_none_fallback_policy_and_reuses_mail_reply_path(tmp_path) -> None:
+    task_root = tmp_path / "tasks"
+    relay_state = tmp_path / "relay_state"
+    mail_client = FakeMailClient()
+    adapter = RecordingMockAdapter()
+    runner = _setup_existing_thread(task_root, dispatcher=Dispatcher(adapter, adapter))
+    state = load_thread_state("thread_001", task_root)
+    handler = RelayTaskMailDirectCurrentSessionReplyHandler(
+        config=AppConfig(from_addr="bot@example.com", from_name="Mail Runner", task_root=str(task_root)),
+        task_root=task_root,
+        mail_client=mail_client,
+        runner=runner,
+        recipient_addr="user@example.com",
+        background=False,
+    )
+    server = LoopbackRelayServer(
+        RelayServerConfig(
+            host="127.0.0.1",
+            port=8787,
+            transport_token="relay-secret",
+            state_dir=str(relay_state),
+        ),
+        direct_packet_handler=handler,
+        clock=lambda: "2026-03-23T09:30:00",
+    )
+    connection_id = _connect(server)
+
+    response = server.handle_client_message(
+        _canonical_direct_reply_packet(
+            workspace_id=state.workspace_id,
+            session_id=state.session_id or state.thread_id,
+            thread_id=state.thread_id,
+            reply_text="Please continue with the cleanup.",
+            fallback_policy="none",
+        ),
+        connection_id=connection_id,
+    )
+
+    parsed = parse_server_message(response)
+    packet = server.packet_store.get_packet("android-taskmail:session-action:req_001")
+    updated_state = load_thread_state("thread_001", task_root)
+
+    assert isinstance(parsed, RelayPacketAckMessage)
+    assert parsed.accepted is True
+    assert classify_direct_post_creation_server_outcome(parsed) == DIRECT_POST_CREATION_OUTCOME_ACCEPTED
+    assert packet is not None
+    assert packet.delivery_status == "delivered"
+    assert updated_state.status == "done"
+    assert len(adapter.snapshots) == 2
+    assert adapter.snapshots[-1].run_mode == "resume"
+    assert adapter.snapshots[-1].turn_text == "Please continue with the cleanup."
+    assert [item["subject"] for item in mail_client.sent_messages] == [
+        "[ACCEPTED][S:thread_001] demo task",
+        "[RUNNING][S:thread_001] demo task",
+        "[DONE][S:thread_001] demo task",
+    ]
 
 
 def test_direct_current_session_reply_packet_falls_back_to_thread_state_when_session_state_is_missing(tmp_path) -> None:
@@ -1248,7 +1460,7 @@ def _delete_session_state_index(task_root, *, workspace_id: str, session_id: str
     session_state_path.unlink()
 
 
-def _canonical_direct_packet() -> dict[str, object]:
+def _canonical_direct_packet(*, fallback_policy: str = "mail") -> dict[str, object]:
     return {
         "message_type": "packet",
         "packet_id": "android-taskmail:new-task:req_001",
@@ -1281,7 +1493,7 @@ def _canonical_direct_packet() -> dict[str, object]:
             "channel": "taskmail_android_direct",
             "schema_version": "phase2-direct-outbound-contract-v1",
             "action": "new_task",
-            "fallback_policy": "mail",
+            "fallback_policy": fallback_policy,
         },
         "sent_at": "2026-03-21T12:30:00",
     }
@@ -1337,7 +1549,13 @@ def _canonical_direct_project_sync_v2_packet() -> dict[str, object]:
     }
 
 
-def _canonical_direct_status_packet(*, workspace_id: str, session_id: str, thread_id: str | None) -> dict[str, object]:
+def _canonical_direct_status_packet(
+    *,
+    workspace_id: str,
+    session_id: str,
+    thread_id: str | None,
+    fallback_policy: str = "mail",
+) -> dict[str, object]:
     target: dict[str, object] = {
         "scope": "current_session",
         "workspace_id": workspace_id,
@@ -1363,7 +1581,7 @@ def _canonical_direct_status_packet(*, workspace_id: str, session_id: str, threa
             "channel": "taskmail_android_direct",
             "schema_version": "post-creation-session-action-contract-v1",
             "action": "status",
-            "fallback_policy": "mail",
+            "fallback_policy": fallback_policy,
         },
         "sent_at": "2026-03-22T12:30:00",
     }
@@ -1376,11 +1594,13 @@ def _canonical_direct_reply_packet(
     thread_id: str | None,
     reply_text: str = "Please continue.",
     attachments: list[dict[str, object]] | None = None,
+    fallback_policy: str = "mail",
 ) -> dict[str, object]:
     packet = _canonical_direct_status_packet(
         workspace_id=workspace_id,
         session_id=session_id,
         thread_id=thread_id,
+        fallback_policy=fallback_policy,
     )
     packet["task_run_packet"]["action"] = "reply"
     packet["task_run_packet"]["reply"] = {"reply_text": reply_text}

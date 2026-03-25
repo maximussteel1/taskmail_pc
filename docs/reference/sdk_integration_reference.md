@@ -61,7 +61,7 @@
 - OpenCode：已有低层 Python SDK smoke、runtime `sdk-first` smoke，以及 runtime question-answer smoke。
 - Codex：已有 runtime `sdk-first` smoke，以及 runtime question-answer smoke。
 - 两个 backend 现在都已有独立的 runtime permission smoke。
-- `Codex` 当前已有独立 stream smoke；`OpenCode` 也已有对应的 gap-recording smoke。
+- `Codex` 当前已有独立 stream smoke；`OpenCode` 当前也已有 persisted-stream smoke，但 residual gap 仍保留为“未证明 true incremental streaming”。
 - 当前真实 SDK smoke 默认走独立脚本，不挂在 `tests/` 主测试集。
 - 当前真实 SDK smoke 的验证结果都要求包含收尾清理证据，例如端口关闭或 sidecar 记录清除。
 
@@ -88,7 +88,7 @@
 - [sdk_stream_smoke.md](./sdk_stream_smoke.md)
   说明当前 `sdk-first` stream smoke 怎么复跑。
 - [sdk_stream_smoke_validation.md](./sdk_stream_smoke_validation.md)
-  记录当前 `Codex` persisted stream evidence 与 `OpenCode` stream gap 的结果和证据。
+  记录当前 `Codex` persisted stream evidence 与 `OpenCode` persisted stream evidence / residual incremental gap 的结果和证据。
 - [opencode_sdk_smoke.md](./opencode_sdk_smoke.md)
   说明 OpenCode Python SDK 的低层直连 smoke。
 - [opencode_sdk_validation.md](./opencode_sdk_validation.md)

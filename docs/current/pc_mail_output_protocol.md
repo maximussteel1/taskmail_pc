@@ -554,11 +554,16 @@ For oversized artifacts:
 
 Current runtime backend selection:
 
-- if COS delivery is configured, oversized artifacts use COS
+- if `external_delivery_backend_preference=file_surface`, oversized artifacts prefer the relay host's `/v1/files` file surface whenever that lane is available, even if COS remains configured
+- if a specific artifact exceeds the live `/v1/files` upload limit and `COS` is still available, the current cutover behavior keeps `COS` only for that oversize artifact instead of dropping the whole owner lane back to `COS`
+- otherwise, if COS delivery is configured, oversized artifacts use COS
 - otherwise, if `outbound_transport=relay` with `relay_url + relay_transport_token`,
   oversized artifacts use the relay host's `/v1/files` file surface
 - relay file-surface external delivery writes a local
   `artifact_file_binding_index.json` sidecar alongside `artifact_index.json`
+- successful external delivery now also writes a local
+  `external_delivery_index.json` sidecar alongside `artifact_index.json`,
+  recording provider-level URL evidence without changing artifact truth
 
 ## 11.4 Inline Images
 

@@ -185,9 +185,13 @@ When an outgoing artifact exceeds the configured
 `external_delivery_threshold_mb`, the runtime uses one of these external
 delivery backends:
 
-- COS, when COS delivery is configured
+- COS, when COS delivery is configured and the backend preference still follows the compatibility-default `auto`
 - relay file surface, when `outbound_transport=relay` is enabled with
   `relay_url + relay_transport_token` and COS delivery isn't configured
+- relay file surface, when `external_delivery_backend_preference=file_surface`
+  explicitly prefers `/v1/files` during cutover even if COS is still configured
+- during that cutover, if a concrete artifact exceeds the live `/v1/files` upload limit and COS is still available,
+  only that oversize artifact may keep using COS as a compatibility lane
 
 In both cases, the runtime:
 
@@ -207,6 +211,7 @@ Current default policy:
 - COS upload uses a direct HTTPS client session and does not inherit ambient `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` environment variables
 - relay file-surface upload derives `http(s)://<relay-host>/v1/files` from the configured `ws(s)://<relay-host>/relay`
 - relay file-surface upload uses the same Bearer transport token as the relay websocket bootstrap
+- `external_delivery_backend_preference` currently accepts `auto`, `cos`, or `file_surface`; `auto` keeps the compatibility-default COS-first selection when COS is configured
 - small files still remain normal mail attachments
 - for `apk` / `ipa` payloads on the COS default domain, the runtime rewrites the
   uploaded object name to `<original_name>.bin` and emits a user-facing notice,
@@ -260,6 +265,7 @@ Implemented runtime details:
 - each CLI run writes `runs/<task_id>/incoming_attachments.json`
 - when outgoing artifacts are resolved for status mail delivery, the runtime writes `runs/<task_id>/artifacts/artifact_index.json`
 - when relay file-surface external delivery is used, the runtime also writes `runs/<task_id>/artifacts/artifact_file_binding_index.json`
+- when any oversized artifact is successfully externalized, the runtime also writes `runs/<task_id>/artifacts/external_delivery_index.json`
 - `RunResult.artifacts_dir` points at `runs/<task_id>/artifacts`
 - prompt/runtime hints tell the backend to create outgoing files in `MAIL_RUNNER_ARTIFACTS_DIR`
 - COS oversized-delivery credentials may live in a local-only `mail_config.cos.local.yaml` file

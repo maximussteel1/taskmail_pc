@@ -2,7 +2,7 @@
 
 ## Status
 
-- Date: 2026-03-24
+- Date: 2026-03-25
 - Scope: current `mail_based_task_manager` mail control plane
 - Role: canonical current protocol document for task mail ingress, reply routing, and user-visible mail actions
 
@@ -58,6 +58,8 @@ Current optional direct TaskMail boundary:
 - relay 当前可接受 bootstrap `[SYNC]` `v1` / `v2`
 - relay 当前还暴露 shared `/control` websocket；当前已落地 bootstrap `sync_project_folders` `v2`、current-session direct `/status` / plain `reply`，以及 relay-side `transport_probe`
 - `/control` 与 `/relay`、`/v1/files` 当前复用同一 `Authorization: Bearer <transport_token>` 认证路径
+- repo-side 还存在 operator-only debug `POST /debug/pc-control/dispatch`，当前也复用同一 bearer token admission；它只负责向 live `pc_control_runtime` 注入一条 `command_dispatch`，不是新的 app-facing / user-facing API
+- 对这条 `pc_control` dispatch 路径，当前显式 `execution_policy.profile=default` 与省略 profile 的语义等价；它不会再在本地 adapter bootstrap 阶段因为“缺少 default profile mapping”而被额外打断
 - `/control` 首刀保留 `hello / hello_ack`，并在 `hello_ack` 里回告 `accepted_payload_schemas`
 - `/control` 当前支持四类 frame 流：
   - `ping -> pong`
@@ -73,6 +75,7 @@ Current optional direct TaskMail boundary:
 - `status=failed` + `outcome=failed` 表示 relay 在 mail submission 阶段失败
 - `transport_probe_result.payload.observation` 现在会携带 projected observation summary 或当前 wait/skip state；PC host 仍继续把原始 mailbox observation sidecar 写到 `tasks/_mailbox/transport_probes/<probe_id>.json`
 - relay 当前可接受 current-session direct `/status` 与 plain `reply`
+- 对 `post-creation-session-action-contract-v1`，`dispatch_metadata.fallback_policy` 当前接受 `mail` 与 `none`；`none` 只表示合法的 direct-only client 声明，不会在 parser 层因“不是 mail”而被直接拒绝
 - 这些 direct surface 的 task execution truth 仍留在 PC，不把 relay 提升成执行真相层
 - `/control session_action_result` 当前只回告 canonical mail ingress 已提交以及当前 `session_action_closeout` 锚点快照；user-visible final outcome 仍以正常 status / terminal mail 为准
 - direct `new_task` 与 current-session direct action 当前都走 bridge-to-mail；`/control` bootstrap `v2`、current-session direct `session_action_result` 与 relay-side `transport_probe` 是当前三类 direct result surface
@@ -197,6 +200,8 @@ Current boundary:
 
 - this ingress is limited to `phase2-direct-outbound-contract-v1`
 - only action `new_task` is accepted on this direct path
+- `dispatch_metadata.fallback_policy` currently accepts `mail` and `none`
+- `none` is a legal direct-only client declaration and is not rejected at parser level solely because it disables legacy fallback
 - the server bridges the accepted packet into the current bot-mailbox first-mail ingress
 - the PC mail runner still consumes the canonical first-mail body and remains task-execution truth
 - direct ingress does not change reply headers, reply routing, or the current mail-visible status contract

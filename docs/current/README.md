@@ -28,6 +28,8 @@ Current outbound reference skeleton:
 - 如与 `docs/plans/` 或 `docs/platform/` 冲突，以本目录定义的当前协议边界为准
 - 可复用操作手册、冒烟步骤、环境经验默认放 `docs/reference/`，除非它们已经上升为当前协议或运行时真相
 - TaskMail direct relay/control/file 相关 current truth 以 `taskmail_direct_control_file_contract.md` 为中心，再配合 `mail_protocol.md`、`android_runner_communication_contract.md`、`multimedia_mail_protocol.md` 与 `pc_mail_output_protocol.md` 阅读；2026-03-24 起当前已落地 shared `/control` 的两条已实现能力：bootstrap `sync_project_folders v2`，以及 relay-side `transport_probe` harness；其中 `transport_probe_result` 现在会在可见时等待并投影 `_mailbox/transport_probes/` 里的 PC observation，区分 `observed / timed_out / submitted / failed`
+- repo-side 现在还额外存在一个 operator-only debug 入口：`POST /debug/pc-control/dispatch`。它与 `/relay`、`/control`、`/v1/files` 复用同一 `Authorization: Bearer <transport_token>` admission，只负责把一条 `command_dispatch` 放进当前 live `pc_control_runtime`，不引入新的 user-facing business API；对应本地 CLI 是 `.\.venv\Scripts\python.exe .\scripts\pc_control_operator_dispatch.py --config <mail_config> ...`
+- 对 `pc_control` 路径的 `execution_policy.profile`，当前显式 `default` 与省略 profile 的语义等价；adapter 不会因为 `profile=default` 而再额外要求本地 profile-model 映射
 
 分层依据见 [document_layering_plan.md](../document_layering_plan.md)。
 
@@ -64,7 +66,8 @@ Current outbound reference skeleton:
 - `scripts/diagnose_runtime_health.py` now folds host state, recent polling cycles, and per-thread run/stream evidence into a one-shot operator report; by default it inspects active threads, and `--thread-id` can focus on specific sessions. `scripts/diagnose_runtime_health.cmd` is the Windows convenience wrapper for the same entrypoint.
 - The first-round stale/stuck threshold is fixed at `300s`.
 - `show-thread`, `show-thread-live`, and `list-running` now expose `Health`, `Last Progress At`, and idle-time context.
-- For `codex + sdk`, observe uses the newest `stream.events.jsonl` timestamp as live progress when it is newer than persisted state, reducing false stuck reports during active streaming.
+- For SDK-backed runs that persist `stream.events.jsonl`, observe uses the newest stream-event timestamp as live progress when it is newer than persisted state, reducing false stuck reports during active streaming or post-turn projection replay.
+- `codex + sdk` currently persists sidecar-driven stream events during the turn; `opencode + sdk` now also persists same-layer `stream.events.jsonl`, but the current OpenCode first pass is a minimal post-turn projection from assistant parts (`turn.started -> assistant.completed -> turn.completed`), not a validated true incremental stream.
 
 ## Status Mail Retention
 
@@ -96,7 +99,7 @@ Current outbound reference skeleton:
 - runner restart recovery now keeps automatic status-mail callbacks for recovered `accepted` / queued work, so resumed runs still emit `[RUNNING]` and terminal status mails on the original reply chain
 - 当前最小可观测入口是 `mail_runner.observe`
 - `mail_runner.observe` 只读现有落盘状态，支持 `status`、`list-running`、`list-queue`、`show-thread <thread_id>`、`show-thread-live <thread_id>`、`follow-thread-live <thread_id>`
-- `codex + sdk` 运行中的 turn 现在会在 `runs/<task_id>/stream.events.jsonl` 下落本地流式事件，用于 PC 侧只读会话窗
+- SDK-backed turn 现在会在 `runs/<task_id>/stream.events.jsonl` 下落本地流式证据，用于 PC 侧只读会话窗与 `output_chunk` 投影；`codex + sdk` 当前是 sidecar live stream，`opencode + sdk` 当前是基于 assistant parts 的 post-turn minimal projection
 - `codex + sdk` sidecar 现在会在 `runs/<task_id>/codex_sidecar_process.json` 下临时记录当前 sidecar pid；正常收尾时该文件会被清掉，异常残留时可用 `scripts/cleanup_project_codex.ps1` 或 `scripts/cleanup_project_codex.cmd` 按记录列出、停止或清理本仓库遗留的 tracked Codex sidecars
 - `scripts/monitor_mail_runner.cmd` 会打开独立监控窗口；不带 thread 时仍循环展示 `status`、`list-running`、`list-queue`，聚焦 thread 时会切到 append-only live follow 视图，把 transcript 增量和 live stream 事件逐条追加到底部
 - 聚焦 monitor 窗口现在由一个隐藏 controller 承接。如果聚焦窗口在 thread 仍处于 `active` 时被 `Ctrl+C`、右上角 `X`、或 terminal tab/pane 关闭，controller 会补发一个本地 close request：必要时先结束当前 run，再在不运行后把该 session 标记为 `ended`。总览窗口关闭时仍不会改动后端状态。
@@ -106,7 +109,7 @@ Current outbound reference skeleton:
 - 当前这台机器的 relay-enabled 本地 host 维护口径是：配置文件优先用 `mail_config.bot.relay.local.yaml`，runtime dir 用 `.\_tmp_live_mail_runner`
 - 如果 relay-enabled host 本身在跑，但 `manage_mail_runner.ps1 status` 的 `Relay task-root sync` 段显示 companion 未运行，`current-session` direct `reply` / `/status` 仍可能因为 VPS `task_root` 快照落后而报 locator rejection；先修 companion，再重开 Android 侧排查
 - `.\.venv\Scripts\python.exe .\scripts\prune_stale_status_mails.py --config .\_tmp_live_mail_runner\mail_config.loop_30s.yaml --dry-run --output .\_tmp_live_mail_runner\stale_mail_cleanup.json` 可按当前保留规则清理遗漏的旧 task status mails 与旧 `[SYNC]` 系统回复，并把扫描/删除结果落成 JSON
-- 当前大文件交付支持两条 external delivery 路径：如果配置了 COS，则超阈值 artifact 继续走 COS 外链；如果启用了 `outbound_transport=relay` 且存在 `relay_url + relay_transport_token`，但没有 COS 配置，则同一 relay host 会暴露 `/v1/files` file surface，runtime 会把超阈值 artifact 上传到该 file surface。两条路径都会保留 `Artifacts` 区域条目、额外生成 `External Deliveries` 区域，并且不再把该超大文件作为 MIME 附件继续投递；COS 上传当前强制走直连 HTTPS，不继承宿主进程里的 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`，relay file-surface 上传则复用同一 relay host 与同一 Bearer transport token；该 token 当前也与 shared `/control` 首刀复用同一认证路径
+- 当前大文件交付支持两条 external delivery 路径：默认兼容策略下，如果配置了 COS，则超阈值 artifact 继续走 COS 外链；否则当启用了 `outbound_transport=relay` 且存在 `relay_url + relay_transport_token` 时，同一 relay host 会暴露 `/v1/files` file surface，runtime 会把超阈值 artifact 上传到该 file surface。若部署准备切向 `/v1/files` owner lane，现在也可以显式设置 `external_delivery_backend_preference=file_surface`，让 runtime 在 COS 仍保留配置时优先走 relay file surface；但如果某个 artifact 超过 live `/v1/files` 当前单文件上限，cutover 期间 runtime 仍会只对这类 oversize artifact 保留 `COS` 兼容交付。两条路径都会保留 `Artifacts` 区域条目、额外生成 `External Deliveries` 区域，并且不再把该超大文件作为 MIME 附件继续投递；COS 上传当前强制走直连 HTTPS，不继承宿主进程里的 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`，relay file-surface 上传则复用同一 relay host 与同一 Bearer transport token；该 token 当前也与 shared `/control` 首刀复用同一认证路径。成功 external delivery 现在还会在 `runs/<task_id>/artifacts/external_delivery_index.json` 下落 provider/url/expires_at 证据；若走 relay `/v1/files`，原有 `artifact_file_binding_index.json` 仍继续保留为 transport-facing `artifact_id -> file_id` 绑定 sidecar
 - relay packet store 现在会在 accepted packet 后续失败时同时持久化 `last_error_message` 和 `last_error_code`，便于区分 `direct_temporarily_unavailable`、`workspace_identity_unresolved` 等 machine-readable failure classification
 - terminal status mail 发送后，runtime 现在会在 `runs/<task_id>/canonical_summary.json` 下落一个 per-run canonical summary；当前字段集包含 `thread_id`、`task_id`、`run_status`、`ingress_type`、`ingress_message_id`、`request_id`、`packet_id`、`receipt_id`、`action_type`、`target_session_identity`、`last_summary`、`terminal_mail_message_id`、`terminal_mail_subject`、`generated_at`
 - 对 current-session direct `/status` 与 plain `reply`，runtime 现在都会在本地 authoritative task root 的 `tasks/<thread_id>/session_actions/<request_id>/session_action_closeout.json` 下落一份 thread-scoped session-action closeout；当前最小字段集包含 `action_type`、`target_session_identity`、`request_id`、`ingress_message_id`、`packet_id`、`receipt_id`、`last_summary`、`terminal_mail_subject`、`generated_at`

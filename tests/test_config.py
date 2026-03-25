@@ -32,6 +32,7 @@ def test_load_config_uses_defaults_when_file_is_missing(tmp_path: Path) -> None:
     assert config.relay_timeout_seconds == 15
     assert config.relay_verify_tls is True
     assert config.relay_auto_fallback_email is False
+    assert config.external_delivery_backend_preference == "auto"
 
 
 def test_load_config_reads_yaml_values_and_ignores_removed_keys(tmp_path: Path) -> None:
@@ -62,6 +63,7 @@ def test_load_config_reads_yaml_values_and_ignores_removed_keys(tmp_path: Path) 
                 "relay_timeout_seconds: 22",
                 "relay_verify_tls: false",
                 "relay_auto_fallback_email: true",
+                "external_delivery_backend_preference: file_surface",
                 "prune_old_status_mails: true",
                 "project_sync_roots:",
                 "  - D:\\custom_projects",
@@ -96,6 +98,7 @@ def test_load_config_reads_yaml_values_and_ignores_removed_keys(tmp_path: Path) 
     assert config.relay_timeout_seconds == 22
     assert config.relay_verify_tls is False
     assert config.relay_auto_fallback_email is True
+    assert config.external_delivery_backend_preference == "file_surface"
     assert not hasattr(config, "prune_old_status_mails")
     assert config.project_sync_roots == ["D:\\custom_projects", "E:\\more_projects"]
 
@@ -198,3 +201,15 @@ def test_load_config_reads_cos_delivery_settings(tmp_path: Path) -> None:
     assert config.cos_object_prefix == "mail-runner"
     assert config.external_delivery_threshold_mb == 25
     assert config.cos_presign_expire_seconds == 86400
+
+
+def test_load_config_rejects_unknown_external_delivery_backend_preference(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("external_delivery_backend_preference: relay_only\n", encoding="utf-8")
+
+    try:
+        load_config(str(config_path))
+    except ValueError as exc:
+        assert "external_delivery_backend_preference" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("load_config should reject unknown external_delivery_backend_preference")

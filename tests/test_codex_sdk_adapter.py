@@ -208,6 +208,20 @@ def test_codex_sdk_adapter_reply_uses_existing_thread_id(tmp_path, monkeypatch) 
     assert result.backend_session_id == "sdk-thread-001"
 
 
+def test_codex_sdk_adapter_ignores_default_profile_without_mapping(tmp_path, monkeypatch) -> None:
+    snapshot = _snapshot(tmp_path)
+    snapshot.profile = "default"
+    run_dir = tmp_path / snapshot.thread_id / "runs" / snapshot.task_id
+    adapter = CodexSdkAdapter(AppConfig(codex_sdk_sidecar_command="node fake-sidecar.js"))
+    monkeypatch.setattr("mail_runner.adapters.codex_sdk_adapter.subprocess.Popen", _FakePopen)
+
+    result = adapter.run(snapshot, str(run_dir))
+    request = json.loads(_FakePopen.last_stdin or "{}")
+
+    assert result.status == "success"
+    assert request["model"] is None
+
+
 def test_codex_sdk_adapter_injects_default_proxy_env_for_sidecar(tmp_path, monkeypatch) -> None:
     snapshot = _snapshot(tmp_path)
     run_dir = tmp_path / snapshot.thread_id / "runs" / snapshot.task_id

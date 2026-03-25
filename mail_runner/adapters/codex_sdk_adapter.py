@@ -578,6 +578,8 @@ class CodexSdkAdapter(WorkerAdapter):
         if profile is None:
             return None
         profile_name = profile.strip().lower()
+        if not profile_name or profile_name == "default":
+            return None
         mapping = {key.strip().lower(): value for key, value in self._config.codex_profile_models.items()}
         if profile_name not in mapping:
             raise ValueError(f"Codex profile mapping is missing for profile '{profile_name}'")

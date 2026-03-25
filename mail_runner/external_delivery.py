@@ -12,7 +12,8 @@ import requests
 import yaml
 
 from .config import AppConfig, PROJECT_ROOT
-from .file_surface import derive_file_surface_url, upload_artifact_to_file_surface
+from .external_delivery_index import write_external_delivery_index
+from .file_surface import SINGLE_FILE_UPLOAD_LIMIT_BYTES, derive_file_surface_url, upload_artifact_to_file_surface
 from .models import ExternalDelivery, OutgoingAttachment, RunArtifact, RunResult
 
 _LOCAL_COS_CONFIG_PATH = PROJECT_ROOT / "mail_config.cos.local.yaml"
@@ -140,6 +141,34 @@ def _resolve_file_surface_url(config: AppConfig) -> str | None:
         return None
 
 
+def _select_external_delivery_backend(
+    config: AppConfig,
+    *,
+    cos_settings: dict[str, str] | None,
+    file_surface_url: str | None,
+    task_root: Path | None,
+) -> str | None:
+    preference = str(config.external_delivery_backend_preference or "").strip().lower() or "auto"
+    file_surface_available = file_surface_url is not None and task_root is not None
+    if preference == "file_surface":
+        if file_surface_available:
+            return "file_surface"
+        if cos_settings is not None:
+            return "cos"
+        return None
+    if preference == "cos":
+        if cos_settings is not None:
+            return "cos"
+        if file_surface_available:
+            return "file_surface"
+        return None
+    if cos_settings is not None:
+        return "cos"
+    if file_surface_available:
+        return "file_surface"
+    return None
+
+
 def _absolute_file_surface_url(file_surface_url: str, location: str) -> str:
     parsed_location = urlsplit(str(location or "").strip())
     if parsed_location.scheme and parsed_location.netloc:
@@ -147,6 +176,23 @@ def _absolute_file_surface_url(file_surface_url: str, location: str) -> str:
     parsed_surface = urlsplit(file_surface_url)
     normalized_path = str(location or "").strip() or parsed_surface.path
     return urlunsplit((parsed_surface.scheme, parsed_surface.netloc, normalized_path, "", ""))
+
+
+def _select_backend_for_artifact(
+    selected_backend: str,
+    *,
+    artifact_path: Path,
+    cos_settings: dict[str, str] | None,
+) -> str:
+    if (
+        selected_backend == "file_surface"
+        and cos_settings is not None
+        and artifact_path.stat().st_size > SINGLE_FILE_UPLOAD_LIMIT_BYTES
+    ):
+        # During file-surface cutover, keep COS as a compatibility lane for
+        # artifacts that the live /v1/files surface cannot yet accept.
+        return "cos"
+    return selected_backend
 
 
 def prepare_external_deliveries(
@@ -164,10 +210,15 @@ def prepare_external_deliveries(
     settings = _resolve_cos_settings(config)
     file_surface_url = _resolve_file_surface_url(config)
     resolved_task_root = Path(task_root) if task_root is not None else None
+    selected_backend = _select_external_delivery_backend(
+        config,
+        cos_settings=settings,
+        file_surface_url=file_surface_url,
+        task_root=resolved_task_root,
+    )
     threshold_bytes = max(int(config.external_delivery_threshold_mb), 0) * 1024 * 1024
-    if settings is None:
-        if file_surface_url is None or resolved_task_root is None:
-            return list(artifacts), list(attachments), [], []
+    if selected_backend is None:
+        return list(artifacts), list(attachments), [], []
 
     attachment_map = {
         _artifact_attachment_key(item.path, item.name or Path(item.path).name): item for item in attachments
@@ -194,7 +245,13 @@ def prepare_external_deliveries(
             effective_artifacts.append(artifact)
             continue
 
-        if settings is not None:
+        artifact_backend = _select_backend_for_artifact(
+            selected_backend,
+            artifact_path=artifact_path,
+            cos_settings=settings,
+        )
+
+        if artifact_backend == "cos":
             object_key = _build_object_key(
                 object_prefix=settings["object_prefix"],
                 result=result,
@@ -299,4 +356,11 @@ def prepare_external_deliveries(
         for item in attachments
         if _artifact_attachment_key(item.path, item.name or Path(item.path).name) not in externalized_keys
     ]
+    if resolved_task_root is not None and deliveries:
+        write_external_delivery_index(
+            resolved_task_root,
+            result,
+            artifacts=artifacts,
+            deliveries=deliveries,
+        )
     return effective_artifacts, remaining_attachments, deliveries, notices

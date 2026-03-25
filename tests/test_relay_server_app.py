@@ -4,6 +4,7 @@ import json
 import hashlib
 import threading
 import urllib.request
+from datetime import datetime
 
 import requests
 
@@ -19,8 +20,34 @@ from mail_runner.relay_server.post_creation_actions import (
     RelayTaskMailDirectCurrentSessionStatusMailBridge,
 )
 from mail_runner.relay_server.packet_store import InMemoryAcceptedPacketStore
+from mail_runner.relay_server.pc_control_protocol import (
+    build_pc_hello,
+    build_workspace_snapshot,
+    parse_pc_control_client_message,
+    parse_pc_control_server_message,
+)
+from mail_runner.relay_server.pc_control_runtime import build_pc_control_runtime
 from mail_runner.relay_server.session_store import InMemorySessionStore
 from mail_runner.relay_server.transport_probe import RelayTaskMailTransportProbeHandler
+
+
+def _pc_control_capabilities() -> dict[str, object]:
+    return {
+        "streaming": True,
+        "artifact_manifest": True,
+        "workspace_snapshot": True,
+        "supported_backends": ["codex", "opencode"],
+        "profile_catalogs": {"codex": ["default"], "opencode": ["default"]},
+        "permission_modes": ["default", "highest"],
+        "backend_transport_modes": {
+            "codex": ["cli", "sdk"],
+            "opencode": ["cli", "sdk"],
+        },
+    }
+
+
+def _now() -> str:
+    return datetime.now().replace(microsecond=0).isoformat()
 
 
 def test_build_health_payload_reports_server_shape() -> None:
@@ -192,6 +219,100 @@ def test_http_server_file_surface_rejects_missing_transport_token(tmp_path) -> N
         assert response.status_code == 401
         assert payload["error_code"] == "unauthorized"
         assert payload["retryable"] is False
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_http_server_pc_control_operator_dispatch_enqueues_command(tmp_path) -> None:
+    config = RelayServerConfig(
+        host="127.0.0.1",
+        port=0,
+        transport_token="secret-token",
+        state_dir=str(tmp_path / "relay_state"),
+    )
+    runtime = build_pc_control_runtime(config)
+    now = _now()
+    hello = parse_pc_control_client_message(
+        build_pc_hello(
+            message_id="hello_001",
+            trace_id="trace_hello_001",
+            pc_id="pc-home",
+            sent_at=now,
+            display_name="Home PC",
+            client_version="0.1.0",
+            host_fingerprint="host_001",
+            runtime_fingerprint="runtime_001",
+            capabilities=_pc_control_capabilities(),
+        )
+    )
+    _response, connection_id, connection_epoch = runtime.handle_hello(hello, provided_token="secret-token")
+    snapshot = parse_pc_control_client_message(
+        build_workspace_snapshot(
+            message_id="snapshot_001",
+            trace_id="trace_snapshot_001",
+            pc_id="pc-home",
+            connection_epoch=connection_epoch,
+            sent_at=now,
+            snapshot_id="snapshot_001",
+            workspaces=[
+                {
+                    "workspace_id": "workspace_001",
+                    "workspace_norm": "e:/projects/mail_based_task_manager",
+                    "repo_path": "E:\\projects\\mail_based_task_manager",
+                    "workdir": None,
+                    "display_name": "mail_based_task_manager",
+                    "source": "project_sync_roots",
+                    "capabilities": _pc_control_capabilities(),
+                }
+            ],
+        )
+    )
+    assert runtime.handle_workspace_snapshot(snapshot, connection_id=connection_id) is None
+
+    server = build_http_server(config, session_store=InMemorySessionStore(), pc_control_runtime=runtime)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address[:2]
+        response = requests.post(
+            f"http://{host}:{port}/debug/pc-control/dispatch",
+            headers={"Authorization": "Bearer secret-token"},
+            json={
+                "pc_id": "pc-home",
+                "workspace_id": "workspace_001",
+                "command_id": "cmd_001",
+                "command_type": "status",
+                "session_id": "thread_001",
+                "execution_policy": {
+                    "backend": "codex",
+                    "profile": "default",
+                    "permission": "default",
+                    "backend_transport": "sdk",
+                },
+                "payload": {},
+            },
+            timeout=5,
+        )
+        payload = response.json()
+
+        assert response.status_code == 200
+        assert payload["status"] == "accepted"
+        assert payload["command"]["command_id"] == "cmd_001"
+        assert payload["record"]["status"] == "queued"
+
+        record = runtime.command_store.get_command("pc-home", "cmd_001")
+        assert record is not None
+        pending = runtime.collect_pending_dispatches(
+            pc_id="pc-home",
+            connection_id=connection_id,
+            connection_epoch=connection_epoch,
+        )
+        assert len(pending) == 1
+        parsed_dispatch = parse_pc_control_server_message(pending[0])
+        assert parsed_dispatch.payload["command_id"] == "cmd_001"
+        assert parsed_dispatch.payload["workspace_id"] == "workspace_001"
     finally:
         server.shutdown()
         server.server_close()

@@ -10,18 +10,27 @@ from typing import Any
 from .config import RelayServerConfig
 from .pc_command_store import (
     InMemoryPcCommandStore,
+    PcArtifactManifestRecord,
     PcCommandConflictError,
+    PcCommandEventRecord,
+    PcOutputChunkRecord,
     PcCommandRecord,
+    PcCommandResultRecord,
     PcCommandUnknownError,
     PersistentPcCommandStore,
 )
 from .pc_control_protocol import (
+    PcArtifactManifestMessage,
     PcCommandAckMessage,
     PcCommandDispatchMessage,
+    PcCommandEventMessage,
+    PcCommandResultMessage,
+    PcOutputChunkMessage,
     PcHeartbeatMessage,
     PcHelloMessage,
     PcWorkspaceSnapshotMessage,
     build_command_dispatch,
+    build_output_resume_request,
     build_pc_error,
     build_pc_hello_ack,
 )
@@ -226,6 +235,147 @@ class PcControlRuntime:
             return self._build_error(message, code=exc.code, error_message=exc.message)
         return None
 
+    def handle_event(
+        self,
+        message: PcCommandEventMessage,
+        *,
+        connection_id: str,
+    ) -> dict[str, Any] | None:
+        try:
+            self._node_store.touch_connection(
+                pc_id=message.pc_id,
+                connection_id=connection_id,
+                connection_epoch=message.connection_epoch,
+                last_seen_at=message.sent_at,
+            )
+            self._command_store.record_event(
+                pc_id=message.pc_id,
+                command_id=message.payload["command_id"],
+                event=PcCommandEventRecord(
+                    event_id=message.payload["event_id"],
+                    event_type=message.payload["event_type"],
+                    event_message_id=message.message_id,
+                    trace_id=message.trace_id,
+                    connection_epoch=message.connection_epoch,
+                    sent_at=message.sent_at,
+                    summary=message.payload["summary"],
+                    effective_execution=message.payload["effective_execution"],
+                    payload=message.payload["payload"],
+                ),
+            )
+        except PcNodeFenceError as exc:
+            return self._build_error(message, code=exc.code, error_message=exc.message)
+        except (PcCommandConflictError, PcCommandUnknownError) as exc:
+            return self._build_error(message, code=exc.code, error_message=exc.message)
+        return None
+
+    def handle_result(
+        self,
+        message: PcCommandResultMessage,
+        *,
+        connection_id: str,
+    ) -> dict[str, Any] | None:
+        try:
+            self._node_store.touch_connection(
+                pc_id=message.pc_id,
+                connection_id=connection_id,
+                connection_epoch=message.connection_epoch,
+                last_seen_at=message.sent_at,
+            )
+            self._command_store.record_result(
+                pc_id=message.pc_id,
+                command_id=message.payload["command_id"],
+                result=PcCommandResultRecord(
+                    result_id=message.payload["result_id"],
+                    result_message_id=message.message_id,
+                    trace_id=message.trace_id,
+                    connection_epoch=message.connection_epoch,
+                    sent_at=message.sent_at,
+                    final_status=message.payload["final_status"],
+                    summary=message.payload["summary"],
+                    structured_payload=message.payload["structured_payload"],
+                    effective_execution=message.payload["effective_execution"],
+                    error_code=message.payload["error_code"],
+                    error_message=message.payload["error_message"],
+                ),
+            )
+        except PcNodeFenceError as exc:
+            return self._build_error(message, code=exc.code, error_message=exc.message)
+        except (PcCommandConflictError, PcCommandUnknownError) as exc:
+            return self._build_error(message, code=exc.code, error_message=exc.message)
+        return None
+
+    def handle_output_chunk(
+        self,
+        message: PcOutputChunkMessage,
+        *,
+        connection_id: str,
+    ) -> dict[str, Any] | None:
+        try:
+            self._node_store.touch_connection(
+                pc_id=message.pc_id,
+                connection_id=connection_id,
+                connection_epoch=message.connection_epoch,
+                last_seen_at=message.sent_at,
+            )
+            self._command_store.record_output_chunk(
+                pc_id=message.pc_id,
+                command_id=message.payload["command_id"],
+                chunk=PcOutputChunkRecord(
+                    output_chunk_id=message.payload["output_chunk_id"],
+                    output_message_id=message.message_id,
+                    trace_id=message.trace_id,
+                    connection_epoch=message.connection_epoch,
+                    sent_at=message.sent_at,
+                    stream_id=message.payload["stream_id"],
+                    stream_id_source=message.payload["stream_id_source"],
+                    seq=message.payload["seq"],
+                    kind=message.payload["kind"],
+                    text=message.payload["text"],
+                    delta=message.payload["delta"],
+                    item_type=message.payload["item_type"],
+                    status=message.payload["status"],
+                ),
+            )
+        except PcNodeFenceError as exc:
+            return self._build_error(message, code=exc.code, error_message=exc.message)
+        except (PcCommandConflictError, PcCommandUnknownError) as exc:
+            return self._build_error(message, code=exc.code, error_message=exc.message)
+        return None
+
+    def handle_artifact_manifest(
+        self,
+        message: PcArtifactManifestMessage,
+        *,
+        connection_id: str,
+    ) -> dict[str, Any] | None:
+        try:
+            self._node_store.touch_connection(
+                pc_id=message.pc_id,
+                connection_id=connection_id,
+                connection_epoch=message.connection_epoch,
+                last_seen_at=message.sent_at,
+            )
+            self._command_store.record_artifact_manifest(
+                pc_id=message.pc_id,
+                command_id=message.payload["command_id"],
+                manifest=PcArtifactManifestRecord(
+                    manifest_id=message.payload["manifest_id"],
+                    manifest_message_id=message.message_id,
+                    trace_id=message.trace_id,
+                    connection_epoch=message.connection_epoch,
+                    sent_at=message.sent_at,
+                    artifacts_root=message.payload["artifacts_root"],
+                    source=message.payload["source"],
+                    artifacts=message.payload["artifacts"],
+                ),
+            )
+        except PcNodeFenceError as exc:
+            return self._build_error(message, code=exc.code, error_message=exc.message)
+        except (PcCommandConflictError, PcCommandUnknownError) as exc:
+            return self._build_error(message, code=exc.code, error_message=exc.message)
+        return None
+
     def enqueue_command(self, message: PcCommandDispatchMessage) -> PcCommandRecord:
         node = self._require_online_node(message.pc_id)
         workspace = self._workspace_store.get_workspace(message.pc_id, message.payload["workspace_id"])
@@ -284,6 +434,69 @@ class PcControlRuntime:
             )
             for record in records
         ]
+
+    def collect_output_resume_requests(
+        self,
+        *,
+        pc_id: str,
+        connection_id: str,
+        connection_epoch: int,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        node = self._require_connection(pc_id=pc_id, connection_id=connection_id, connection_epoch=connection_epoch)
+        if node.status != "online":
+            return []
+        if not isinstance(limit, int) or limit <= 0:
+            raise ValueError("limit must be a positive integer")
+
+        in_progress_event_types = {"running", "awaiting_user_input", "paused"}
+        requests: list[dict[str, Any]] = []
+        for record in self._command_store.list_commands(pc_id=pc_id):
+            if record.result is not None:
+                continue
+            if record.output_chunks:
+                stream_cursors: dict[str, tuple[int, str | None]] = {}
+                for chunk in record.output_chunks:
+                    existing = stream_cursors.get(chunk.stream_id)
+                    if existing is None or chunk.seq > existing[0]:
+                        stream_cursors[chunk.stream_id] = (chunk.seq, chunk.stream_id_source)
+                for stream_id, (after_seq, stream_id_source) in sorted(stream_cursors.items()):
+                    requests.append(
+                        build_output_resume_request(
+                            message_id=self._message_id_factory("output_resume_request"),
+                            trace_id=record.trace_id,
+                            pc_id=record.pc_id,
+                            connection_epoch=connection_epoch,
+                            sent_at=self._clock(),
+                            request_id=f"output_resume_request:{record.command_id}:{stream_id}:{after_seq}",
+                            command_id=record.command_id,
+                            stream_id=stream_id,
+                            stream_id_source=stream_id_source,
+                            after_seq=after_seq,
+                            reason="reconnect_resume",
+                        )
+                    )
+                    if len(requests) >= limit:
+                        return requests
+                continue
+            if record.latest_event_type not in in_progress_event_types:
+                continue
+            requests.append(
+                build_output_resume_request(
+                    message_id=self._message_id_factory("output_resume_request"),
+                    trace_id=record.trace_id,
+                    pc_id=record.pc_id,
+                    connection_epoch=connection_epoch,
+                    sent_at=self._clock(),
+                    request_id=f"output_resume_request:{record.command_id}:all:0",
+                    command_id=record.command_id,
+                    after_seq=0,
+                    reason="reconnect_resume",
+                )
+            )
+            if len(requests) >= limit:
+                return requests
+        return requests
 
     def close_connection(self, *, pc_id: str, connection_id: str, connection_epoch: int) -> None:
         self._node_store.close_connection(

@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import urllib.request
+from datetime import datetime
 
+import requests
 import websockets
 
 from mail_runner.config import AppConfig
@@ -21,6 +23,17 @@ from mail_runner.relay_server.direct_actions import (
 )
 from mail_runner.relay_server.loopback import LoopbackRelayServer
 from mail_runner.relay_server.packet_store import PersistentAcceptedPacketStore
+from mail_runner.relay_server.pc_control_protocol import (
+    build_command_ack,
+    build_command_event,
+    build_command_result,
+    build_heartbeat,
+    build_pc_hello,
+    build_workspace_snapshot,
+    parse_pc_control_client_message,
+    parse_pc_control_server_message,
+)
+from mail_runner.relay_server.pc_control_runtime import build_pc_control_runtime
 from mail_runner.relay_server.post_creation_actions import (
     RelayTaskMailDirectCurrentSessionReplyMailBridge,
     RelayTaskMailDirectCurrentSessionStatusMailBridge,
@@ -39,6 +52,25 @@ from mail_runner.status import BACKEND_OPENCODE, RUN_STATUS_SUCCESS, THREAD_STAT
 from mail_runner.thread_store import build_workspace_id, build_workspace_norm, load_thread_state, save_thread_state
 
 
+def _pc_control_capabilities() -> dict[str, object]:
+    return {
+        "streaming": True,
+        "artifact_manifest": True,
+        "workspace_snapshot": True,
+        "supported_backends": ["codex", "opencode"],
+        "profile_catalogs": {"codex": ["default"], "opencode": ["default"]},
+        "permission_modes": ["default", "highest"],
+        "backend_transport_modes": {
+            "codex": ["cli", "sdk"],
+            "opencode": ["cli", "sdk"],
+        },
+    }
+
+
+def _now() -> str:
+    return datetime.now().replace(microsecond=0).isoformat()
+
+
 def test_relay_transport_sends_packet_to_websocket_runtime_and_healthz(tmp_path) -> None:
     asyncio.run(_run_websocket_runtime_test(tmp_path))
 
@@ -49,6 +81,10 @@ def test_unified_runtime_exposes_file_surface_on_same_port_as_websocket(tmp_path
 
 def test_taskmail_direct_new_task_packet_reaches_websocket_runtime(tmp_path) -> None:
     asyncio.run(_run_taskmail_direct_runtime_test(tmp_path))
+
+
+def test_taskmail_direct_new_task_packet_with_none_fallback_policy_reaches_websocket_runtime(tmp_path) -> None:
+    asyncio.run(_run_taskmail_direct_runtime_test(tmp_path, fallback_policy="none"))
 
 
 def test_taskmail_direct_project_sync_packet_reaches_websocket_runtime(tmp_path) -> None:
@@ -63,8 +99,16 @@ def test_taskmail_direct_current_session_status_packet_reaches_websocket_runtime
     asyncio.run(_run_taskmail_direct_status_runtime_test(tmp_path))
 
 
+def test_taskmail_direct_current_session_status_packet_with_none_fallback_policy_reaches_websocket_runtime(tmp_path) -> None:
+    asyncio.run(_run_taskmail_direct_status_runtime_test(tmp_path, fallback_policy="none"))
+
+
 def test_taskmail_direct_current_session_reply_packet_reaches_websocket_runtime(tmp_path) -> None:
     asyncio.run(_run_taskmail_direct_reply_runtime_test(tmp_path))
+
+
+def test_taskmail_direct_current_session_reply_packet_with_none_fallback_policy_reaches_websocket_runtime(tmp_path) -> None:
+    asyncio.run(_run_taskmail_direct_reply_runtime_test(tmp_path, fallback_policy="none"))
 
 
 def test_runtime_relay_hard_stops_direct_reply_for_paused_session_when_task_root_is_configured(tmp_path) -> None:
@@ -77,6 +121,10 @@ def test_phase3_subscribe_packet_reaches_websocket_runtime_and_emits_snapshot(tm
 
 def test_phase3_subscription_pushes_live_deltas_over_websocket_runtime(tmp_path) -> None:
     asyncio.run(_run_phase3_live_delta_runtime_test(tmp_path))
+
+
+def test_pc_control_operator_dispatch_reaches_unified_runtime_and_closes_result(tmp_path) -> None:
+    asyncio.run(_run_pc_control_operator_dispatch_runtime_test(tmp_path))
 
 
 async def _run_websocket_runtime_test(tmp_path) -> None:
@@ -150,7 +198,7 @@ async def _run_websocket_runtime_test(tmp_path) -> None:
         await server.wait_closed()
 
 
-async def _run_taskmail_direct_runtime_test(tmp_path) -> None:
+async def _run_taskmail_direct_runtime_test(tmp_path, *, fallback_policy: str = "mail") -> None:
     state_dir = tmp_path / "relay_state"
     config = RelayServerConfig(
         host="127.0.0.1",
@@ -202,7 +250,7 @@ async def _run_taskmail_direct_runtime_test(tmp_path) -> None:
             hello_ack = parse_server_message(json.loads(await websocket.recv()))
             assert isinstance(hello_ack, RelayHelloAckMessage)
 
-            await websocket.send(json.dumps(_canonical_direct_packet(), ensure_ascii=False))
+            await websocket.send(json.dumps(_canonical_direct_packet(fallback_policy=fallback_policy), ensure_ascii=False))
             packet_ack = parse_server_message(json.loads(await websocket.recv()))
             stored_packet = packet_store.get_packet("android-taskmail:new-task:req_001")
 
@@ -212,6 +260,218 @@ async def _run_taskmail_direct_runtime_test(tmp_path) -> None:
             assert stored_packet is not None
             assert stored_packet.delivery_status == "delivered"
             assert fake_mail_client.calls[0]["to_addr"] == "bot@example.com"
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def _run_pc_control_operator_dispatch_runtime_test(tmp_path) -> None:
+    now = _now()
+    state_dir = tmp_path / "relay_state"
+    config = RelayServerConfig(
+        host="127.0.0.1",
+        port=0,
+        transport_token="relay-secret",
+        state_dir=str(state_dir),
+    )
+    session_store = PersistentSessionStore(state_dir)
+    packet_store = PersistentAcceptedPacketStore(state_dir)
+    pc_runtime = build_pc_control_runtime(config)
+    relay = LoopbackRelayServer(
+        config,
+        session_store=session_store,
+        packet_store=packet_store,
+        delivery_callback=lambda _packet: TransportReceipt(
+            success=True,
+            transport_name="relay_smtp",
+            sent_at="2026-03-25T23:30:00",
+            transport_message_id="<relay-runtime@example.com>",
+        ),
+        clock=lambda: "2026-03-25T23:30:00",
+    )
+    server = await start_relay_server(
+        config,
+        relay=relay,
+        session_store=session_store,
+        packet_store=packet_store,
+        pc_control_runtime=pc_runtime,
+    )
+    try:
+        host, port = server.sockets[0].getsockname()[:2]
+        async with websockets.connect(
+            f"ws://{host}:{port}/pc-control",
+            open_timeout=15,
+            close_timeout=15,
+            extra_headers={"Authorization": "Bearer relay-secret"},
+            max_size=32 * 1024 * 1024,
+        ) as websocket:
+            await websocket.send(
+                json.dumps(
+                    build_pc_hello(
+                        message_id="hello_001",
+                        trace_id="trace_hello_001",
+                        pc_id="pc-home",
+                        sent_at=now,
+                        display_name="Home PC",
+                        client_version="0.1.0",
+                        host_fingerprint="host_001",
+                        runtime_fingerprint="runtime_001",
+                        capabilities=_pc_control_capabilities(),
+                    ),
+                    ensure_ascii=False,
+                )
+            )
+            hello_ack = parse_pc_control_server_message(json.loads(await websocket.recv()))
+            assert hello_ack.payload["accepted"] is True
+            connection_epoch = hello_ack.connection_epoch
+
+            await websocket.send(
+                json.dumps(
+                    build_workspace_snapshot(
+                        message_id="snapshot_001",
+                        trace_id="trace_snapshot_001",
+                        pc_id="pc-home",
+                        connection_epoch=connection_epoch,
+                        sent_at=now,
+                        snapshot_id="snapshot_001",
+                        workspaces=[
+                            {
+                                "workspace_id": "workspace_001",
+                                "workspace_norm": "e:/projects/mail_based_task_manager",
+                                "repo_path": "E:\\projects\\mail_based_task_manager",
+                                "workdir": None,
+                                "display_name": "mail_based_task_manager",
+                                "source": "project_sync_roots",
+                                "capabilities": _pc_control_capabilities(),
+                            }
+                        ],
+                    ),
+                    ensure_ascii=False,
+                )
+            )
+
+            response = await asyncio.to_thread(
+                requests.post,
+                f"http://{host}:{port}/debug/pc-control/dispatch",
+                headers={"Authorization": "Bearer relay-secret"},
+                json={
+                    "pc_id": "pc-home",
+                    "workspace_id": "workspace_001",
+                    "command_id": "cmd_live_001",
+                    "command_type": "status",
+                    "session_id": "thread_001",
+                    "execution_policy": {
+                        "backend": "codex",
+                        "profile": "default",
+                        "permission": "default",
+                        "backend_transport": "sdk",
+                    },
+                    "payload": {},
+                },
+                timeout=5,
+            )
+            assert response.status_code == 200
+
+            await websocket.send(
+                json.dumps(
+                    build_heartbeat(
+                        message_id="heartbeat_001",
+                        trace_id="trace_heartbeat_001",
+                        pc_id="pc-home",
+                        connection_epoch=connection_epoch,
+                        sent_at=now,
+                        active_run_count=0,
+                        workspace_count=1,
+                        load_hint="normal",
+                    ),
+                    ensure_ascii=False,
+                )
+            )
+            dispatch = parse_pc_control_server_message(json.loads(await websocket.recv()))
+            assert dispatch.payload["command_id"] == "cmd_live_001"
+
+            await websocket.send(
+                json.dumps(
+                    build_command_ack(
+                        message_id="ack_001",
+                        trace_id="trace_ack_001",
+                        pc_id="pc-home",
+                        connection_epoch=connection_epoch,
+                        sent_at=now,
+                        command_id="cmd_live_001",
+                        ack_status="accepted",
+                        queue_position=None,
+                        reason=None,
+                        error_code=None,
+                    ),
+                    ensure_ascii=False,
+                )
+            )
+            await websocket.send(
+                json.dumps(
+                    build_command_event(
+                        message_id="event_001",
+                        trace_id="trace_event_001",
+                        pc_id="pc-home",
+                        connection_epoch=connection_epoch,
+                        sent_at=now,
+                        command_id="cmd_live_001",
+                        event_id="event_live_001",
+                        event_type="running",
+                        summary="running",
+                        effective_execution={
+                            "backend": "codex",
+                            "profile": "default",
+                            "permission": "default",
+                            "backend_transport": "sdk",
+                            "resolved_model": "gpt-5-codex",
+                        },
+                        event_payload={},
+                    ),
+                    ensure_ascii=False,
+                )
+            )
+            await websocket.send(
+                json.dumps(
+                    build_command_result(
+                        message_id="result_001",
+                        trace_id="trace_result_001",
+                        pc_id="pc-home",
+                        connection_epoch=connection_epoch,
+                        sent_at=now,
+                        command_id="cmd_live_001",
+                        result_id="result_live_001",
+                        final_status="done",
+                        summary="done",
+                        structured_payload={"kind": "status_snapshot"},
+                        effective_execution={
+                            "backend": "codex",
+                            "profile": "default",
+                            "permission": "default",
+                            "backend_transport": "sdk",
+                            "resolved_model": "gpt-5-codex",
+                        },
+                        error_code=None,
+                        error_message=None,
+                    ),
+                    ensure_ascii=False,
+                )
+            )
+
+            async def _result_recorded() -> bool:
+                record = pc_runtime.command_store.get_command("pc-home", "cmd_live_001")
+                return record is not None and record.result is not None and record.latest_event_type == "running"
+
+            for _ in range(20):
+                if await _result_recorded():
+                    break
+                await asyncio.sleep(0.1)
+            record = pc_runtime.command_store.get_command("pc-home", "cmd_live_001")
+            assert record is not None
+            assert record.ack_status == "accepted"
+            assert record.final_status == "done"
+            assert record.result is not None
+            assert record.result.final_status == "done"
     finally:
         server.close()
         await server.wait_closed()
@@ -481,7 +741,7 @@ async def _run_taskmail_direct_project_sync_v2_runtime_test(tmp_path) -> None:
         await server.wait_closed()
 
 
-async def _run_taskmail_direct_status_runtime_test(tmp_path) -> None:
+async def _run_taskmail_direct_status_runtime_test(tmp_path, *, fallback_policy: str = "mail") -> None:
     state_dir = tmp_path / "relay_state"
     task_root = tmp_path / "tasks"
     thread_state = _build_thread_state()
@@ -548,6 +808,7 @@ async def _run_taskmail_direct_status_runtime_test(tmp_path) -> None:
                         workspace_id=thread_state.workspace_id,
                         session_id=thread_state.session_id or thread_state.thread_id,
                         thread_id=thread_state.thread_id,
+                        fallback_policy=fallback_policy,
                     ),
                     ensure_ascii=False,
                 )
@@ -592,7 +853,7 @@ async def _run_taskmail_direct_status_runtime_test(tmp_path) -> None:
         await server.wait_closed()
 
 
-async def _run_taskmail_direct_reply_runtime_test(tmp_path) -> None:
+async def _run_taskmail_direct_reply_runtime_test(tmp_path, *, fallback_policy: str = "mail") -> None:
     state_dir = tmp_path / "relay_state"
     task_root = tmp_path / "tasks"
     thread_state = _build_thread_state()
@@ -660,6 +921,7 @@ async def _run_taskmail_direct_reply_runtime_test(tmp_path) -> None:
                         session_id=thread_state.session_id or thread_state.thread_id,
                         thread_id=thread_state.thread_id,
                         reply_text="Please continue with the cleanup.",
+                        fallback_policy=fallback_policy,
                     ),
                     ensure_ascii=False,
                 )
@@ -960,7 +1222,7 @@ class _FakeMailClient:
         return "<direct-bridge-1@example.com>"
 
 
-def _canonical_direct_packet() -> dict[str, object]:
+def _canonical_direct_packet(*, fallback_policy: str = "mail") -> dict[str, object]:
     return {
         "message_type": "packet",
         "packet_id": "android-taskmail:new-task:req_001",
@@ -993,7 +1255,7 @@ def _canonical_direct_packet() -> dict[str, object]:
             "channel": "taskmail_android_direct",
             "schema_version": "phase2-direct-outbound-contract-v1",
             "action": "new_task",
-            "fallback_policy": "mail",
+            "fallback_policy": fallback_policy,
         },
         "sent_at": "2026-03-21T12:30:00",
     }
@@ -1107,7 +1369,13 @@ def _phase3_subscribe_packet() -> dict[str, object]:
     }
 
 
-def _post_creation_status_packet(*, workspace_id: str, session_id: str, thread_id: str | None) -> dict[str, object]:
+def _post_creation_status_packet(
+    *,
+    workspace_id: str,
+    session_id: str,
+    thread_id: str | None,
+    fallback_policy: str = "mail",
+) -> dict[str, object]:
     target: dict[str, object] = {
         "scope": "current_session",
         "workspace_id": workspace_id,
@@ -1133,7 +1401,7 @@ def _post_creation_status_packet(*, workspace_id: str, session_id: str, thread_i
             "channel": "taskmail_android_direct",
             "schema_version": "post-creation-session-action-contract-v1",
             "action": "status",
-            "fallback_policy": "mail",
+            "fallback_policy": fallback_policy,
         },
         "sent_at": "2026-03-22T12:30:00",
     }
@@ -1145,11 +1413,13 @@ def _post_creation_reply_packet(
     session_id: str,
     thread_id: str | None,
     reply_text: str,
+    fallback_policy: str = "mail",
 ) -> dict[str, object]:
     packet = _post_creation_status_packet(
         workspace_id=workspace_id,
         session_id=session_id,
         thread_id=thread_id,
+        fallback_policy=fallback_policy,
     )
     packet["task_run_packet"]["action"] = "reply"
     packet["task_run_packet"]["reply"] = {"reply_text": reply_text}

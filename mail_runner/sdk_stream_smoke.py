@@ -73,6 +73,7 @@ def _codex_stream_contract(run_dir: Path, failures: list[str]) -> dict[str, Any]
         "stream_path": str(stream_path),
         "stream_exists": True,
         "supports_persisted_stream": True,
+        "supports_incremental_stream": True,
         "event_count": len(events),
         "seqs": seqs,
         "kinds": [event.kind for event in events],
@@ -80,26 +81,72 @@ def _codex_stream_contract(run_dir: Path, failures: list[str]) -> dict[str, Any]
     }
 
 
-def _opencode_stream_gap(run_dir: Path, failures: list[str]) -> dict[str, Any]:
+def _opencode_stream_contract(run_dir: Path, failures: list[str]) -> dict[str, Any]:
     stream_path = run_dir / STREAM_EVENTS_FILENAME
     sdk_turn_path = run_dir / "sdk_turn.json"
     sdk_turn_payload = json.loads(sdk_turn_path.read_text(encoding="utf-8")) if sdk_turn_path.exists() else None
-    if stream_path.exists():
-        failures.append("OpenCode stream smoke unexpectedly produced stream.events.jsonl; update the gap assumption.")
     if not sdk_turn_payload:
         failures.append("OpenCode stream smoke is missing sdk_turn.json.")
-    assistant_parts = []
-    if isinstance(sdk_turn_payload, dict):
-        assistant_parts = list(sdk_turn_payload.get("assistant_parts") or [])
+    if not stream_path.exists():
+        failures.append("OpenCode stream smoke did not produce stream.events.jsonl.")
+        assistant_parts = []
+        if isinstance(sdk_turn_payload, dict):
+            assistant_parts = list(sdk_turn_payload.get("assistant_parts") or [])
+        return {
+            "stream_path": str(stream_path),
+            "stream_exists": False,
+            "supports_persisted_stream": False,
+            "supports_incremental_stream": False,
+            "sdk_turn_path": str(sdk_turn_path),
+            "assistant_part_count": len(assistant_parts),
+            "residual_gap": {
+                "kind": "missing_same_layer_stream_evidence",
+                "summary": "OpenCode SDK run did not persist stream.events.jsonl.",
+                "recorded": True,
+            },
+        }
+
+    events = load_stream_events(stream_path)
+    seqs = [event.seq for event in events]
+    expected_seqs = list(range(1, len(seqs) + 1))
+    if seqs != expected_seqs:
+        failures.append(f"OpenCode stream seq contract mismatch: observed {seqs}, expected {expected_seqs}.")
+    if not any(event.kind == "assistant.completed" for event in events):
+        failures.append("OpenCode stream is missing assistant.completed events.")
+    if not any(event.kind == "turn.completed" for event in events):
+        failures.append("OpenCode stream is missing terminal turn.completed event.")
+
+    stream_id = f"{events[0].thread_id}:{events[0].task_id}" if events else None
+    candidate_output_chunks = [
+        {
+            "stream_id": stream_id,
+            "stream_id_source": "derived_from_run_identity",
+            "seq": event.seq,
+            "kind": event.kind,
+            "text": event.text,
+            "delta": event.delta,
+            "status": event.status,
+            "item_type": event.item_type,
+        }
+        for event in events
+        if event.text or event.delta
+    ]
+    if not candidate_output_chunks:
+        failures.append("OpenCode stream did not produce any candidate output_chunk payloads.")
+
     return {
         "stream_path": str(stream_path),
-        "stream_exists": stream_path.exists(),
-        "supports_persisted_stream": False,
+        "stream_exists": True,
+        "supports_persisted_stream": True,
+        "supports_incremental_stream": False,
         "sdk_turn_path": str(sdk_turn_path),
-        "assistant_part_count": len(assistant_parts),
-        "gap": {
-            "kind": "missing_same_layer_stream_evidence",
-            "summary": "OpenCode SDK current runtime only persists final sdk_turn.json assistant payload, not seq-based stream events.",
+        "event_count": len(events),
+        "seqs": seqs,
+        "kinds": [event.kind for event in events],
+        "candidate_output_chunks": candidate_output_chunks,
+        "residual_gap": {
+            "kind": "incremental_stream_not_proven",
+            "summary": "OpenCode SDK currently persists a minimal post-turn stream projection; true incremental streaming is not yet validated by this smoke.",
             "recorded": True,
         },
     }
@@ -130,7 +177,7 @@ def run_sdk_stream_smoke(
     if backend == "codex":
         stream_record = _codex_stream_contract(run_dir, failures)
     else:
-        stream_record = _opencode_stream_gap(run_dir, failures)
+        stream_record = _opencode_stream_contract(run_dir, failures)
 
     smoke_result = {
         "success": not failures,

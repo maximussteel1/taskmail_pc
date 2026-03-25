@@ -40,7 +40,12 @@
 1. `PC <-> VPS` 字段级 schema 还未冻结
 2. `workspace` 的持久化主键与 snapshot/upsert 规则还未冻结
 3. `output_chunk` 的 replay 与断线恢复规则还未冻结
-4. 旧 direct relay/control/file 资料还没有被彻底按 compatibility / closeout 读法重新整理
+4. `/v1/files` owner lane 的 cutover / `COS` decommission 还需要按独立 checklist 收口
+5. 旧 direct relay/control/file 资料还没有被彻底按 compatibility / closeout 读法重新整理
+
+其中第 4 项当前应优先参考：
+
+- `docs/plans/vps_file_surface_cutover_and_cos_decommission_checklist_v0.1.md`
 
 ## Reference Precursors
 

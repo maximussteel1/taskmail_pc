@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 
@@ -24,6 +24,7 @@ from ..opencode_sdk_common import (
 from ..run_result_capsule import parse_run_result_capsule, strip_run_result_capsules
 from ..state_capsule import parse_question_capsules
 from ..status import RUN_STATUS_AWAITING_USER_INPUT, RUN_STATUS_FAILED, RUN_STATUS_KILLED, RUN_STATUS_SUCCESS
+from ..stream_events import STREAM_EVENTS_FILENAME, StreamEvent, write_stream_events
 from .base import WorkerAdapter
 from .cli_common import (
     _incoming_attachment_payload,
@@ -55,6 +56,130 @@ def _timestamp() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
 
 
+def _timestamp_from_unix_millis(value: object) -> str | None:
+    if not isinstance(value, (int, float)):
+        return None
+    if value <= 0:
+        return None
+    try:
+        dt = datetime.fromtimestamp(float(value) / 1000.0, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def _part_type(record: dict[str, object]) -> str:
+    return str(record.get("type") or "").strip()
+
+
+def _part_timestamp(
+    records: list[dict[str, object]],
+    *,
+    allowed_types: set[str] | None,
+    fields: tuple[str, ...],
+) -> str | None:
+    for record in records:
+        if allowed_types is not None and _part_type(record) not in allowed_types:
+            continue
+        time_payload = record.get("time")
+        if not isinstance(time_payload, dict):
+            continue
+        for field in fields:
+            ts = _timestamp_from_unix_millis(time_payload.get(field))
+            if ts is not None:
+                return ts
+    return None
+
+
+def _synthesize_stream_events(
+    *,
+    task: TaskSnapshot,
+    assistant_parts: list[object],
+    visible_reply: str,
+    session_id: str | None,
+    provider_id: str,
+    model_id: str,
+    started_at: str,
+    finished_at: str,
+) -> list[StreamEvent]:
+    part_records = [part_to_record(part) for part in assistant_parts]
+    text_part_count = sum(1 for record in part_records if _part_type(record) == "text" and str(record.get("text") or "").strip())
+    part_types = sorted({_part_type(record) for record in part_records if _part_type(record)})
+    common_payload = {
+        "stream_mode": "posthoc_assistant_parts_projection",
+        "sdk_session_id": session_id,
+        "provider_id": provider_id,
+        "model_id": model_id,
+        "assistant_part_count": len(part_records),
+        "text_part_count": text_part_count,
+        "assistant_part_types": part_types,
+    }
+
+    started_ts = (
+        _part_timestamp(part_records, allowed_types={"step-start"}, fields=("start", "end"))
+        or _part_timestamp(part_records, allowed_types={"text"}, fields=("start", "end"))
+        or started_at
+    )
+    assistant_completed_ts = (
+        _part_timestamp(part_records, allowed_types={"text"}, fields=("end", "start"))
+        or _part_timestamp(part_records, allowed_types={"step-finish"}, fields=("end", "start"))
+        or finished_at
+    )
+    turn_completed_ts = (
+        _part_timestamp(part_records, allowed_types={"step-finish"}, fields=("end", "start"))
+        or assistant_completed_ts
+        or finished_at
+    )
+
+    events = [
+        StreamEvent(
+            ts=started_ts,
+            seq=1,
+            thread_id=task.thread_id,
+            task_id=task.task_id,
+            backend=task.backend,
+            backend_transport=task.backend_transport or "sdk",
+            kind="turn.started",
+            text="OpenCode SDK turn started.",
+            status="started",
+            payload={**common_payload, "event_type": "turn.started"},
+        )
+    ]
+    next_seq = 2
+    if visible_reply:
+        events.append(
+            StreamEvent(
+                ts=assistant_completed_ts,
+                seq=next_seq,
+                thread_id=task.thread_id,
+                task_id=task.task_id,
+                backend=task.backend,
+                backend_transport=task.backend_transport or "sdk",
+                kind="assistant.completed",
+                text=visible_reply,
+                item_type="agent_message",
+                status="completed",
+                payload={**common_payload, "event_type": "assistant.completed"},
+            )
+        )
+        next_seq += 1
+    events.append(
+        StreamEvent(
+            ts=turn_completed_ts,
+            seq=next_seq,
+            thread_id=task.thread_id,
+            task_id=task.task_id,
+            backend=task.backend,
+            backend_transport=task.backend_transport or "sdk",
+            kind="turn.completed",
+            text="Turn completed",
+            status="completed",
+            payload={**common_payload, "event_type": "turn.completed"},
+        )
+    )
+    return events
+
+
 class OpenCodeSdkAdapter(OpenCodeAdapter, WorkerAdapter):
     """Runs one OpenCode SDK turn through a temporary local opencode server."""
 
@@ -76,6 +201,7 @@ class OpenCodeSdkAdapter(OpenCodeAdapter, WorkerAdapter):
         stderr_path = run_path / "stderr.log"
         summary_path = run_path / "summary.md"
         sdk_turn_path = run_path / "sdk_turn.json"
+        stream_events_path = run_path / STREAM_EVENTS_FILENAME
 
         server: ServerHandle | None = None
         session_id: str | None = task.backend_session_id
@@ -151,6 +277,18 @@ class OpenCodeSdkAdapter(OpenCodeAdapter, WorkerAdapter):
             assistant_parts = list(getattr(assistant_message, "parts", []) or [])
             reply_text = extract_reply_text(assistant_parts)
             server_stderr = self._read_server_stderr(server)
+            visible_reply = strip_run_result_capsules(reply_text)
+            stream_events = _synthesize_stream_events(
+                task=task,
+                assistant_parts=assistant_parts,
+                visible_reply=visible_reply,
+                session_id=session_id,
+                provider_id=provider_id,
+                model_id=model_id,
+                started_at=started_at,
+                finished_at=_timestamp(),
+            )
+            write_stream_events(stream_events_path, stream_events)
             sdk_turn_path.write_text(
                 json.dumps(
                     {
@@ -160,6 +298,9 @@ class OpenCodeSdkAdapter(OpenCodeAdapter, WorkerAdapter):
                         "provider_id": provider_id,
                         "model_id": model_id,
                         "message_count": len(messages),
+                        "stream_path": str(stream_events_path),
+                        "stream_event_count": len(stream_events),
+                        "stream_mode": "posthoc_assistant_parts_projection",
                         "assistant_parts": [part_to_record(part) for part in assistant_parts],
                         "assistant_reply": reply_text,
                     },
@@ -171,7 +312,6 @@ class OpenCodeSdkAdapter(OpenCodeAdapter, WorkerAdapter):
             )
 
             structured_result = parse_run_result_capsule(reply_text)
-            visible_reply = strip_run_result_capsules(reply_text)
             stdout_path.write_text((visible_reply + "\n") if visible_reply else "", encoding="utf-8")
             stderr_path.write_text(server_stderr, encoding="utf-8")
 

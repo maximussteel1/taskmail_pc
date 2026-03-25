@@ -2,22 +2,32 @@
 
 from __future__ import annotations
 
+import asyncio
 import argparse
 import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .artifact_resolver import write_artifact_index
 from .config import AppConfig
+from .file_surface import write_artifact_upload_success_binding
+from .models import RunArtifact, RunResult
 from .pc_control_plane_client import PcControlPlaneClient
+from .pc_control_plane_projection import project_artifact_manifest
 from .pc_workspace_inventory import build_execution_capabilities
 from .relay_server.pc_command_store import InMemoryPcCommandStore
 from .relay_server.pc_control_protocol import (
     PcCommandDispatchMessage,
     PcErrorMessage,
     PcHelloAckMessage,
+    PcOutputResumeRequestMessage,
+    build_artifact_manifest,
     build_command_ack,
     build_command_dispatch,
+    build_command_event,
+    build_command_result,
+    build_output_chunk,
     build_heartbeat,
     build_pc_hello,
     build_workspace_snapshot,
@@ -28,6 +38,8 @@ from .relay_server.pc_control_runtime import PcCommandDispatchValidationError, P
 from .relay_server.pc_credential_registry import InMemoryPcCredentialRegistry
 from .relay_server.pc_node_store import InMemoryPcNodeStore
 from .relay_server.workspace_inventory_store import InMemoryWorkspaceInventoryStore
+from .stream_events import STREAM_EVENTS_FILENAME
+from .workspace import WorkspaceManager
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "_tmp_pc_control_plane_fixture_smoke"
@@ -43,15 +55,24 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 class _RunnerProbe:
-    def __init__(self) -> None:
+    def __init__(self, task_root: Path | None = None) -> None:
         self.active = 0
         self.queued = 0
+        self.workspace = WorkspaceManager(task_root) if task_root is not None else None
 
     def active_count(self) -> int:
         return self.active
 
     def queued_count(self) -> int:
         return self.queued
+
+
+class _RecordingWebSocket:
+    def __init__(self) -> None:
+        self.sent_frames: list[dict[str, Any]] = []
+
+    async def send(self, payload: str) -> None:
+        self.sent_frames.append(json.loads(payload))
 
 
 def _config() -> AppConfig:
@@ -106,11 +127,136 @@ def _client(config: AppConfig, runner_probe: _RunnerProbe, workspace_provider) -
     )
 
 
+def _projected_artifact_manifest_fixture(run_root: Path) -> dict[str, Any]:
+    task_root = run_root / "tasks"
+    workspace = WorkspaceManager(task_root)
+    thread_id = "thread_cmd_001"
+    task_id = "task_cmd_001"
+    run_dir = workspace.create_run_dir(thread_id, task_id, exist_ok=True)
+    stream_path = workspace.run_file_path(thread_id, task_id, STREAM_EVENTS_FILENAME)
+    stream_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": "2026-03-25T10:00:03",
+                        "seq": 1,
+                        "thread_id": thread_id,
+                        "task_id": task_id,
+                        "backend": "codex",
+                        "backend_transport": "sdk",
+                        "kind": "assistant.delta",
+                        "delta": "Hello",
+                        "status": "streaming",
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-03-25T10:00:04",
+                        "seq": 2,
+                        "thread_id": thread_id,
+                        "task_id": task_id,
+                        "backend": "codex",
+                        "backend_transport": "sdk",
+                        "kind": "assistant.completed",
+                        "text": "Hello world",
+                        "status": "completed",
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    artifacts_root = run_dir / "artifacts"
+    artifacts_root.mkdir(parents=True, exist_ok=True)
+    preview_path = artifacts_root / "preview.png"
+    report_path = artifacts_root / "report.md"
+    preview_path.write_bytes(b"\x89PNG\r\n\x1a\nfixture-preview")
+    report_path.write_text("# fixture artifact\n", encoding="utf-8")
+
+    result = RunResult(
+        task_id=task_id,
+        thread_id=thread_id,
+        backend="codex",
+        status="success",
+        exit_code=0,
+        started_at="2026-03-25T10:00:02",
+        finished_at="2026-03-25T10:00:05",
+        stdout_file="runs/task_cmd_001/stdout.log",
+        stderr_file="runs/task_cmd_001/stderr.log",
+        summary_file="runs/task_cmd_001/summary.md",
+        artifacts_dir="runs/task_cmd_001/artifacts",
+        changed_files=[],
+        tests_passed=True,
+        backend_transport="sdk",
+    )
+    artifacts = [
+        RunArtifact(
+            artifact_id="artifact-preview",
+            path=str(preview_path),
+            name="preview.png",
+            kind="image",
+            content_type="image/png",
+            source="manifest",
+            inline_preview=True,
+            caption="Fixture preview",
+        ),
+        RunArtifact(
+            artifact_id="artifact-report",
+            path=str(report_path),
+            name="report.md",
+            kind="file",
+            content_type="text/markdown",
+            source="manifest",
+        ),
+    ]
+    index_path = write_artifact_index(task_root, result, artifacts, [])
+    if index_path is None:
+        raise RuntimeError("failed to write artifact_index.json for fixture smoke")
+    write_artifact_upload_success_binding(
+        task_root,
+        result,
+        artifacts[0],
+        role="artifact_delivery",
+        file_id="file_preview_001",
+        metadata_url="/v1/files/file_preview_001",
+        download_url="/v1/files/file_preview_001/content",
+        uploaded_at="2026-03-25T10:00:05",
+        trace_id="trace_cmd_001",
+    )
+    binding_path = write_artifact_upload_success_binding(
+        task_root,
+        result,
+        artifacts[0],
+        role="artifact_delivery",
+        file_id="file_preview_002",
+        metadata_url="/v1/files/file_preview_002",
+        download_url="/v1/files/file_preview_002/content",
+        uploaded_at="2026-03-25T10:00:06",
+        trace_id="trace_cmd_001",
+    )
+    manifest = project_artifact_manifest(task_root, result=result)
+    return {
+        "task_root": str(task_root),
+        "thread_id": thread_id,
+        "task_id": task_id,
+        "stream_path": str(stream_path),
+        "stream_id": f"{thread_id}:{task_id}",
+        "artifact_index_path": str(index_path),
+        "binding_index_path": str(binding_path),
+        "manifest": manifest,
+    }
+
+
 def run_pc_control_plane_fixture_smoke(*, output_dir: Path, run_name: str) -> dict[str, Any]:
     run_root = output_dir / run_name
     config = _config()
+    artifact_projection = _projected_artifact_manifest_fixture(run_root)
     workspace_provider = lambda: _workspace_inventory(config)
-    runner_probe = _RunnerProbe()
+    runner_probe = _RunnerProbe(Path(artifact_projection["task_root"]))
     runtime = _runtime()
     client = _client(config, runner_probe, workspace_provider)
 
@@ -235,6 +381,277 @@ def run_pc_control_plane_fixture_smoke(*, output_dir: Path, run_name: str) -> di
             error_code=accepted_admission["error_code"],
         ),
     }
+    running_event = parse_pc_control_client_message(
+        build_command_event(
+            message_id="msg_evt_001",
+            trace_id="trace_cmd_001",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:03",
+            event_id="event:cmd_001:running",
+            command_id="cmd_001",
+            event_type="running",
+            summary="command is running on the local runner",
+            effective_execution={
+                "backend": "codex",
+                "profile": "strong",
+                "permission": "highest",
+                "backend_transport": "sdk",
+                "resolved_model": "gpt-5-codex",
+            },
+            event_payload={
+                "thread_id": artifact_projection["thread_id"],
+                "task_id": artifact_projection["task_id"],
+            },
+        )
+    )
+    running_event_error = runtime.handle_event(running_event, connection_id=connection_id)
+    if running_event_error is not None:
+        failures.append("canonical event unexpectedly returned an error.")
+    output_chunk_message = parse_pc_control_client_message(
+        build_output_chunk(
+            message_id="msg_out_001",
+            trace_id="trace_cmd_001",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:04",
+            output_chunk_id="output:cmd_001:thread_cmd_001:1",
+            command_id="cmd_001",
+            stream_id=artifact_projection["stream_id"],
+            stream_id_source="derived_from_run_identity",
+            seq=1,
+            kind="assistant.delta",
+            delta="Hello",
+            status="streaming",
+        )
+    )
+    output_chunk_error = runtime.handle_output_chunk(output_chunk_message, connection_id=connection_id)
+    if output_chunk_error is not None:
+        failures.append("canonical output_chunk unexpectedly returned an error.")
+    client._remember_output_chunk_replay_context(
+        "cmd_001",
+        trace_id="trace_cmd_001",
+        thread_id=str(artifact_projection["thread_id"]),
+        task_id=str(artifact_projection["task_id"]),
+    )
+    second_hello = parse_pc_control_client_message(
+        build_pc_hello(
+            message_id="msg_hello_002",
+            trace_id="trace_hello_002",
+            pc_id="pc_home",
+            sent_at="2026-03-25T10:01:00",
+            display_name="Home PC",
+            client_version="0.1.0-dev",
+            host_fingerprint="host_001",
+            runtime_fingerprint="runtime_001",
+            capabilities=build_execution_capabilities(config).to_payload(),
+        )
+    )
+    second_hello_response, second_connection_id, second_connection_epoch = runtime.handle_hello(
+        second_hello,
+        provided_token="relay-secret",
+    )
+    _ = parse_pc_control_server_message(second_hello_response)
+    client._current_connection_epoch = second_connection_epoch
+    resume_requests = runtime.collect_output_resume_requests(
+        pc_id="pc_home",
+        connection_id=second_connection_id,
+        connection_epoch=second_connection_epoch,
+    )
+    resume_request_payload = resume_requests[0] if resume_requests else None
+    parsed_resume_request = (
+        parse_pc_control_server_message(resume_request_payload) if resume_request_payload is not None else None
+    )
+    if len(resume_requests) != 1:
+        failures.append(f"Expected 1 output_resume_request after reconnect, got {len(resume_requests)}.")
+    if not isinstance(parsed_resume_request, PcOutputResumeRequestMessage):
+        failures.append("output_resume_request did not parse after reconnect.")
+    resume_websocket = _RecordingWebSocket()
+    replay_output_chunk_error = None
+    if isinstance(parsed_resume_request, PcOutputResumeRequestMessage):
+        asyncio.run(
+            client._handle_output_resume_request(
+                resume_websocket,
+                message=parsed_resume_request,
+                connection_epoch=second_connection_epoch,
+                send_lock=asyncio.Lock(),
+            )
+        )
+        if len(resume_websocket.sent_frames) != 1:
+            failures.append(f"Expected 1 replayed output_chunk, got {len(resume_websocket.sent_frames)}.")
+        if resume_websocket.sent_frames:
+            replay_message = parse_pc_control_client_message(resume_websocket.sent_frames[0])
+            replay_output_chunk_error = runtime.handle_output_chunk(
+                replay_message,
+                connection_id=second_connection_id,
+            )
+            if replay_output_chunk_error is not None:
+                failures.append("replayed output_chunk unexpectedly returned an error.")
+            record_after_replay = runtime.command_store.get_command("pc_home", "cmd_001")
+            expected_chunks = [(1, "Hello", None), (2, None, "Hello world")]
+            actual_chunks = (
+                [(chunk.seq, chunk.delta, chunk.text) for chunk in record_after_replay.output_chunks]
+                if record_after_replay is not None
+                else []
+            )
+            if actual_chunks != expected_chunks:
+                failures.append(f"Unexpected output_chunk timeline after replay: {actual_chunks!r}.")
+    smoke_result["steps"]["output_resume_request"] = {
+        "resume_request": resume_request_payload,
+        "replayed_output_chunks": list(resume_websocket.sent_frames),
+        "replay_output_chunk_error": replay_output_chunk_error,
+    }
+    projected_artifact_manifest = artifact_projection["manifest"]
+    if projected_artifact_manifest is None:
+        failures.append("real artifact_index.json truth-projection did not produce artifact_manifest.")
+        projected_artifact_manifest = {
+            "artifacts_root": None,
+            "source": None,
+            "artifacts": [],
+        }
+    else:
+        projected_items = projected_artifact_manifest["artifacts"]
+        if len(projected_items) != 2:
+            failures.append(f"Expected 2 projected artifacts, got {len(projected_items)}.")
+        preview_item = next((item for item in projected_items if item["artifact_id"] == "artifact-preview"), None)
+        report_item = next((item for item in projected_items if item["artifact_id"] == "artifact-report"), None)
+        if preview_item is None:
+            failures.append("artifact-preview missing from projected artifact_manifest.")
+        elif preview_item.get("download_ref") != "/v1/files/file_preview_002/content":
+            failures.append("artifact-preview did not project the latest uploaded download_ref.")
+        if report_item is None:
+            failures.append("artifact-report missing from projected artifact_manifest.")
+        elif report_item.get("download_ref") is not None:
+            failures.append("artifact-report unexpectedly projected a download_ref without binding.")
+    result_message = parse_pc_control_client_message(
+        build_command_result(
+            message_id="msg_res_001",
+            trace_id="trace_cmd_001",
+            pc_id="pc_home",
+            connection_epoch=second_connection_epoch,
+            sent_at="2026-03-25T10:00:04",
+            result_id="result:cmd_001",
+            command_id="cmd_001",
+            final_status="done",
+            summary="Mock run completed successfully.",
+            structured_payload={
+                "kind": "run_result",
+                "thread_id": artifact_projection["thread_id"],
+                "task_id": artifact_projection["task_id"],
+            },
+            effective_execution={
+                "backend": "codex",
+                "profile": "strong",
+                "permission": "highest",
+                "backend_transport": "sdk",
+                "resolved_model": "gpt-5-codex",
+            },
+        )
+    )
+    result_error = runtime.handle_result(result_message, connection_id=second_connection_id)
+    if result_error is not None:
+        failures.append("canonical result unexpectedly returned an error.")
+    smoke_result["steps"]["event_result"] = {
+        "event": build_command_event(
+            message_id="msg_evt_001",
+            trace_id="trace_cmd_001",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:03",
+            event_id="event:cmd_001:running",
+            command_id="cmd_001",
+            event_type="running",
+            summary="command is running on the local runner",
+            effective_execution={
+                "backend": "codex",
+                "profile": "strong",
+                "permission": "highest",
+                "backend_transport": "sdk",
+                "resolved_model": "gpt-5-codex",
+            },
+            event_payload={
+                "thread_id": artifact_projection["thread_id"],
+                "task_id": artifact_projection["task_id"],
+            },
+        ),
+        "result": build_command_result(
+            message_id="msg_res_001",
+            trace_id="trace_cmd_001",
+            pc_id="pc_home",
+            connection_epoch=second_connection_epoch,
+            sent_at="2026-03-25T10:00:04",
+            result_id="result:cmd_001",
+            command_id="cmd_001",
+            final_status="done",
+            summary="Mock run completed successfully.",
+            structured_payload={
+                "kind": "run_result",
+                "thread_id": artifact_projection["thread_id"],
+                "task_id": artifact_projection["task_id"],
+            },
+            effective_execution={
+                "backend": "codex",
+                "profile": "strong",
+                "permission": "highest",
+                "backend_transport": "sdk",
+                "resolved_model": "gpt-5-codex",
+            },
+        ),
+        "event_error": running_event_error,
+        "result_error": result_error,
+    }
+    artifact_manifest_message = parse_pc_control_client_message(
+        build_artifact_manifest(
+            message_id="msg_art_001",
+            trace_id="trace_cmd_001",
+            pc_id="pc_home",
+            connection_epoch=second_connection_epoch,
+            sent_at="2026-03-25T10:00:05",
+            manifest_id="artifact_manifest:cmd_001",
+            command_id="cmd_001",
+            artifacts_root=projected_artifact_manifest["artifacts_root"],
+            source=projected_artifact_manifest["source"],
+            artifacts=projected_artifact_manifest["artifacts"],
+        )
+    )
+    artifact_manifest_error = runtime.handle_artifact_manifest(
+        artifact_manifest_message,
+        connection_id=second_connection_id,
+    )
+    if artifact_manifest_error is not None:
+        failures.append("canonical artifact_manifest unexpectedly returned an error.")
+    smoke_result["steps"]["output_chunk_artifact_manifest"] = {
+        "output_chunk": build_output_chunk(
+            message_id="msg_out_001",
+            trace_id="trace_cmd_001",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:04",
+            output_chunk_id="output:cmd_001:thread_cmd_001:1",
+            command_id="cmd_001",
+            stream_id=artifact_projection["stream_id"],
+            stream_id_source="derived_from_run_identity",
+            seq=1,
+            kind="assistant.delta",
+            delta="Hello",
+            status="streaming",
+        ),
+        "artifact_manifest": build_artifact_manifest(
+            message_id="msg_art_001",
+            trace_id="trace_cmd_001",
+            pc_id="pc_home",
+            connection_epoch=second_connection_epoch,
+            sent_at="2026-03-25T10:00:05",
+            manifest_id="artifact_manifest:cmd_001",
+            command_id="cmd_001",
+            artifacts_root=projected_artifact_manifest["artifacts_root"],
+            source=projected_artifact_manifest["source"],
+            artifacts=projected_artifact_manifest["artifacts"],
+        ),
+        "artifact_truth_projection": artifact_projection,
+        "output_chunk_error": output_chunk_error,
+        "artifact_manifest_error": artifact_manifest_error,
+    }
 
     runner_probe.active = 1
     runner_probe.queued = 1
@@ -260,8 +677,8 @@ def run_pc_control_plane_fixture_smoke(*, output_dir: Path, run_name: str) -> di
     runtime.enqueue_command(queued_dispatch)
     queued_pending = runtime.collect_pending_dispatches(
         pc_id="pc_home",
-        connection_id=connection_id,
-        connection_epoch=connection_epoch,
+        connection_id=second_connection_id,
+        connection_epoch=second_connection_epoch,
     )
     if len(queued_pending) != 1:
         failures.append(f"Expected 1 queued dispatch, got {len(queued_pending)}.")
@@ -274,7 +691,7 @@ def run_pc_control_plane_fixture_smoke(*, output_dir: Path, run_name: str) -> di
             message_id="msg_ack_002",
             trace_id="trace_cmd_002",
             pc_id="pc_home",
-            connection_epoch=connection_epoch,
+            connection_epoch=second_connection_epoch,
             sent_at="2026-03-25T10:00:05",
             command_id="cmd_002",
             ack_status=queued_admission["ack_status"],
@@ -283,7 +700,7 @@ def run_pc_control_plane_fixture_smoke(*, output_dir: Path, run_name: str) -> di
             error_code=queued_admission["error_code"],
         )
     )
-    queued_ack_error = runtime.handle_command_ack(queued_ack, connection_id=connection_id)
+    queued_ack_error = runtime.handle_command_ack(queued_ack, connection_id=second_connection_id)
     if queued_ack_error is not None:
         failures.append("queued command_ack unexpectedly returned an error.")
     smoke_result["steps"]["queued_dispatch"] = {
@@ -292,7 +709,7 @@ def run_pc_control_plane_fixture_smoke(*, output_dir: Path, run_name: str) -> di
             message_id="msg_ack_002",
             trace_id="trace_cmd_002",
             pc_id="pc_home",
-            connection_epoch=connection_epoch,
+            connection_epoch=second_connection_epoch,
             sent_at="2026-03-25T10:00:05",
             command_id="cmd_002",
             ack_status=queued_admission["ack_status"],
@@ -330,24 +747,6 @@ def run_pc_control_plane_fixture_smoke(*, output_dir: Path, run_name: str) -> di
         failures.append("unsupported backend dispatch did not fail with unsupported_backend.")
     smoke_result["steps"]["unsupported_backend"] = {"error": unsupported_error}
 
-    second_hello = parse_pc_control_client_message(
-        build_pc_hello(
-            message_id="msg_hello_002",
-            trace_id="trace_hello_002",
-            pc_id="pc_home",
-            sent_at="2026-03-25T10:01:00",
-            display_name="Home PC",
-            client_version="0.1.0-dev",
-            host_fingerprint="host_001",
-            runtime_fingerprint="runtime_001",
-            capabilities=build_execution_capabilities(config).to_payload(),
-        )
-    )
-    second_hello_response, second_connection_id, second_connection_epoch = runtime.handle_hello(
-        second_hello,
-        provided_token="relay-secret",
-    )
-    _ = parse_pc_control_server_message(second_hello_response)
     stale_heartbeat = parse_pc_control_client_message(
         build_heartbeat(
             message_id="msg_hb_stale_001",
@@ -372,27 +771,18 @@ def run_pc_control_plane_fixture_smoke(*, output_dir: Path, run_name: str) -> di
         "error": stale_error_payload,
     }
 
-    unsupported_server_types: list[str] = []
-    for message_type in ("event", "result", "output_chunk"):
-        try:
-            parse_pc_control_server_message({"type": message_type})
-        except Exception:
-            unsupported_server_types.append(message_type)
     smoke_result["gaps"] = [
         {
-            "kind": "missing_server_message_types",
-            "summary": "Current pc-control protocol/runtime still lacks canonical server message types for event/result/output_chunk.",
-            "missing_types": unsupported_server_types,
+            "kind": "output_resume_request_websocket_roundtrip_not_covered",
+            "summary": "This fixture now verifies reconnect -> output_resume_request -> selective replay in an in-memory loopback, but it still does not cover a real websocket roundtrip or multi-PC subscription surface.",
             "recorded": True,
         },
         {
-            "kind": "artifact_manifest_capability_only",
-            "summary": "Current workspace capability advertises artifact_manifest, but this control-plane skeleton does not yet emit canonical artifact manifest packets.",
+            "kind": "artifact_manifest_live_delivery_not_covered",
+            "summary": "This fixture now uses a real artifact_index.json + artifact_file_binding_index.json truth-projection, but it still does not cover a live /v1/files or COS upload roundtrip.",
             "recorded": True,
         },
     ]
-    if set(unsupported_server_types) != {"event", "result", "output_chunk"}:
-        failures.append(f"Unexpected unsupported server type set: {unsupported_server_types}")
 
     smoke_result["success"] = not failures
     smoke_result_path = run_root / "smoke_result.json"

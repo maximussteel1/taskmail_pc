@@ -9,7 +9,7 @@
 当前口径分成两条：
 
 1. `Codex SDK`：验证 `stream.events.jsonl` 是否存在，`seq` 是否连续，是否能投影出最小 `output_chunk` 候选
-2. `OpenCode SDK`：验证当前是否缺少同层持久化 stream 证据；如果缺少，要显式记录 gap，而不是默认忽略
+2. `OpenCode SDK`：验证当前是否已经落盘同层持久化 stream 证据，并继续显式记录“尚未证明真逐段 streaming”的残余 gap
 
 ## 相关入口
 
@@ -70,9 +70,11 @@ OpenCode：
 
 ### OpenCode
 
-1. 检查当前 run 目录下是否存在 `stream.events.jsonl`
-2. 检查 `sdk_turn.json` 是否存在
-3. 如果只有 `sdk_turn.json`、没有 `stream.events.jsonl`，显式记录 `missing_same_layer_stream_evidence` gap
+1. 读取 `runs/<task_id>/stream.events.jsonl`
+2. 校验 `seq` 是否从 `1` 开始连续递增
+3. 校验至少存在 `assistant.completed` 和终态 `turn.completed`
+4. 把带 `text` 或 `delta` 的事件投影成候选 `output_chunk`
+5. 继续把“当前仍未证明 true incremental streaming”作为 residual gap 显式记录
 
 ## 与 pytest 的关系
 
@@ -90,4 +92,4 @@ OpenCode：
 
 - `sdk_stream_smoke.py` 的入口参数、验证标准或 gap 读法变化
 - `Codex SDK` 的 `stream.events.jsonl` 合同变化
-- `OpenCode SDK` 开始落盘同层 seq 流事件，导致当前 gap 失效
+- `OpenCode SDK` 的 persisted stream 合同或 residual gap 读法变化

@@ -93,6 +93,7 @@ class AppConfig:
     relay_verify_tls: bool = True
     relay_ca_file: str = ""
     relay_auto_fallback_email: bool = False
+    external_delivery_backend_preference: str = "auto"
     from_name: str = "Mail Runner"
     from_addr: str = ""
     mock_sleep_seconds: float = 1.0
@@ -167,6 +168,11 @@ def _coerce_value(field_name: str, value: Any) -> Any:
         normalized = str(value).strip().lower()
         if normalized not in {"email", "relay"}:
             raise ValueError("outbound_transport must be either 'email' or 'relay'")
+        return normalized
+    if field_name == "external_delivery_backend_preference":
+        normalized = str(value).strip().lower()
+        if normalized not in {"auto", "cos", "file_surface"}:
+            raise ValueError("external_delivery_backend_preference must be one of 'auto', 'cos', or 'file_surface'")
         return normalized
     return str(value)
 

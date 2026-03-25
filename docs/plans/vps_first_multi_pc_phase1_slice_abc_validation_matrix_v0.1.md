@@ -179,7 +179,7 @@
 
 ## 6. 建议的测试文件落点
 
-repo-side 第一批建议新增或扩展：
+repo-side 当前已落地并应继续扩展：
 
 - `tests/test_relay_server_pc_control_protocol.py`
 - `tests/test_relay_server_pc_credential_registry.py`
@@ -187,11 +187,14 @@ repo-side 第一批建议新增或扩展：
 - `tests/test_relay_server_workspace_inventory_store.py`
 - `tests/test_relay_server_pc_control_runtime.py`
 - `tests/test_pc_control_plane_client.py`
+
+未来如果把 host 生命周期和自动注册真正接到常驻运行线，再考虑新增：
+
 - `tests/test_host_pc_control_registration.py`
 
 ## 7. Merge Gate
 
-Slice A-C 合并前，至少应有以下机器可读证据：
+截至 `2026-03-25`，仓库内已经拿到以下 repo-side 机器可读证据：
 
 - `pc_hello / hello_ack` 单测通过
 - `connection_epoch` fencing 单测通过
@@ -199,7 +202,12 @@ Slice A-C 合并前，至少应有以下机器可读证据：
 - `execution_policy` 能力快照单测通过
 - 至少一条 runtime 集成测试覆盖 `hello -> heartbeat -> workspace_snapshot`
 
-如果缺少这些证据，不建议进入 Slice D `command_dispatch`。
+这组证据当前的作用不再是“是否允许开始进入 Slice D”，而是：
+
+- 作为 Slice A-F 已落地后的基础回归门，并在继续推进 Slice G/H 前持续保留
+- 防止后续重构把 A-C 已落地骨架打回“只有计划没有实现”的状态
+
+如果这些证据在后续改动中失效，不建议继续推进 canonical `output_chunk / artifact_manifest` 实现。
 
 ## 8. 暂不要求的证据
 

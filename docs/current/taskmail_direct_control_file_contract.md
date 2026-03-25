@@ -2,7 +2,7 @@
 
 ## Status
 
-- Date: 2026-03-24
+- Date: 2026-03-25
 - Scope: 当前 relay 暴露的 TaskMail 窄范围 direct surface、bridge/direct-result 语义、`/v1/files` file surface，以及 closeout 证据落盘
 - Role: 当前仓库里与 TaskMail direct relay/control/file 行为直接对应的 canonical current protocol 文档
 
@@ -38,6 +38,10 @@
 
 - 当前 schema 是 `phase2-direct-outbound-contract-v1`
 - 当前只接受 action=`new_task`
+- `dispatch_metadata.fallback_policy` 当前接受：
+  - `mail`
+  - `none`
+- 其中 `none` 只表示 direct-only client 的合法声明；server 当前不会因为它是 `none` 而直接拒绝请求
 - accepted path 会桥接回 canonical 首封任务邮件入口，不会绕开现有 `Repo:` / `Task:` 语义
 - user-visible `[ACCEPTED]` / `[RUNNING]` / terminal mail 仍沿用当前邮件链路与状态语义
 - packet store 当前会把 accepted、fallback-classified rejection、hard rejection 统一持久化；accepted 后续失败还会保留 `last_error_code` / `last_error_message`
@@ -103,6 +107,10 @@
 - 当前只支持两种 action：
   - `status`
   - `reply`
+- `dispatch_metadata.fallback_policy` 当前接受：
+  - `mail`
+  - `none`
+- 其中 `none` 只表示 direct-only client 的合法声明；server 当前不会因为它是 `none` 而在 parser 层直接拒绝请求，也不会仅因该值存在就假定客户端后续仍会走 mail fallback
 - 当前只支持 `target.scope = current_session`
 - target identity 当前使用：
   - `workspace_id`
@@ -160,6 +168,8 @@ plain `reply` 当前边界：
 ### 2.6 Relay `/v1/files` File Surface
 
 - 当 `outbound_transport=relay`、存在 `relay_url + relay_transport_token`，且没有使用 COS external delivery 时，PC runtime 当前可把超阈值 artifact 上传到 relay host 的 `/v1/files`
+- 当部署显式设置 `external_delivery_backend_preference=file_surface` 时，即使 COS 仍保留配置，PC runtime 当前也会优先把可接受的超阈值 artifact 上传到 relay host 的 `/v1/files`
+- 如果 artifact 超过当前 live `/v1/files` 单文件上限，且 COS 仍可用，cutover 期间 runtime 当前会只对这类 oversize artifact 保留 `COS` 兼容交付，而不是让整条 owner lane 退回 `COS`
 - file-surface URL 当前由 `ws(s)://<relay-host>/relay` 派生为 `http(s)://<relay-host>/v1/files`
 - 当前 schema version 是 `taskmail-control-artifact-contract-v1`
 - 当前单文件上传上限是 `32 MiB`
@@ -171,6 +181,7 @@ plain `reply` 当前边界：
 - 因此当前文本文件或 JSON sidecar 若走 `/v1/files`，应使用 `kind=file`，同时保留准确 `mime_type`
 - local artifact truth 仍是 `RunArtifact` + `artifact_index.json`
 - transport-facing `artifact_id -> file_id` 绑定不会污染 `artifact_index.json`，而是单独写入 `artifact_file_binding_index.json`
+- 成功的 oversized external delivery 现在还会单独写入 `external_delivery_index.json`，保留 provider/url/expires_at 级别的 user-facing evidence，而不反向改写 `artifact_index.json`
 - user-visible 邮件当前仍保留 `Artifacts` 区域，并额外生成 `External Deliveries` 区域；超大文件不再继续作为 MIME 附件发送
 
 - 该 Bearer transport token 当前也与 shared `/control` 复用同一认证路径
@@ -253,8 +264,10 @@ terminal status mail 发送后，runtime 当前会在：
 对 `/v1/files` 上传，runtime 当前会在 artifact 根目录下写：
 
 - `artifact_file_binding_index.json`
+- `external_delivery_index.json`
 
-当前 schema 是 `taskmail-artifact-file-binding-index-v1`。
+- `artifact_file_binding_index.json` 当前 schema 是 `taskmail-artifact-file-binding-index-v1`
+- `external_delivery_index.json` 当前 schema 是 `taskmail-external-delivery-index-v1`
 
 该 sidecar 的职责是：
 

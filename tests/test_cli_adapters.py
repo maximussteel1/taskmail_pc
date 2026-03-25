@@ -386,6 +386,24 @@ def test_codex_adapter_adds_mapped_model_for_profile(tmp_path) -> None:
     assert ["-m", "gpt-5-codex"] == command[6:8]
 
 
+def test_codex_adapter_ignores_default_profile_without_mapping(tmp_path) -> None:
+    snapshot = _snapshot(tmp_path, BACKEND_CODEX)
+    snapshot.profile = "default"
+    adapter = CodexAdapter(AppConfig(codex_command="codex"))
+    resolved = resolve_command_prefix("codex", "codex")
+    prompt_path = tmp_path / "prompt.txt"
+    prompt_path.write_text("prompt", encoding="utf-8")
+
+    command, _, _ = adapter._build_backend_command(  # type: ignore[attr-defined]
+        task=snapshot,
+        resolved=resolved,
+        prompt_path=prompt_path,
+        cwd=tmp_path,
+    )
+
+    assert "-m" not in command
+
+
 def test_codex_adapter_builds_resume_command(tmp_path) -> None:
     snapshot = _snapshot(tmp_path, BACKEND_CODEX)
     snapshot.run_mode = "resume"

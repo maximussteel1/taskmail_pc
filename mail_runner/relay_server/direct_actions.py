@@ -35,6 +35,8 @@ _DIRECT_ACTION_NEW_TASK = "new_task"
 _DIRECT_ACTION_SYNC_PROJECT_FOLDERS = "sync_project_folders"
 _DIRECT_ORIGIN_CLIENT = "android_taskmail"
 _FALLBACK_POLICY_MAIL = "mail"
+_FALLBACK_POLICY_NONE = "none"
+_DIRECT_NEW_TASK_ALLOWED_FALLBACK_POLICIES = frozenset({_FALLBACK_POLICY_MAIL, _FALLBACK_POLICY_NONE})
 _DIRECT_TRANSPORT_NAME = "relay_direct_new_task"
 _DIRECT_PROJECT_SYNC_TRANSPORT_NAME = "relay_direct_project_sync"
 _DIRECT_PROJECT_SYNC_MAIL_BRIDGE_TRANSPORT_NAME = "relay_direct_project_sync_mail_bridge"
@@ -610,8 +612,8 @@ def _parse_direct_new_task_payload(
         raise RelayDirectActionError("invalid_payload", f"dispatch_metadata.channel must be {_DIRECT_CHANNEL}")
 
     fallback_policy = _require_text(dispatch_payload.get("fallback_policy"), "dispatch_metadata.fallback_policy")
-    if fallback_policy != _FALLBACK_POLICY_MAIL:
-        raise RelayDirectActionError("invalid_payload", "dispatch_metadata.fallback_policy must be mail")
+    if fallback_policy not in _DIRECT_NEW_TASK_ALLOWED_FALLBACK_POLICIES:
+        raise RelayDirectActionError("invalid_payload", "dispatch_metadata.fallback_policy must be mail or none")
 
     request_id = _require_text(task_payload.get("request_id"), "task_run_packet.request_id")
     if _require_text(client_trace_id, "client_trace_id") != request_id:

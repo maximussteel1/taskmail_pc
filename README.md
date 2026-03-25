@@ -287,7 +287,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\safe_shutdown_mail
 
 - `.\.venv\Scripts\python.exe .\scripts\pc_control_plane_fixture_smoke.py`
 - 这条 smoke 同样不挂在 `tests/` 主测试集里，结果默认写到 `._tmp_pc_control_plane_fixture_smoke\<run-name>\smoke_result.json`
-- 它会复核当前已实现的 `pc_hello / hello_ack / workspace_snapshot / command_dispatch / command_ack / connection_epoch` 骨架，并显式记录 `event/result/output_chunk` gap
+- 它会复核当前已实现的 `pc_hello / hello_ack / workspace_snapshot / command_dispatch / command_ack / event / output_chunk / result / artifact_manifest / connection_epoch` 骨架；当前 `artifact_manifest` 已走真实 `artifact_index.json + artifact_file_binding_index.json` 本地 truth-projection，并显式记录 replay / higher-level evidence 级 gap
 - 使用参考见 [docs/reference/pc_control_plane_fixture_smoke.md](docs/reference/pc_control_plane_fixture_smoke.md)
 - 当前验证结果见 [docs/reference/pc_control_plane_fixture_smoke_validation.md](docs/reference/pc_control_plane_fixture_smoke_validation.md)
 
@@ -594,7 +594,7 @@ question_id: phase2_device_validation
 
 - 当前代码行为仍是 mail-first，但 future-direction active mainline 已切到 `VPS-first 多 PC 控制面`
 - `phase2/phase3/phase4/post_creation/taskmail_*` 文档当前应按 compatibility / closeout / migration reference 读取，不再是未来主线 owner queue
-- 新主线当前优先事项是：`PC` 节点注册、`workspace_snapshot`、`command/event/output_chunk/result/artifact_manifest` 协议骨架
+- 新主线当前优先事项已经推进到：在已落地 `PC` 节点注册、`workspace_snapshot`、`command / event / output_chunk / result / artifact_manifest` first-pass 骨架、persisted-output reconnect resend、显式 `output_resume_request` 以及本地 artifact truth-projection evidence 基础上，继续做更高层 resume 联调证据、`OpenCode` stream 证据与 live external-delivery 级 artifact evidence
 - `VPS ingress truth v1` 当前更适合作为新主线的前置参考，而不是单独的“下一条主线”
 - 如需重启 HTML / `P9`，必须显式 reopen；不能因为旧文档仍在仓库里就默认恢复为当前主线
 - 如果后续重新打开 session / routing 方向，再讨论 non-reply reuse、cross-workspace routing 和更强的 session targeting，而不是继续沿用旧 roadmap 口径

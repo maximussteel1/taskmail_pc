@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Iterable
 
 from .workspace import WorkspaceManager
 
@@ -47,6 +48,14 @@ def load_stream_events(path: str | Path) -> list[StreamEvent]:
             raise ValueError(f"Stream event line {line_no} must be a JSON object")
         events.append(_coerce_stream_event(payload, line_no))
     return events
+
+
+def write_stream_events(path: str | Path, events: Iterable[StreamEvent]) -> None:
+    file_path = Path(path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    rendered = [json.dumps(asdict(event), ensure_ascii=False) for event in events]
+    payload = ("\n".join(rendered) + "\n") if rendered else ""
+    file_path.write_text(payload, encoding="utf-8")
 
 
 def _coerce_stream_event(payload: dict[str, object], line_no: int) -> StreamEvent:

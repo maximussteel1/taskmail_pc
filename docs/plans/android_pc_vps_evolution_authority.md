@@ -14,6 +14,7 @@ This document aligns repository-side planning with the explicit 2026-03-25 direc
 - multiple `PC` nodes become first-class managed executors on one platform
 - `workspace` is frozen as a `pc-scoped` local execution directory
 - current mail-first / direct-sidecar slices become compatibility and closeout material, not the long-term mainline
+- mail is treated as a transitional compatibility layer during cutover, not as a permanent parallel control plane
 
 This document does **not** replace current implementation-truth docs such as:
 
@@ -54,8 +55,9 @@ Unless a later authority doc reopens them, the following assumptions are now fix
 6. `session` binds to one `workspace`, and therefore to one `PC`.
 7. V1 does not support cross-PC hot migration of a running `session` or `run`.
 8. Streaming output may become a first-class protocol object, but it must remain distinct from structured `event` and final `result`.
-9. Mail may remain as backup/export/notification/compatibility infrastructure, but it is no longer the chosen future mainline control plane.
-10. Current `docs/current/*` files remain authoritative for repository behavior until code actually changes.
+9. Mail may remain only as cutover-period migration/export/notification/compatibility infrastructure; the target end state after VPS cutover is to retire mail as an active control-plane and fallback lane.
+10. Artifact external delivery may temporarily keep `COS` as a cutover-period compatibility lane, but the planned owner lane is the VPS-hosted file surface; after `/v1/files` cutover is operationally stable, the target end state is to retire `COS`-specific external-delivery routing rather than keep long-term dual-lane coexistence.
+11. Current `docs/current/*` files remain authoritative for repository behavior until code actually changes.
 
 ## Assumptions Explicitly Retired
 
@@ -66,6 +68,7 @@ The following earlier assumptions are no longer active planning authority for th
 3. `VPS ingress truth v1` should stay outside the current mainline until the existing direct line fully closes.
 4. `workspace` should be treated as a platform-global shared execution object.
 5. The long-term product path should keep mail-first truth and only bolt on more direct exceptions.
+6. Mail should remain a permanent backup/fallback lane after the VPS-first cutover lands.
 
 These assumptions still explain older documents and earlier validation artifacts.
 They are no longer the controlling baseline for new planning work.
@@ -79,7 +82,10 @@ For the current planning line, the chosen product boundary is:
 - `workspace` is owned by exactly one `PC`
 - `session` and `run` are routed through `VPS`, but executed on the bound `PC`
 - `backend / profile / permission / backend_transport` must become first-class execution-policy fields in the control plane rather than remaining scattered in mail-era semantics or local-only flags
-- `mail`, if kept, is derived from canonical control-plane state rather than defining it
+- `mail`, during cutover, is derived from canonical control-plane state rather than defining it
+- artifact external delivery, during cutover, may still read from temporary `COS` evidence, but the intended owner lane is `VPS /v1/files`
+- after the VPS-first cutover is operationally stable, the planned direction is to retire mail as an active control-plane/fallback surface rather than keep long-term dual-path coexistence
+- after the VPS-first artifact cutover is operationally stable, the planned direction is to retire `COS` as an active external-delivery lane rather than keep long-term `/v1/files + COS` coexistence
 
 This means repository-side planning is now allowed to:
 
@@ -112,6 +118,8 @@ The following planning consequences now apply immediately:
 3. `VPS ingress truth v1` stops being a separate “afterward candidate line” and should instead be read as a useful precursor/reference inside the new mainline.
 4. New active plans should organize around `command / event / output_chunk / result / artifact`, not around adding more mail/direct special cases.
 5. Index docs such as `docs/plans/README.md`, `docs/plans/coding_backlog.md`, `state.md`, and repository overviews should stop describing the old direct line as the current future mainline.
+6. New planning work should not assume permanent mail fallback parity; any temporary mail retention must be justified as cutover/migration scaffolding only.
+7. New planning work should treat `VPS /v1/files` as the intended artifact external-delivery owner lane; any temporary `COS` retention must be justified as cutover-period compatibility scaffolding only.
 
 ## Immediate Next Steps
 
@@ -135,6 +143,8 @@ From this authority, the next repository-side planning steps are:
    - command routing
    - event/result persistence
 4. Keep current mail/direct slices readable as compatibility baseline until actual cutover code lands.
+5. Start expressing mail-related work as cutover/decommission sequencing rather than as long-term coexistence design.
+6. Express `COS` retention, if any, as temporary artifact cutover/decommission sequencing rather than as a permanent second owner lane.
 
 ## Cleanup Rule
 

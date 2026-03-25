@@ -45,12 +45,19 @@ from .direct_actions import (
 from .loopback import LoopbackRelayServer
 from .packet_store import InMemoryAcceptedPacketStore, PersistentAcceptedPacketStore
 from .pc_control_protocol import (
+    PcArtifactManifestMessage,
     PcCommandAckMessage,
+    PcCommandEventMessage,
+    PcCommandResultMessage,
+    PcControlProtocolError,
+    PcOutputChunkMessage,
     PcHeartbeatMessage,
     PcHelloMessage,
     PcWorkspaceSnapshotMessage,
+    build_command_dispatch,
     build_pc_error,
     parse_pc_control_client_message,
+    parse_pc_control_server_message,
 )
 from .pc_control_runtime import PcCommandDispatchValidationError, PcControlRuntime, build_pc_control_runtime
 from .post_creation_actions import (
@@ -66,6 +73,7 @@ _HTTP_HEADER_LIMIT_BYTES = 64 * 1024
 _RELAY_WEBSOCKET_PATH = "/relay"
 _CONTROL_WEBSOCKET_PATH = "/control"
 _PC_CONTROL_WEBSOCKET_PATH = "/pc-control"
+_PC_CONTROL_OPERATOR_DISPATCH_PATH = "/debug/pc-control/dispatch"
 
 
 def _timestamp() -> str:
@@ -316,6 +324,87 @@ def build_http_server(
 
         def do_POST(self) -> None:  # noqa: N802
             path = self._normalized_path()
+            if path == _PC_CONTROL_OPERATOR_DISPATCH_PATH:
+                if not self._require_transport_token():
+                    self._discard_request_body()
+                    return
+                if pc_control_runtime is None:
+                    self._discard_request_body()
+                    self._write_json(
+                        503,
+                        {
+                            "status": "error",
+                            "error_code": "pc_control_unavailable",
+                            "error_message": "pc_control_runtime is not configured",
+                            "retryable": True,
+                        },
+                    )
+                    return
+                try:
+                    raw_length = str(self.headers.get("Content-Length", "") or "").strip()
+                    content_length = int(raw_length)
+                    if content_length < 0:
+                        raise ValueError("Content-Length must be non-negative")
+                    body = self.rfile.read(content_length)
+                    payload = json.loads(body.decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        raise ValueError("request body must be a JSON object")
+                    dispatch_payload, response_command = _build_operator_pc_dispatch(
+                        payload,
+                        pc_control_runtime=pc_control_runtime,
+                    )
+                    record = pc_control_runtime.enqueue_command(parse_pc_control_server_message(dispatch_payload))
+                except json.JSONDecodeError as exc:
+                    self._write_json(
+                        400,
+                        {
+                            "status": "error",
+                            "error_code": "invalid_json",
+                            "error_message": f"request body is not valid JSON: {exc}",
+                            "retryable": False,
+                        },
+                    )
+                    return
+                except (ValueError, PcControlProtocolError) as exc:
+                    self._write_json(
+                        400,
+                        {
+                            "status": "error",
+                            "error_code": "invalid_payload",
+                            "error_message": str(exc),
+                            "retryable": False,
+                        },
+                    )
+                    return
+                except PcCommandDispatchValidationError as exc:
+                    self._write_json(
+                        409,
+                        {
+                            "status": "error",
+                            "error_code": exc.code,
+                            "error_message": exc.message,
+                            "retryable": False,
+                        },
+                    )
+                    return
+                self._write_json(
+                    200,
+                    {
+                        "status": "accepted",
+                        "command": response_command,
+                        "record": {
+                            "pc_id": record.pc_id,
+                            "workspace_id": record.workspace_id,
+                            "command_id": record.command_id,
+                            "command_type": record.command_type,
+                            "status": record.status,
+                            "trace_id": record.trace_id,
+                            "dispatch_message_id": record.dispatch_message_id,
+                            "created_at": record.created_at,
+                        },
+                    },
+                )
+                return
             if path != "/v1/files":
                 self._write_json(
                     404,
@@ -395,6 +484,77 @@ def _extract_bearer_token(request_headers: Any) -> str:
     if not raw_auth.lower().startswith("bearer "):
         return ""
     return raw_auth[7:].strip()
+
+
+def _require_text_field(payload: dict[str, Any], field_name: str) -> str:
+    value = payload.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty string")
+    return value.strip()
+
+
+def _optional_text_field(payload: dict[str, Any], field_name: str) -> str | None:
+    value = payload.get(field_name)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a non-empty string when provided")
+    return value.strip()
+
+
+def _mapping_field(payload: dict[str, Any], field_name: str) -> dict[str, Any]:
+    value = payload.get(field_name)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be a JSON object")
+    return dict(value)
+
+
+def _build_operator_pc_dispatch(
+    payload: dict[str, Any],
+    *,
+    pc_control_runtime: PcControlRuntime,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    pc_id = _require_text_field(payload, "pc_id")
+    workspace_id = _require_text_field(payload, "workspace_id")
+    command_type = _require_text_field(payload, "command_type")
+    session_id = _optional_text_field(payload, "session_id")
+    execution_policy = _mapping_field(payload, "execution_policy")
+    command_payload = _mapping_field(payload, "payload")
+
+    node = pc_control_runtime.node_store.get_node(pc_id)
+    if node is None or node.status != "online":
+        raise PcCommandDispatchValidationError("pc_not_online", f"pc_id is not online: {pc_id}")
+
+    command_id = _optional_text_field(payload, "command_id") or f"cmd:{pc_id}:{_timestamp()}"
+    trace_id = _optional_text_field(payload, "trace_id") or f"trace:pc-control:operator-dispatch:{pc_id}:{command_id}"
+    sent_at = _optional_text_field(payload, "sent_at") or _timestamp()
+    message_id = _optional_text_field(payload, "message_id") or f"operator-dispatch:{pc_id}:{command_id}"
+    dispatch = build_command_dispatch(
+        message_id=message_id,
+        trace_id=trace_id,
+        pc_id=pc_id,
+        connection_epoch=node.current_connection_epoch,
+        sent_at=sent_at,
+        command_id=command_id,
+        command_type=command_type,
+        workspace_id=workspace_id,
+        session_id=session_id,
+        execution_policy=execution_policy,
+        command_payload=command_payload,
+    )
+    return dispatch, {
+        "pc_id": pc_id,
+        "workspace_id": workspace_id,
+        "command_id": command_id,
+        "command_type": command_type,
+        "session_id": session_id,
+        "trace_id": trace_id,
+        "message_id": message_id,
+        "connection_epoch": node.current_connection_epoch,
+        "sent_at": sent_at,
+    }
 
 
 def _build_ssl_context(config: RelayServerConfig) -> ssl.SSLContext | None:
@@ -1028,6 +1188,7 @@ async def _pc_control_websocket_handler(websocket, *, pc_control_runtime: PcCont
     try:
         async for raw_message in websocket:
             allow_pending_dispatches = False
+            allow_output_resume_requests = False
             try:
                 payload = json.loads(raw_message)
                 if not isinstance(payload, dict):
@@ -1067,12 +1228,13 @@ async def _pc_control_websocket_handler(websocket, *, pc_control_runtime: PcCont
                             pc_id = message.pc_id
                             connection_epoch = next_epoch
                             allow_pending_dispatches = True
+                            allow_output_resume_requests = True
                     else:
                         if server_connection_id is None or pc_id is None or connection_epoch is None:
                             responses = [
                                 _protocol_error(
                                     code="missing_connection",
-                                    message="pc_hello is required before heartbeat or workspace_snapshot",
+                                    message="pc_hello is required before other pc-control client messages",
                                     trace_id=message.trace_id,
                                     payload_pc_id=message.pc_id,
                                     payload_epoch=message.connection_epoch,
@@ -1098,6 +1260,25 @@ async def _pc_control_websocket_handler(websocket, *, pc_control_runtime: PcCont
                             allow_pending_dispatches = response is None
                         elif isinstance(message, PcCommandAckMessage):
                             response = pc_control_runtime.handle_command_ack(message, connection_id=server_connection_id)
+                            responses = [] if response is None else [response]
+                            allow_pending_dispatches = response is None
+                        elif isinstance(message, PcCommandEventMessage):
+                            response = pc_control_runtime.handle_event(message, connection_id=server_connection_id)
+                            responses = [] if response is None else [response]
+                            allow_pending_dispatches = response is None
+                        elif isinstance(message, PcCommandResultMessage):
+                            response = pc_control_runtime.handle_result(message, connection_id=server_connection_id)
+                            responses = [] if response is None else [response]
+                            allow_pending_dispatches = response is None
+                        elif isinstance(message, PcOutputChunkMessage):
+                            response = pc_control_runtime.handle_output_chunk(message, connection_id=server_connection_id)
+                            responses = [] if response is None else [response]
+                            allow_pending_dispatches = response is None
+                        elif isinstance(message, PcArtifactManifestMessage):
+                            response = pc_control_runtime.handle_artifact_manifest(
+                                message,
+                                connection_id=server_connection_id,
+                            )
                             responses = [] if response is None else [response]
                             allow_pending_dispatches = response is None
                         else:
@@ -1126,6 +1307,26 @@ async def _pc_control_websocket_handler(websocket, *, pc_control_runtime: PcCont
                             code=exc.code,
                             message=exc.message,
                             trace_id=f"trace:pc-control:dispatch:{pc_id}",
+                            payload_pc_id=pc_id,
+                            payload_epoch=connection_epoch,
+                        )
+                    ]
+
+            if allow_output_resume_requests and server_connection_id is not None and pc_id is not None and connection_epoch is not None:
+                try:
+                    responses.extend(
+                        pc_control_runtime.collect_output_resume_requests(
+                            pc_id=pc_id,
+                            connection_id=server_connection_id,
+                            connection_epoch=connection_epoch,
+                        )
+                    )
+                except PcCommandDispatchValidationError as exc:
+                    responses = [
+                        _protocol_error(
+                            code=exc.code,
+                            message=exc.message,
+                            trace_id=f"trace:pc-control:resume:{pc_id}",
                             payload_pc_id=pc_id,
                             payload_epoch=connection_epoch,
                         )

@@ -45,6 +45,8 @@ _POST_CREATION_SCHEMA_VERSION = "post-creation-session-action-contract-v1"
 _DIRECT_CHANNEL = "taskmail_android_direct"
 _DIRECT_ORIGIN_CLIENT = "android_taskmail"
 _FALLBACK_POLICY_MAIL = "mail"
+_FALLBACK_POLICY_NONE = "none"
+_DIRECT_POST_CREATION_ALLOWED_FALLBACK_POLICIES = frozenset({_FALLBACK_POLICY_MAIL, _FALLBACK_POLICY_NONE})
 _DIRECT_ACTION_STATUS = "status"
 _DIRECT_ACTION_REPLY = "reply"
 _CURRENT_SESSION_SCOPE = "current_session"
@@ -256,8 +258,8 @@ def _parse_post_creation_common_payload(
         raise RelayDirectActionError("invalid_payload", f"dispatch_metadata.channel must be {_DIRECT_CHANNEL}")
 
     fallback_policy = _require_text(dispatch_payload.get("fallback_policy"), "dispatch_metadata.fallback_policy")
-    if fallback_policy != _FALLBACK_POLICY_MAIL:
-        raise RelayDirectActionError("invalid_payload", "dispatch_metadata.fallback_policy must be mail")
+    if fallback_policy not in _DIRECT_POST_CREATION_ALLOWED_FALLBACK_POLICIES:
+        raise RelayDirectActionError("invalid_payload", "dispatch_metadata.fallback_policy must be mail or none")
 
     request_id = _require_text(task_payload.get("request_id"), "task_run_packet.request_id")
     if _require_text(client_trace_id, "client_trace_id") != request_id:
