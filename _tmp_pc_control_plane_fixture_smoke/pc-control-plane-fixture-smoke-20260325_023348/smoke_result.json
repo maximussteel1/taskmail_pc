@@ -1,0 +1,160 @@
+{
+  "success": true,
+  "run_name": "pc-control-plane-fixture-smoke-20260325_023348",
+  "steps": {
+    "hello": {
+      "connection_id": "pc-ctrl:pc_home:228016cf",
+      "connection_epoch": 1,
+      "hello_ack": {
+        "schema_version": "v1",
+        "type": "hello_ack",
+        "message_id": "hello_ack:19e628ed",
+        "trace_id": "trace_hello_001",
+        "pc_id": "pc_home",
+        "connection_epoch": 1,
+        "sent_at": "2026-03-25T10:00:00",
+        "payload": {
+          "accepted": true,
+          "keepalive_seconds": 15
+        }
+      }
+    },
+    "workspace_snapshot": {
+      "error": null,
+      "workspace_count": 1
+    },
+    "accepted_dispatch": {
+      "dispatch": {
+        "schema_version": "v1",
+        "type": "command_dispatch",
+        "message_id": "msg_cmd_001",
+        "trace_id": "trace_cmd_001",
+        "pc_id": "pc_home",
+        "connection_epoch": 1,
+        "sent_at": "2026-03-25T10:00:00",
+        "payload": {
+          "command_id": "cmd_001",
+          "command_type": "new_task",
+          "workspace_id": "workspace_001",
+          "session_id": null,
+          "execution_policy": {
+            "backend": "codex",
+            "profile": "strong",
+            "permission": "highest",
+            "backend_transport": "sdk"
+          },
+          "payload": {
+            "task_text": "Refactor floor_shear.py"
+          }
+        }
+      },
+      "ack": {
+        "schema_version": "v1",
+        "type": "command_ack",
+        "message_id": "msg_ack_001",
+        "trace_id": "trace_cmd_001",
+        "pc_id": "pc_home",
+        "connection_epoch": 1,
+        "sent_at": "2026-03-25T10:00:03",
+        "payload": {
+          "command_id": "cmd_001",
+          "ack_status": "accepted",
+          "queue_position": null,
+          "reason": null,
+          "error_code": null
+        }
+      }
+    },
+    "queued_dispatch": {
+      "dispatch": {
+        "schema_version": "v1",
+        "type": "command_dispatch",
+        "message_id": "msg_cmd_002",
+        "trace_id": "trace_cmd_002",
+        "pc_id": "pc_home",
+        "connection_epoch": 1,
+        "sent_at": "2026-03-25T10:00:00",
+        "payload": {
+          "command_id": "cmd_002",
+          "command_type": "new_task",
+          "workspace_id": "workspace_001",
+          "session_id": null,
+          "execution_policy": {
+            "backend": "opencode",
+            "profile": "fast",
+            "permission": "default",
+            "backend_transport": "sdk"
+          },
+          "payload": {
+            "task_text": "Create a smoke note"
+          }
+        }
+      },
+      "ack": {
+        "schema_version": "v1",
+        "type": "command_ack",
+        "message_id": "msg_ack_002",
+        "trace_id": "trace_cmd_002",
+        "pc_id": "pc_home",
+        "connection_epoch": 1,
+        "sent_at": "2026-03-25T10:00:05",
+        "payload": {
+          "command_id": "cmd_002",
+          "ack_status": "accepted_but_queued",
+          "queue_position": 2,
+          "reason": "command accepted into the local runner queue",
+          "error_code": null
+        }
+      }
+    },
+    "unsupported_backend": {
+      "error": {
+        "code": "unsupported_backend",
+        "message": "backend is not supported by target pc/workspace: claude"
+      }
+    },
+    "stale_epoch": {
+      "first_connection_id": "pc-ctrl:pc_home:228016cf",
+      "first_epoch": 1,
+      "second_connection_id": "pc-ctrl:pc_home:2e8d360e",
+      "second_epoch": 2,
+      "error": {
+        "schema_version": "v1",
+        "type": "error",
+        "message_id": "error:26778933",
+        "trace_id": "trace_hb_stale_001",
+        "pc_id": "pc_home",
+        "connection_epoch": 1,
+        "sent_at": "2026-03-25T10:00:00",
+        "payload": {
+          "code": "stale_connection_epoch",
+          "message": "stale connection_epoch for pc_home"
+        }
+      }
+    }
+  },
+  "gaps": [
+    {
+      "kind": "missing_server_message_types",
+      "summary": "Current pc-control protocol/runtime still lacks canonical server message types for event/result/output_chunk.",
+      "missing_types": [
+        "event",
+        "result",
+        "output_chunk"
+      ],
+      "recorded": true
+    },
+    {
+      "kind": "artifact_manifest_capability_only",
+      "summary": "Current workspace capability advertises artifact_manifest, but this control-plane skeleton does not yet emit canonical artifact manifest packets.",
+      "recorded": true
+    }
+  ],
+  "cleanup": {
+    "required": false,
+    "cleanup_ok": true,
+    "reason": "fixture smoke; no external process or listener is started"
+  },
+  "failures": [],
+  "smoke_result_path": "E:\\projects\\mail_based_task_manager\\_tmp_pc_control_plane_fixture_smoke\\pc-control-plane-fixture-smoke-20260325_023348\\smoke_result.json"
+}

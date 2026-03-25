@@ -1,0 +1,27 @@
+{
+  "task_id": "task_003",
+  "thread_id": "thread_001",
+  "backend": "codex",
+  "status": "success",
+  "exit_code": 0,
+  "started_at": "2026-03-25T02:13:49",
+  "finished_at": "2026-03-25T02:13:54",
+  "stdout_file": "runs/task_003/stdout.log",
+  "stderr_file": "runs/task_003/stderr.log",
+  "summary_file": "runs/task_003/summary.md",
+  "artifacts_dir": "runs/task_003/artifacts",
+  "changed_files": [
+    "<empty>"
+  ],
+  "tests_passed": null,
+  "error_type": null,
+  "error_message": null,
+  "question_id": null,
+  "question_text": null,
+  "pending_choices": [],
+  "question_set_id": null,
+  "pending_questions": [],
+  "backend_session_id": "019d210d-4986-7e61-9c68-3d9be1d16e9c",
+  "backend_session_resumable": true,
+  "backend_transport": "sdk"
+}

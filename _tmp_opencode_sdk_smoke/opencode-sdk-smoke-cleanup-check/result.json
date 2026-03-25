@@ -1,0 +1,62 @@
+{
+  "success": true,
+  "failures": [],
+  "base_url": "http://127.0.0.1:59119",
+  "workspace": "E:\\projects\\mail_based_task_manager\\_tmp_opencode_sdk_smoke\\opencode-sdk-smoke-cleanup-check\\workspace",
+  "provider_id": "alibaba-coding-plan-cn",
+  "model_id": "qwen3.5-plus",
+  "session_id": "ses_2df52e62effe6E5QbV5iZ2eGQh",
+  "filename": "smoke_note.txt",
+  "expected_text": "hello from opencode sdk smoke",
+  "prompt": "Create a UTF-8 text file named smoke_note.txt in the current workspace.\nWrite exactly this one line into the file: hello from opencode sdk smoke\nDo not modify any other files.\nThen reply with exactly these two lines and nothing else:\nSTATUS: OK\nFILE: smoke_note.txt",
+  "file_exists": true,
+  "file_path": "E:\\projects\\mail_based_task_manager\\_tmp_opencode_sdk_smoke\\opencode-sdk-smoke-cleanup-check\\workspace\\smoke_note.txt",
+  "file_content": "hello from opencode sdk smoke",
+  "assistant_reply": "STATUS: OK\nFILE: smoke_note.txt",
+  "message_count": 3,
+  "assistant_parts": [
+    {
+      "id": "prt_d20ad3765001hAildnumyqkuvT",
+      "messageID": "msg_d20ad2e00001IXzxbhzjeQdtfX",
+      "sessionID": "ses_2df52e62effe6E5QbV5iZ2eGQh",
+      "type": "step-start",
+      "snapshot": "abc66642472c63e69dec72b4a24dea296219e86a"
+    },
+    {
+      "id": "prt_d20ad3765002CaULYyl9gPdYrd",
+      "messageID": "msg_d20ad2e00001IXzxbhzjeQdtfX",
+      "sessionID": "ses_2df52e62effe6E5QbV5iZ2eGQh",
+      "text": "STATUS: OK\nFILE: smoke_note.txt",
+      "type": "text",
+      "time": {
+        "start": 1774369716124.0,
+        "end": 1774369716124.0
+      }
+    },
+    {
+      "id": "prt_d20ad379d001sBOenFXXRiHX6N",
+      "cost": 0.0,
+      "messageID": "msg_d20ad2e00001IXzxbhzjeQdtfX",
+      "sessionID": "ses_2df52e62effe6E5QbV5iZ2eGQh",
+      "tokens": {
+        "cache": {
+          "read": 0.0,
+          "write": 0.0
+        },
+        "input": 12724.0,
+        "output": 9.0,
+        "reasoning": 0.0,
+        "total": 12733
+      },
+      "type": "step-finish",
+      "reason": "stop",
+      "snapshot": "abc66642472c63e69dec72b4a24dea296219e86a"
+    }
+  ],
+  "provider_defaults": {
+    "alibaba-coding-plan-cn": "qwen3.5-plus",
+    "opencode": "big-pickle"
+  },
+  "run_name": "opencode-sdk-smoke-cleanup-check",
+  "result_path": "E:\\projects\\mail_based_task_manager\\_tmp_opencode_sdk_smoke\\opencode-sdk-smoke-cleanup-check\\result.json"
+}

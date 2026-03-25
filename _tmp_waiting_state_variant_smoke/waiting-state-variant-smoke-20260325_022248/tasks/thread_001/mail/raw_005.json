@@ -1,0 +1,17 @@
+{
+  "message_id": "<reply-partial@example.com>",
+  "subject": "Re: [QUESTION] Demo task",
+  "from_addr": "user@example.com",
+  "to_addr": "runner@example.com",
+  "date": "2026-03-25T03:00:00",
+  "in_reply_to": "<sent-3@example.com>",
+  "references": [
+    "<root@example.com>",
+    "<sent-3@example.com>"
+  ],
+  "body_text": "Answers:\nphase2_entry_position: below\nphase2_icon_strings: provide",
+  "attachments": [],
+  "raw_headers": {
+    "Subject": "Re: [QUESTION] Demo task"
+  }
+}

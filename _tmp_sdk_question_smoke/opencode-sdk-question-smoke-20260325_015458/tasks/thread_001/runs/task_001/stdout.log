@@ -1,0 +1,7 @@
+---TASK-QUESTION-BEGIN---
+question_set_id: sdk_question_smoke
+question_id: sdk_question_answer_token
+question_type: short_text
+required: true
+question_text: Reply with the exact token B92D6B07E3
+---TASK-QUESTION-END---

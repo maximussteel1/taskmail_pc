@@ -1,0 +1,19 @@
+This is a sdk-first permission smoke test.
+Do not modify any files and do not run tests.
+Reply with exactly one line and nothing else before any structured capsule:
+PERMISSION_OK | inherit | 2A4DFC08FC
+Append a structured run-result capsule with:
+changed_files: <empty>
+tests_passed: unknown
+error_type: <empty>
+error_message: <empty>
+
+Runtime Mail Paths:
+- MAIL_RUNNER_WORKDIR: E:\projects\mail_based_task_manager\_tmp_sdk_permission_smoke\opencode-sdk-permission-smoke-20260325_021329\repo
+- MAIL_RUNNER_RUN_DIR: E:\projects\mail_based_task_manager\_tmp_sdk_permission_smoke\opencode-sdk-permission-smoke-20260325_021329\tasks\thread_001\runs\task_002
+- MAIL_RUNNER_ARTIFACTS_DIR: E:\projects\mail_based_task_manager\_tmp_sdk_permission_smoke\opencode-sdk-permission-smoke-20260325_021329\tasks\thread_001\runs\task_002\artifacts
+- MAIL_RUNNER_INCOMING_ATTACHMENTS_JSON: E:\projects\mail_based_task_manager\_tmp_sdk_permission_smoke\opencode-sdk-permission-smoke-20260325_021329\tasks\thread_001\runs\task_002\incoming_attachments.json
+
+If you want files or images sent back to the user, create them under MAIL_RUNNER_ARTIFACTS_DIR.
+If you need to send files outside that directory, write MAIL_RUNNER_ARTIFACTS_DIR/manifest.json and use absolute paths explicitly.
+Only describe image contents if you actually inspected the file contents.

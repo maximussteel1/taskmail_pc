@@ -1,0 +1,10 @@
+{
+  "thread_id": "019d210d-4986-7e61-9c68-3d9be1d16e9c",
+  "final_response": "PERMISSION_OK | inherit | A30F2692BE\n---TASK-RUN-RESULT-BEGIN---\nchanged_files: <empty>\ntests_passed: unknown\nerror_type: <empty>\nerror_message: <empty>\n---TASK-RUN-RESULT-END---",
+  "usage": {
+    "input_tokens": 20539,
+    "cached_input_tokens": 9984,
+    "output_tokens": 532
+  },
+  "item_count": 1
+}

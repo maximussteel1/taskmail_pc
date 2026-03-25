@@ -1,0 +1,17 @@
+{
+  "message_id": "<pause-again@example.com>",
+  "subject": "Re: [QUESTION][S:thread_001] Demo task",
+  "from_addr": "user@example.com",
+  "to_addr": "runner@example.com",
+  "date": "2026-03-25T03:00:00",
+  "in_reply_to": "<sent-6@example.com>",
+  "references": [
+    "<root@example.com>",
+    "<sent-6@example.com>"
+  ],
+  "body_text": "/pause",
+  "attachments": [],
+  "raw_headers": {
+    "Subject": "Re: [QUESTION][S:thread_001] Demo task"
+  }
+}

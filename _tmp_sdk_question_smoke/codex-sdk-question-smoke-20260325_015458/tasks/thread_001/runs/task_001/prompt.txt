@@ -1,0 +1,83 @@
+You are Codex.
+
+Task ID: task_001
+Thread ID: thread_001
+Repo: E:\projects\mail_based_task_manager\_tmp_sdk_question_smoke\codex-sdk-question-smoke-20260325_015458\repo
+Workdir: 
+Mode: modify
+Profile: 
+Permission: default
+Timeout Minutes: 20
+
+Task:
+This is a sdk-first question/answer smoke test.
+Do not modify any files until the user answers the pending question.
+First turn rule: if the user has not answered yet, output exactly one question capsule and nothing else:
+---TASK-QUESTION-BEGIN---
+question_set_id: sdk_question_smoke
+question_id: sdk_question_answer_token
+question_type: short_text
+required: true
+question_text: Reply with the exact token 12FF83F3E9
+---TASK-QUESTION-END---
+
+Resume rule: when the user later replies with exactly 12FF83F3E9, create a UTF-8 text file named question_smoke_note.txt in the repo root.
+Write exactly this one line into the file: hello from sdk question smoke
+Do not modify any other files.
+Then output exactly these two human-readable lines and nothing else before the structured capsule:
+QUESTION_FLOW_OK | 12FF83F3E9
+FILE: question_smoke_note.txt
+After those two lines, append exactly one run-result capsule with:
+changed_files: question_smoke_note.txt
+tests_passed: unknown
+error_type: <empty>
+error_message: <empty>
+
+Acceptance:
+- first run enters awaiting_user_input
+- second run creates question_smoke_note.txt
+- question_smoke_note.txt contains exactly: hello from sdk question smoke
+- second run reply includes QUESTION_FLOW_OK | 12FF83F3E9
+
+Incoming Attachments:
+- None
+
+Use the runtime environment variables MAIL_RUNNER_WORKDIR, MAIL_RUNNER_RUN_DIR,
+MAIL_RUNNER_ARTIFACTS_DIR, and MAIL_RUNNER_INCOMING_ATTACHMENTS_JSON when useful.
+If you want files or images sent back to the user, create them under
+MAIL_RUNNER_ARTIFACTS_DIR or write MAIL_RUNNER_ARTIFACTS_DIR/manifest.json with
+explicit absolute paths.
+
+If required information is missing, do not modify files.
+You may output one or more question capsules.
+If you output multiple question capsules in the same waiting turn, every capsule must reuse the same `question_set_id`.
+For each capsule, use this exact format:
+---TASK-QUESTION-BEGIN---
+question_set_id: <stable question set id shared by all capsules in this waiting turn>
+question_id:
+question_type: <single_choice|boolean|short_text>
+required: <true|false>
+question_text: <single-line question>
+choices: <optional choice 1 | optional choice 2>
+choice_labels: <optional key=label | optional key=label>
+---TASK-QUESTION-END---
+
+If you finish this turn with a final reply, append exactly one structured run-result capsule after the human-readable reply.
+Do not output a run-result capsule in the same turn as a question capsule.
+Use this exact format:
+---TASK-RUN-RESULT-BEGIN---
+changed_files: <optional repo-relative path 1 | optional repo-relative path 2>
+tests_passed: <true|false|unknown>
+error_type: <optional short failure type>
+error_message: <optional single-line failure message>
+---TASK-RUN-RESULT-END---
+
+Runtime Mail Paths:
+- MAIL_RUNNER_WORKDIR: E:\projects\mail_based_task_manager\_tmp_sdk_question_smoke\codex-sdk-question-smoke-20260325_015458\repo
+- MAIL_RUNNER_RUN_DIR: E:\projects\mail_based_task_manager\_tmp_sdk_question_smoke\codex-sdk-question-smoke-20260325_015458\tasks\thread_001\runs\task_001
+- MAIL_RUNNER_ARTIFACTS_DIR: E:\projects\mail_based_task_manager\_tmp_sdk_question_smoke\codex-sdk-question-smoke-20260325_015458\tasks\thread_001\runs\task_001\artifacts
+- MAIL_RUNNER_INCOMING_ATTACHMENTS_JSON: E:\projects\mail_based_task_manager\_tmp_sdk_question_smoke\codex-sdk-question-smoke-20260325_015458\tasks\thread_001\runs\task_001\incoming_attachments.json
+
+If you want files or images sent back to the user, create them under MAIL_RUNNER_ARTIFACTS_DIR.
+If you need to send files outside that directory, write MAIL_RUNNER_ARTIFACTS_DIR/manifest.json and use absolute paths explicitly.
+Only describe image contents if you actually inspected the file contents.

@@ -1,0 +1,35 @@
+{
+  "task_id": "task_001",
+  "thread_id": "thread_001",
+  "backend": "opencode",
+  "status": "awaiting_user_input",
+  "exit_code": 0,
+  "started_at": "2026-03-25T01:54:58",
+  "finished_at": "2026-03-25T01:55:02",
+  "stdout_file": "runs/task_001/stdout.log",
+  "stderr_file": "runs/task_001/stderr.log",
+  "summary_file": "runs/task_001/summary.md",
+  "artifacts_dir": "runs/task_001/artifacts",
+  "changed_files": [],
+  "tests_passed": null,
+  "error_type": null,
+  "error_message": null,
+  "question_id": "sdk_question_answer_token",
+  "question_text": "Reply with the exact token B92D6B07E3",
+  "pending_choices": [],
+  "question_set_id": "sdk_question_smoke",
+  "pending_questions": [
+    {
+      "question_set_id": "sdk_question_smoke",
+      "question_id": "sdk_question_answer_token",
+      "question_type": "short_text",
+      "question_text": "Reply with the exact token B92D6B07E3",
+      "required": true,
+      "choices": [],
+      "choice_labels": {}
+    }
+  ],
+  "backend_session_id": "ses_2df03add8ffed4ZM7IdaMR3WXg",
+  "backend_session_resumable": true,
+  "backend_transport": "sdk"
+}

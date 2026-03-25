@@ -1,0 +1,1 @@
+sdk permission smoke workspace

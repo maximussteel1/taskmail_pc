@@ -1,0 +1,15 @@
+{
+  "action": "reply",
+  "prompt": "This is a sdk-first permission smoke test.\nDo not modify any files and do not run tests.\nReply with exactly one line and nothing else before any structured capsule:\nPERMISSION_OK | reset | 57C6E35B02\nAppend a structured run-result capsule with:\nchanged_files: <empty>\ntests_passed: unknown\nerror_type: <empty>\nerror_message: <empty>\n\nRuntime Mail Paths:\n- MAIL_RUNNER_WORKDIR: E:\\projects\\mail_based_task_manager\\_tmp_sdk_permission_smoke\\codex-sdk-permission-smoke-20260325_021329\\repo\n- MAIL_RUNNER_RUN_DIR: E:\\projects\\mail_based_task_manager\\_tmp_sdk_permission_smoke\\codex-sdk-permission-smoke-20260325_021329\\tasks\\thread_001\\runs\\task_003\n- MAIL_RUNNER_ARTIFACTS_DIR: E:\\projects\\mail_based_task_manager\\_tmp_sdk_permission_smoke\\codex-sdk-permission-smoke-20260325_021329\\tasks\\thread_001\\runs\\task_003\\artifacts\n- MAIL_RUNNER_INCOMING_ATTACHMENTS_JSON: E:\\projects\\mail_based_task_manager\\_tmp_sdk_permission_smoke\\codex-sdk-permission-smoke-20260325_021329\\tasks\\thread_001\\runs\\task_003\\incoming_attachments.json\n\nIf you want files or images sent back to the user, create them under MAIL_RUNNER_ARTIFACTS_DIR.\nIf you need to send files outside that directory, write MAIL_RUNNER_ARTIFACTS_DIR/manifest.json and use absolute paths explicitly.\nOnly describe image contents if you actually inspected the file contents.\n",
+  "thread_id": "019d210d-4986-7e61-9c68-3d9be1d16e9c",
+  "cwd": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_permission_smoke\\codex-sdk-permission-smoke-20260325_021329\\repo",
+  "model": null,
+  "sandbox_mode": "workspace-write",
+  "approval_policy": "never",
+  "skip_git_repo_check": true,
+  "web_search_mode": "disabled",
+  "codex_path_override": null,
+  "mail_thread_id": "thread_001",
+  "task_id": "task_003",
+  "stream_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_permission_smoke\\codex-sdk-permission-smoke-20260325_021329\\tasks\\thread_001\\runs\\task_003\\stream.events.jsonl"
+}

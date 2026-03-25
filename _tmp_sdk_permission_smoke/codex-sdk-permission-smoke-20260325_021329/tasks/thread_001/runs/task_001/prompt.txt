@@ -1,0 +1,70 @@
+You are Codex.
+
+Task ID: task_001
+Thread ID: thread_001
+Repo: E:\projects\mail_based_task_manager\_tmp_sdk_permission_smoke\codex-sdk-permission-smoke-20260325_021329\repo
+Workdir: 
+Mode: analysis_only
+Profile: 
+Permission: highest
+Timeout Minutes: 20
+
+Task:
+This is a sdk-first permission smoke test.
+Do not modify any files and do not run tests.
+Reply with exactly one line and nothing else before any structured capsule:
+PERMISSION_OK | initial | F995ACBF2B
+Append a structured run-result capsule with:
+changed_files: <empty>
+tests_passed: unknown
+error_type: <empty>
+error_message: <empty>
+
+Acceptance:
+- reply includes the expected permission line
+- runtime projects the requested permission into backend-specific execution settings
+- follow-up inherits permission when omitted
+- explicit permission override resets runtime projection
+
+Incoming Attachments:
+- None
+
+Use the runtime environment variables MAIL_RUNNER_WORKDIR, MAIL_RUNNER_RUN_DIR,
+MAIL_RUNNER_ARTIFACTS_DIR, and MAIL_RUNNER_INCOMING_ATTACHMENTS_JSON when useful.
+If you want files or images sent back to the user, create them under
+MAIL_RUNNER_ARTIFACTS_DIR or write MAIL_RUNNER_ARTIFACTS_DIR/manifest.json with
+explicit absolute paths.
+
+If required information is missing, do not modify files.
+You may output one or more question capsules.
+If you output multiple question capsules in the same waiting turn, every capsule must reuse the same `question_set_id`.
+For each capsule, use this exact format:
+---TASK-QUESTION-BEGIN---
+question_set_id: <stable question set id shared by all capsules in this waiting turn>
+question_id:
+question_type: <single_choice|boolean|short_text>
+required: <true|false>
+question_text: <single-line question>
+choices: <optional choice 1 | optional choice 2>
+choice_labels: <optional key=label | optional key=label>
+---TASK-QUESTION-END---
+
+If you finish this turn with a final reply, append exactly one structured run-result capsule after the human-readable reply.
+Do not output a run-result capsule in the same turn as a question capsule.
+Use this exact format:
+---TASK-RUN-RESULT-BEGIN---
+changed_files: <optional repo-relative path 1 | optional repo-relative path 2>
+tests_passed: <true|false|unknown>
+error_type: <optional short failure type>
+error_message: <optional single-line failure message>
+---TASK-RUN-RESULT-END---
+
+Runtime Mail Paths:
+- MAIL_RUNNER_WORKDIR: E:\projects\mail_based_task_manager\_tmp_sdk_permission_smoke\codex-sdk-permission-smoke-20260325_021329\repo
+- MAIL_RUNNER_RUN_DIR: E:\projects\mail_based_task_manager\_tmp_sdk_permission_smoke\codex-sdk-permission-smoke-20260325_021329\tasks\thread_001\runs\task_001
+- MAIL_RUNNER_ARTIFACTS_DIR: E:\projects\mail_based_task_manager\_tmp_sdk_permission_smoke\codex-sdk-permission-smoke-20260325_021329\tasks\thread_001\runs\task_001\artifacts
+- MAIL_RUNNER_INCOMING_ATTACHMENTS_JSON: E:\projects\mail_based_task_manager\_tmp_sdk_permission_smoke\codex-sdk-permission-smoke-20260325_021329\tasks\thread_001\runs\task_001\incoming_attachments.json
+
+If you want files or images sent back to the user, create them under MAIL_RUNNER_ARTIFACTS_DIR.
+If you need to send files outside that directory, write MAIL_RUNNER_ARTIFACTS_DIR/manifest.json and use absolute paths explicitly.
+Only describe image contents if you actually inspected the file contents.

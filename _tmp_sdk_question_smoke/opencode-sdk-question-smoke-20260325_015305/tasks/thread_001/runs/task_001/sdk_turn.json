@@ -1,0 +1,48 @@
+{
+  "base_url": "http://127.0.0.1:56542",
+  "port": 56542,
+  "session_id": "ses_2df0565fbffeSfwSQlXecAEYbZ",
+  "provider_id": "alibaba-coding-plan-cn",
+  "model_id": "qwen3.5-plus",
+  "message_count": 2,
+  "assistant_parts": [
+    {
+      "id": "prt_d20fa9eb8001tz9hv5YctKYr4e",
+      "messageID": "msg_d20fa9a1d0015eIGTyd3Ls3sPo",
+      "sessionID": "ses_2df0565fbffeSfwSQlXecAEYbZ",
+      "type": "step-start",
+      "snapshot": "abc66642472c63e69dec72b4a24dea296219e86a"
+    },
+    {
+      "id": "prt_d20fa9eb900171vRhvGLDhIlCg",
+      "messageID": "msg_d20fa9a1d0015eIGTyd3Ls3sPo",
+      "sessionID": "ses_2df0565fbffeSfwSQlXecAEYbZ",
+      "text": "---TASK-QUESTION-BEGIN---\nquestion_set_id: sdk_question_smoke\nquestion_id: sdk_question_answer_token\nquestion_type: short_text\nrequired: true\nquestion_text: Reply with the exact token FF88AE6179\n---TASK-QUESTION-END---",
+      "type": "text",
+      "time": {
+        "start": 1774374789172.0,
+        "end": 1774374789172.0
+      }
+    },
+    {
+      "id": "prt_d20faa037001305RgRoakTasnc",
+      "cost": 0.0,
+      "messageID": "msg_d20fa9a1d0015eIGTyd3Ls3sPo",
+      "sessionID": "ses_2df0565fbffeSfwSQlXecAEYbZ",
+      "tokens": {
+        "cache": {
+          "read": 0.0,
+          "write": 0.0
+        },
+        "input": 13643.0,
+        "output": 56.0,
+        "reasoning": 0.0,
+        "total": 13699
+      },
+      "type": "step-finish",
+      "reason": "stop",
+      "snapshot": "abc66642472c63e69dec72b4a24dea296219e86a"
+    }
+  ],
+  "assistant_reply": "---TASK-QUESTION-BEGIN---\nquestion_set_id: sdk_question_smoke\nquestion_id: sdk_question_answer_token\nquestion_type: short_text\nrequired: true\nquestion_text: Reply with the exact token FF88AE6179\n---TASK-QUESTION-END---"
+}

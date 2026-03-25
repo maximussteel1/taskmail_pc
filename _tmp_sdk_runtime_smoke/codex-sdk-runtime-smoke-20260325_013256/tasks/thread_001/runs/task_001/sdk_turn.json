@@ -1,0 +1,10 @@
+{
+  "thread_id": "019d20e8-2ae2-7df0-b202-2403da268739",
+  "final_response": "STATUS: OK\nFILE: smoke_note.txt\n---TASK-RUN-RESULT-BEGIN---\nchanged_files: smoke_note.txt\ntests_passed: unknown\nerror_type:\nerror_message:\n---TASK-RUN-RESULT-END---",
+  "usage": {
+    "input_tokens": 56488,
+    "cached_input_tokens": 45312,
+    "output_tokens": 1770
+  },
+  "item_count": 8
+}

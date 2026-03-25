@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "task_id": "task_001",
+  "artifacts_root": "runs/task_001/artifacts",
+  "source": "manifest",
+  "items": [
+    {
+      "artifact_id": "artifact-preview",
+      "path": "E:\\projects\\mail_based_task_manager\\_tmp_artifact_contract_smoke\\artifact-contract-smoke-20260325_023007\\preview.png",
+      "name": "preview.png",
+      "kind": "image",
+      "content_type": "image/png",
+      "source": "manifest",
+      "attach": true,
+      "inline_preview": true,
+      "caption": "Preview"
+    },
+    {
+      "artifact_id": "artifact-report",
+      "path": "E:\\projects\\mail_based_task_manager\\_tmp_artifact_contract_smoke\\artifact-contract-smoke-20260325_023007\\report.md",
+      "name": "report.md",
+      "kind": "file",
+      "content_type": "text/markdown",
+      "source": "manifest",
+      "attach": true,
+      "inline_preview": false,
+      "caption": null
+    }
+  ],
+  "skipped": [
+    "Skipped attachment because file does not exist: E:\\projects\\mail_based_task_manager\\_tmp_artifact_contract_smoke\\artifact-contract-smoke-20260325_023007\\missing.txt"
+  ]
+}

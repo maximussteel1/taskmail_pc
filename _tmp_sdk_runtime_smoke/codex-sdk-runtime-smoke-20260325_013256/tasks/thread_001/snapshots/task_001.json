@@ -1,0 +1,24 @@
+{
+  "task_id": "task_001",
+  "thread_id": "thread_001",
+  "backend": "codex",
+  "repo_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_runtime_smoke\\codex-sdk-runtime-smoke-20260325_013256\\repo",
+  "workdir": null,
+  "task_text": "Create a UTF-8 text file named smoke_note.txt in the repo root.\nWrite exactly this one line into the file: hello from sdk runtime smoke\nDo not modify any other files.\nThen output exactly these two human-readable lines and nothing else before the structured capsule:\nSTATUS: OK\nFILE: smoke_note.txt\nAfter those two lines, append exactly one run-result capsule with:\nchanged_files: smoke_note.txt\ntests_passed: unknown\nerror_type: <empty>\nerror_message: <empty>",
+  "profile": null,
+  "permission": null,
+  "acceptance": [
+    "smoke_note.txt exists",
+    "smoke_note.txt contains exactly: hello from sdk runtime smoke",
+    "reply includes STATUS: OK and FILE line"
+  ],
+  "timeout_minutes": 20,
+  "mode": "modify",
+  "attachments": [],
+  "created_at": "2026-03-25T00:00:00",
+  "updated_at": "2026-03-25T00:00:00",
+  "run_mode": "new",
+  "backend_session_id": null,
+  "turn_text": null,
+  "backend_transport": "sdk"
+}

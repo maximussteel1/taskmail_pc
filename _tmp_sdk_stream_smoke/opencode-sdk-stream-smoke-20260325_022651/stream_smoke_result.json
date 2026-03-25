@@ -1,0 +1,27 @@
+{
+  "success": true,
+  "backend": "opencode",
+  "run_name": "opencode-sdk-stream-smoke-20260325_022651",
+  "runtime_result_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_stream_smoke\\opencode-sdk-stream-smoke-20260325_022651\\smoke_result.json",
+  "result_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_stream_smoke\\opencode-sdk-stream-smoke-20260325_022651\\tasks\\thread_001\\runs\\task_001\\result.json",
+  "cleanup": {
+    "backend": "opencode",
+    "port": 49228,
+    "port_open_after_run": false,
+    "cleanup_ok": true
+  },
+  "stream": {
+    "stream_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_stream_smoke\\opencode-sdk-stream-smoke-20260325_022651\\tasks\\thread_001\\runs\\task_001\\stream.events.jsonl",
+    "stream_exists": false,
+    "supports_persisted_stream": false,
+    "sdk_turn_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_stream_smoke\\opencode-sdk-stream-smoke-20260325_022651\\tasks\\thread_001\\runs\\task_001\\sdk_turn.json",
+    "assistant_part_count": 3,
+    "gap": {
+      "kind": "missing_same_layer_stream_evidence",
+      "summary": "OpenCode SDK current runtime only persists final sdk_turn.json assistant payload, not seq-based stream events.",
+      "recorded": true
+    }
+  },
+  "failures": [],
+  "smoke_result_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_stream_smoke\\opencode-sdk-stream-smoke-20260325_022651\\stream_smoke_result.json"
+}

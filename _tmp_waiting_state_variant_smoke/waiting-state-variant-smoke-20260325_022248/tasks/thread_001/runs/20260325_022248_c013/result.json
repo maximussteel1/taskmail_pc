@@ -1,0 +1,89 @@
+{
+  "task_id": "20260325_022248_c013",
+  "thread_id": "thread_001",
+  "backend": "opencode",
+  "status": "awaiting_user_input",
+  "exit_code": 0,
+  "started_at": "2026-03-25T03:00:01",
+  "finished_at": "2026-03-25T03:00:05",
+  "stdout_file": "runs/20260325_022248_c013/stdout.log",
+  "stderr_file": "runs/20260325_022248_c013/stderr.log",
+  "summary_file": "runs/20260325_022248_c013/summary.md",
+  "artifacts_dir": null,
+  "changed_files": [],
+  "tests_passed": null,
+  "error_type": null,
+  "error_message": null,
+  "question_id": "phase2_device_validation",
+  "question_text": "Device validation requirement?",
+  "pending_choices": [
+    "acceptable",
+    "device_required"
+  ],
+  "question_set_id": "phase2",
+  "pending_questions": [
+    {
+      "question_set_id": "phase2",
+      "question_id": "phase2_entry_position",
+      "question_type": "single_choice",
+      "question_text": "Where should the entry go?",
+      "required": true,
+      "choices": [
+        "top",
+        "below"
+      ],
+      "choice_labels": {
+        "top": "账户列表上方",
+        "below": "账户列表下方"
+      }
+    },
+    {
+      "question_set_id": "phase2",
+      "question_id": "phase2_icon_strings",
+      "question_type": "single_choice",
+      "question_text": "Who provides strings?",
+      "required": true,
+      "choices": [
+        "provide",
+        "reuse"
+      ],
+      "choice_labels": {
+        "provide": "你提供",
+        "reuse": "复用现有"
+      }
+    },
+    {
+      "question_set_id": "phase2",
+      "question_id": "phase2_k9_support",
+      "question_type": "single_choice",
+      "question_text": "Support K-9 too?",
+      "required": true,
+      "choices": [
+        "both",
+        "thunderbird_only"
+      ],
+      "choice_labels": {
+        "both": "两者都需要",
+        "thunderbird_only": "仅 Thunderbird"
+      }
+    },
+    {
+      "question_set_id": "phase2",
+      "question_id": "phase2_device_validation",
+      "question_type": "single_choice",
+      "question_text": "Device validation requirement?",
+      "required": true,
+      "choices": [
+        "acceptable",
+        "device_required"
+      ],
+      "choice_labels": {
+        "acceptable": "可接受",
+        "device_required": "必须设备验证"
+      }
+    }
+  ],
+  "backend_session_id": "native-session-001",
+  "backend_session_resumable": true,
+  "backend_transport": "sdk"
+}

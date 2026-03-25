@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "taskmail-artifact-file-binding-index-v1",
+  "task_id": "task_001",
+  "thread_id": "thread_001",
+  "artifacts_root": "runs/task_001/artifacts",
+  "generated_at": "2026-03-25T00:00:02",
+  "surface": "v1_files",
+  "items": [
+    {
+      "artifact_id": "artifact-preview",
+      "local_path": "E:\\projects\\mail_based_task_manager\\_tmp_artifact_contract_smoke\\artifact-contract-smoke-20260325_023007\\preview.png",
+      "name": "preview.png",
+      "kind": "image",
+      "mime_type": "image/png",
+      "byte_size": 8,
+      "sha256": "4c4b6a3be1314ab86138bef4314dde022e600960d8689a2c8f8631802d20dab6",
+      "bindings": [
+        {
+          "status": "uploaded",
+          "uploaded_at": "2026-03-25T00:00:02",
+          "role": "artifact_delivery",
+          "file_id": "file_preview_001",
+          "metadata_url": "/v1/files/file_preview_001",
+          "download_url": "/v1/files/file_preview_001/content",
+          "trace_id": "trace-artifact-smoke"
+        }
+      ]
+    }
+  ]
+}

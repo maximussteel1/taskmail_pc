@@ -1,0 +1,27 @@
+{
+  "success": true,
+  "backend": "opencode",
+  "run_name": "opencode-sdk-runtime-smoke-20260325_013241",
+  "seed_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_runtime_smoke\\opencode-sdk-runtime-smoke-20260325_013241\\seed.json",
+  "task_root": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_runtime_smoke\\opencode-sdk-runtime-smoke-20260325_013241\\tasks",
+  "result_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_runtime_smoke\\opencode-sdk-runtime-smoke-20260325_013241\\tasks\\thread_001\\runs\\task_001\\result.json",
+  "stdout_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_runtime_smoke\\opencode-sdk-runtime-smoke-20260325_013241\\tasks\\thread_001\\runs\\task_001\\stdout.log",
+  "summary_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_runtime_smoke\\opencode-sdk-runtime-smoke-20260325_013241\\tasks\\thread_001\\runs\\task_001\\summary.md",
+  "file_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_runtime_smoke\\opencode-sdk-runtime-smoke-20260325_013241\\repo\\smoke_note.txt",
+  "file_exists": true,
+  "file_content": "hello from sdk runtime smoke",
+  "status": "success",
+  "backend_transport": "sdk",
+  "backend_session_id": "ses_2df181351ffeGYycKa3kNzOQ92",
+  "changed_files": [
+    "smoke_note.txt"
+  ],
+  "cleanup": {
+    "backend": "opencode",
+    "port": 58322,
+    "port_open_after_run": false,
+    "cleanup_ok": true
+  },
+  "failures": [],
+  "smoke_result_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_runtime_smoke\\opencode-sdk-runtime-smoke-20260325_013241\\smoke_result.json"
+}

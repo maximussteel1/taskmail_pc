@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "thread_id": "thread_001",
+  "task_id": "20260325_022218_019f",
+  "run_status": "success",
+  "ingress_type": "mail",
+  "ingress_message_id": "<resume-final@example.com>",
+  "request_id": null,
+  "packet_id": null,
+  "receipt_id": null,
+  "action_type": null,
+  "target_session_identity": null,
+  "last_summary": "Completed successfully.",
+  "terminal_mail_message_id": "<sent-10@example.com>",
+  "terminal_mail_subject": "[DONE][S:thread_001] Demo task",
+  "generated_at": "2026-03-25T02:22:18"
+}

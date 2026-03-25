@@ -1,0 +1,17 @@
+{
+  "task_id": "task_001",
+  "thread_id": "thread_001",
+  "backend": "opencode",
+  "repo_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_stream_smoke\\opencode-sdk-stream-smoke-20260325_022651\\repo",
+  "workdir": null,
+  "task_text": "Create a UTF-8 text file named stream_smoke_note.txt in the repo root.\nWrite exactly this one line into the file: hello from sdk stream smoke\nDo not modify any other files.\nThen output exactly these two human-readable lines and nothing else before the structured capsule:\nSTATUS: OK\nFILE: stream_smoke_note.txt\nAfter those two lines, append exactly one run-result capsule with:\nchanged_files: stream_smoke_note.txt\ntests_passed: unknown\nerror_type: <empty>\nerror_message: <empty>",
+  "acceptance": [
+    "stream_smoke_note.txt exists",
+    "stream_smoke_note.txt contains exactly: hello from sdk stream smoke",
+    "reply includes STATUS: OK and FILE line"
+  ],
+  "timeout_minutes": 20,
+  "mode": "modify",
+  "created_at": "2026-03-25T00:00:00",
+  "updated_at": "2026-03-25T00:00:00"
+}

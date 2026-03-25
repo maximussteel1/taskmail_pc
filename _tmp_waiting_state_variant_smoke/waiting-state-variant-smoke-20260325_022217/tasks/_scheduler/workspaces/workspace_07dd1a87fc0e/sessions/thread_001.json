@@ -1,0 +1,31 @@
+{
+  "session_id": "thread_001",
+  "workspace_id": "workspace_07dd1a87fc0e",
+  "thread_id": "thread_001",
+  "session_name": "Demo task",
+  "session_norm": "demo task",
+  "backend": "opencode",
+  "profile": null,
+  "permission": null,
+  "repo_path": "D:\\repo",
+  "workdir": null,
+  "status": "done",
+  "current_task_id": "20260325_022218_019f",
+  "last_task_snapshot_file": "snapshots/20260325_022218_019f.json",
+  "queued_task_id": null,
+  "queued_snapshot_file": null,
+  "pending_task_count": 0,
+  "history_files": [
+    "runs/20260325_022217_7632/result.json",
+    "runs/20260325_022218_019f/result.json"
+  ],
+  "last_summary": "Completed successfully.",
+  "lifecycle": "active",
+  "last_active_at": "2026-03-25T03:10:05",
+  "last_progress_at": "2026-03-25T03:10:05",
+  "backend_session_id": "native-session-001",
+  "backend_session_resumable": true,
+  "backend_transport": "cli",
+  "created_at": "2026-03-25T02:22:17",
+  "updated_at": "2026-03-25T02:22:18"
+}

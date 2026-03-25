@@ -1,0 +1,14 @@
+{
+  "message_id": "<root@example.com>",
+  "subject": "[OC] Demo task",
+  "from_addr": "user@example.com",
+  "to_addr": "runner@example.com",
+  "date": "2026-03-25T03:00:00",
+  "in_reply_to": null,
+  "references": [],
+  "body_text": "Repo: D:\\repo\nTask:\nInspect both modules.\n",
+  "attachments": [],
+  "raw_headers": {
+    "Subject": "[OC] Demo task"
+  }
+}

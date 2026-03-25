@@ -1,0 +1,11 @@
+12FF83F3E9
+
+Runtime Mail Paths:
+- MAIL_RUNNER_WORKDIR: E:\projects\mail_based_task_manager\_tmp_sdk_question_smoke\codex-sdk-question-smoke-20260325_015458\repo
+- MAIL_RUNNER_RUN_DIR: E:\projects\mail_based_task_manager\_tmp_sdk_question_smoke\codex-sdk-question-smoke-20260325_015458\tasks\thread_001\runs\task_002
+- MAIL_RUNNER_ARTIFACTS_DIR: E:\projects\mail_based_task_manager\_tmp_sdk_question_smoke\codex-sdk-question-smoke-20260325_015458\tasks\thread_001\runs\task_002\artifacts
+- MAIL_RUNNER_INCOMING_ATTACHMENTS_JSON: E:\projects\mail_based_task_manager\_tmp_sdk_question_smoke\codex-sdk-question-smoke-20260325_015458\tasks\thread_001\runs\task_002\incoming_attachments.json
+
+If you want files or images sent back to the user, create them under MAIL_RUNNER_ARTIFACTS_DIR.
+If you need to send files outside that directory, write MAIL_RUNNER_ARTIFACTS_DIR/manifest.json and use absolute paths explicitly.
+Only describe image contents if you actually inspected the file contents.

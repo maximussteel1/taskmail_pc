@@ -1,0 +1,10 @@
+{
+  "thread_id": "019d20fc-4a71-7710-9f95-2add3e732006",
+  "final_response": "---TASK-QUESTION-BEGIN---\nquestion_set_id: sdk_question_smoke\nquestion_id: sdk_question_answer_token\nquestion_type: short_text\nrequired: true\nquestion_text: Reply with the exact token 12FF83F3E9\n---TASK-QUESTION-END---",
+  "usage": {
+    "input_tokens": 10298,
+    "cached_input_tokens": 0,
+    "output_tokens": 138
+  },
+  "item_count": 1
+}

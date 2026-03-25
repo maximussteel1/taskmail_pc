@@ -1,0 +1,25 @@
+{
+  "task_id": "task_002",
+  "thread_id": "thread_001",
+  "backend": "codex",
+  "repo_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_permission_smoke\\codex-sdk-permission-smoke-20260325_021329\\repo",
+  "workdir": null,
+  "task_text": "This is a sdk-first permission smoke test.\nDo not modify any files and do not run tests.\nReply with exactly one line and nothing else before any structured capsule:\nPERMISSION_OK | initial | F995ACBF2B\nAppend a structured run-result capsule with:\nchanged_files: <empty>\ntests_passed: unknown\nerror_type: <empty>\nerror_message: <empty>",
+  "profile": null,
+  "permission": "highest",
+  "acceptance": [
+    "reply includes the expected permission line",
+    "runtime projects the requested permission into backend-specific execution settings",
+    "follow-up inherits permission when omitted",
+    "explicit permission override resets runtime projection"
+  ],
+  "timeout_minutes": 20,
+  "mode": "analysis_only",
+  "attachments": [],
+  "created_at": "2026-03-25T02:13:43",
+  "updated_at": "2026-03-25T02:13:43",
+  "run_mode": "resume",
+  "backend_session_id": "019d210d-4986-7e61-9c68-3d9be1d16e9c",
+  "turn_text": "This is a sdk-first permission smoke test.\nDo not modify any files and do not run tests.\nReply with exactly one line and nothing else before any structured capsule:\nPERMISSION_OK | inherit | A30F2692BE\nAppend a structured run-result capsule with:\nchanged_files: <empty>\ntests_passed: unknown\nerror_type: <empty>\nerror_message: <empty>",
+  "backend_transport": "sdk"
+}

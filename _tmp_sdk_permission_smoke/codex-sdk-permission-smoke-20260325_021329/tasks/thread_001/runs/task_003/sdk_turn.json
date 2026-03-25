@@ -1,0 +1,10 @@
+{
+  "thread_id": "019d210d-4986-7e61-9c68-3d9be1d16e9c",
+  "final_response": "PERMISSION_OK | reset | 57C6E35B02\n---TASK-RUN-RESULT-BEGIN---\nchanged_files: <empty>\ntests_passed: unknown\nerror_type: <empty>\nerror_message: <empty>\n---TASK-RUN-RESULT-END---",
+  "usage": {
+    "input_tokens": 31572,
+    "cached_input_tokens": 20352,
+    "output_tokens": 640
+  },
+  "item_count": 1
+}

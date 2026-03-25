@@ -1,0 +1,25 @@
+{
+  "task_id": "task_002",
+  "thread_id": "thread_001",
+  "backend": "codex",
+  "repo_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_question_smoke\\codex-sdk-question-smoke-20260325_015305\\repo",
+  "workdir": null,
+  "task_text": "This is a sdk-first question/answer smoke test.\nDo not modify any files until the user answers the pending question.\nFirst turn rule: if the user has not answered yet, output exactly one question capsule and nothing else:\n---TASK-QUESTION-BEGIN---\nquestion_set_id: sdk_question_smoke\nquestion_id: sdk_question_answer_token\nquestion_type: short_text\nrequired: true\nquestion_text: Reply with the exact token 7F4202AA33\n---TASK-QUESTION-END---\n\nResume rule: when the user later replies with exactly 7F4202AA33, create a UTF-8 text file named question_smoke_note.txt in the repo root.\nWrite exactly this one line into the file: hello from sdk question smoke\nDo not modify any other files.\nThen output exactly these two human-readable lines and nothing else before the structured capsule:\nQUESTION_FLOW_OK | 7F4202AA33\nFILE: question_smoke_note.txt\nAfter those two lines, append exactly one run-result capsule with:\nchanged_files: question_smoke_note.txt\ntests_passed: unknown\nerror_type: <empty>\nerror_message: <empty>\n\nAdditional context from reply:\nAnswer to pending question (sdk_question_answer_token):\nQuestion: Reply with the exact token 7F4202AA33\nAnswer: 7F4202AA33",
+  "profile": null,
+  "permission": null,
+  "acceptance": [
+    "first run enters awaiting_user_input",
+    "second run creates question_smoke_note.txt",
+    "question_smoke_note.txt contains exactly: hello from sdk question smoke",
+    "second run reply includes QUESTION_FLOW_OK | 7F4202AA33"
+  ],
+  "timeout_minutes": 20,
+  "mode": "modify",
+  "attachments": [],
+  "created_at": "2026-03-25T01:53:12",
+  "updated_at": "2026-03-25T01:53:12",
+  "run_mode": "resume",
+  "backend_session_id": "019d20fa-9958-7b43-86e9-ae2da3620cc4",
+  "turn_text": "7F4202AA33",
+  "backend_transport": "sdk"
+}

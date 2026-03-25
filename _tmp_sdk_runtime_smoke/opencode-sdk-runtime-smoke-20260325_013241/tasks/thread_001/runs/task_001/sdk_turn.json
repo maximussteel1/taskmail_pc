@@ -1,0 +1,48 @@
+{
+  "base_url": "http://127.0.0.1:58322",
+  "port": 58322,
+  "session_id": "ses_2df181351ffeGYycKa3kNzOQ92",
+  "provider_id": "alibaba-coding-plan-cn",
+  "model_id": "qwen3.5-plus",
+  "message_count": 3,
+  "assistant_parts": [
+    {
+      "id": "prt_d20e7feb4001b3D3bSmDRJaJfz",
+      "messageID": "msg_d20e7fae1001LVRRm6FGTjv1io",
+      "sessionID": "ses_2df181351ffeGYycKa3kNzOQ92",
+      "type": "step-start",
+      "snapshot": "abc66642472c63e69dec72b4a24dea296219e86a"
+    },
+    {
+      "id": "prt_d20e7feb5001cjYb2FMOIc4IYk",
+      "messageID": "msg_d20e7fae1001LVRRm6FGTjv1io",
+      "sessionID": "ses_2df181351ffeGYycKa3kNzOQ92",
+      "text": "STATUS: OK\nFILE: smoke_note.txt\n---TASK-RUN-RESULT-BEGIN---\nchanged_files: smoke_note.txt\ntests_passed: unknown\nerror_type: \nerror_message: \n---TASK-RUN-RESULT-END---",
+      "type": "text",
+      "time": {
+        "start": 1774373568378.0,
+        "end": 1774373568378.0
+      }
+    },
+    {
+      "id": "prt_d20e7ff7a001y1ex1FXOKndflK",
+      "cost": 0.0,
+      "messageID": "msg_d20e7fae1001LVRRm6FGTjv1io",
+      "sessionID": "ses_2df181351ffeGYycKa3kNzOQ92",
+      "tokens": {
+        "cache": {
+          "read": 0.0,
+          "write": 0.0
+        },
+        "input": 13600.0,
+        "output": 46.0,
+        "reasoning": 0.0,
+        "total": 13646
+      },
+      "type": "step-finish",
+      "reason": "stop",
+      "snapshot": "abc66642472c63e69dec72b4a24dea296219e86a"
+    }
+  ],
+  "assistant_reply": "STATUS: OK\nFILE: smoke_note.txt\n---TASK-RUN-RESULT-BEGIN---\nchanged_files: smoke_note.txt\ntests_passed: unknown\nerror_type: \nerror_message: \n---TASK-RUN-RESULT-END---"
+}

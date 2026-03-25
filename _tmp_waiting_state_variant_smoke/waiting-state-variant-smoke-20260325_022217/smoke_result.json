@@ -1,0 +1,1031 @@
+{
+  "success": true,
+  "run_name": "waiting-state-variant-smoke-20260325_022217",
+  "task_root": "E:\\projects\\mail_based_task_manager\\_tmp_waiting_state_variant_smoke\\waiting-state-variant-smoke-20260325_022217\\tasks",
+  "steps": {
+    "first_question": {
+      "stats": {
+        "fetched": 1,
+        "processed": 1,
+        "skipped": 0,
+        "failed": 0
+      },
+      "step": "first_question",
+      "thread_state": {
+        "thread_id": "thread_001",
+        "root_message_id": "<root@example.com>",
+        "latest_message_id": "<sent-3@example.com>",
+        "subject_norm": "demo task",
+        "backend": "opencode",
+        "repo_path": "D:\\repo",
+        "workdir": null,
+        "current_task_id": "20260325_022217_7632",
+        "last_task_snapshot_file": "snapshots/20260325_022217_7632.json",
+        "status": "awaiting_user_input",
+        "profile": null,
+        "permission": null,
+        "history_files": [
+          "runs/20260325_022217_7632/result.json"
+        ],
+        "last_summary": "Need more answers.",
+        "lifecycle": "active",
+        "last_active_at": "2026-03-25T03:00:05",
+        "last_progress_at": "2026-03-25T03:00:05",
+        "pending_question_id": "phase2_device_validation",
+        "pending_question_text": "Device validation requirement?",
+        "pending_choices": [
+          "acceptable",
+          "device_required"
+        ],
+        "pending_question_set_id": "phase2",
+        "pending_questions": [
+          {
+            "question_set_id": "phase2",
+            "question_id": "phase2_entry_position",
+            "question_type": "single_choice",
+            "question_text": "Where should the entry go?",
+            "required": true,
+            "choices": [
+              "top",
+              "below"
+            ],
+            "choice_labels": {
+              "top": "账户列表上方",
+              "below": "账户列表下方"
+            }
+          },
+          {
+            "question_set_id": "phase2",
+            "question_id": "phase2_icon_strings",
+            "question_type": "single_choice",
+            "question_text": "Who provides strings?",
+            "required": true,
+            "choices": [
+              "provide",
+              "reuse"
+            ],
+            "choice_labels": {
+              "provide": "你提供",
+              "reuse": "复用现有"
+            }
+          },
+          {
+            "question_set_id": "phase2",
+            "question_id": "phase2_k9_support",
+            "question_type": "single_choice",
+            "question_text": "Support K-9 too?",
+            "required": true,
+            "choices": [
+              "both",
+              "thunderbird_only"
+            ],
+            "choice_labels": {
+              "both": "两者都需要",
+              "thunderbird_only": "仅 Thunderbird"
+            }
+          },
+          {
+            "question_set_id": "phase2",
+            "question_id": "phase2_device_validation",
+            "question_type": "single_choice",
+            "question_text": "Device validation requirement?",
+            "required": true,
+            "choices": [
+              "acceptable",
+              "device_required"
+            ],
+            "choice_labels": {
+              "acceptable": "可接受",
+              "device_required": "必须设备验证"
+            }
+          }
+        ],
+        "collected_answers": [],
+        "awaiting_since": "2026-03-25T03:00:05",
+        "paused_from_status": null,
+        "workspace_id": "workspace_07dd1a87fc0e",
+        "workspace_norm": "d:/repo",
+        "session_id": "thread_001",
+        "session_name": "Demo task",
+        "session_norm": "demo task",
+        "backend_session_id": "native-session-001",
+        "backend_session_resumable": true,
+        "backend_transport": "cli",
+        "queued_task_id": null,
+        "queued_snapshot_file": null,
+        "created_at": "2026-03-25T02:22:17",
+        "updated_at": "2026-03-25T02:22:18"
+      },
+      "session_state": {
+        "session_id": "thread_001",
+        "workspace_id": "workspace_07dd1a87fc0e",
+        "thread_id": "thread_001",
+        "session_name": "Demo task",
+        "session_norm": "demo task",
+        "backend": "opencode",
+        "profile": null,
+        "permission": null,
+        "repo_path": "D:\\repo",
+        "workdir": null,
+        "status": "waiting_user",
+        "current_task_id": "20260325_022217_7632",
+        "last_task_snapshot_file": "snapshots/20260325_022217_7632.json",
+        "queued_task_id": null,
+        "queued_snapshot_file": null,
+        "pending_task_count": 0,
+        "history_files": [
+          "runs/20260325_022217_7632/result.json"
+        ],
+        "last_summary": "Need more answers.",
+        "lifecycle": "active",
+        "last_active_at": "2026-03-25T03:00:05",
+        "last_progress_at": "2026-03-25T03:00:05",
+        "backend_session_id": "native-session-001",
+        "backend_session_resumable": true,
+        "backend_transport": "cli",
+        "created_at": "2026-03-25T02:22:17",
+        "updated_at": "2026-03-25T02:22:18"
+      },
+      "latest_snapshot": {
+        "task_id": "20260325_022217_7632",
+        "thread_id": "thread_001",
+        "backend": "opencode",
+        "repo_path": "D:\\repo",
+        "workdir": null,
+        "task_text": "Inspect both modules.",
+        "profile": null,
+        "permission": null,
+        "acceptance": [],
+        "timeout_minutes": 60,
+        "mode": "modify",
+        "attachments": [],
+        "created_at": "2026-03-25T02:22:17",
+        "updated_at": "2026-03-25T02:22:17",
+        "run_mode": "new",
+        "backend_session_id": null,
+        "turn_text": null,
+        "backend_transport": "sdk"
+      },
+      "effective_pending_question_ids": [
+        "phase2_entry_position",
+        "phase2_icon_strings",
+        "phase2_k9_support",
+        "phase2_device_validation"
+      ]
+    },
+    "partial_answers": {
+      "stats": {
+        "fetched": 1,
+        "processed": 1,
+        "skipped": 0,
+        "failed": 0
+      },
+      "step": "partial_answers",
+      "thread_state": {
+        "thread_id": "thread_001",
+        "root_message_id": "<root@example.com>",
+        "latest_message_id": "<sent-4@example.com>",
+        "subject_norm": "demo task",
+        "backend": "opencode",
+        "repo_path": "D:\\repo",
+        "workdir": null,
+        "current_task_id": "20260325_022217_7632",
+        "last_task_snapshot_file": "snapshots/20260325_022217_7632.json",
+        "status": "awaiting_user_input",
+        "profile": null,
+        "permission": null,
+        "history_files": [
+          "runs/20260325_022217_7632/result.json"
+        ],
+        "last_summary": "Need more answers.",
+        "lifecycle": "active",
+        "last_active_at": "2026-03-25T03:00:05",
+        "last_progress_at": "2026-03-25T02:22:18",
+        "pending_question_id": "phase2_device_validation",
+        "pending_question_text": "Device validation requirement?",
+        "pending_choices": [
+          "acceptable",
+          "device_required"
+        ],
+        "pending_question_set_id": "phase2",
+        "pending_questions": [
+          {
+            "question_set_id": "phase2",
+            "question_id": "phase2_entry_position",
+            "question_type": "single_choice",
+            "question_text": "Where should the entry go?",
+            "required": true,
+            "choices": [
+              "top",
+              "below"
+            ],
+            "choice_labels": {
+              "top": "账户列表上方",
+              "below": "账户列表下方"
+            }
+          },
+          {
+            "question_set_id": "phase2",
+            "question_id": "phase2_icon_strings",
+            "question_type": "single_choice",
+            "question_text": "Who provides strings?",
+            "required": true,
+            "choices": [
+              "provide",
+              "reuse"
+            ],
+            "choice_labels": {
+              "provide": "你提供",
+              "reuse": "复用现有"
+            }
+          },
+          {
+            "question_set_id": "phase2",
+            "question_id": "phase2_k9_support",
+            "question_type": "single_choice",
+            "question_text": "Support K-9 too?",
+            "required": true,
+            "choices": [
+              "both",
+              "thunderbird_only"
+            ],
+            "choice_labels": {
+              "both": "两者都需要",
+              "thunderbird_only": "仅 Thunderbird"
+            }
+          },
+          {
+            "question_set_id": "phase2",
+            "question_id": "phase2_device_validation",
+            "question_type": "single_choice",
+            "question_text": "Device validation requirement?",
+            "required": true,
+            "choices": [
+              "acceptable",
+              "device_required"
+            ],
+            "choice_labels": {
+              "acceptable": "可接受",
+              "device_required": "必须设备验证"
+            }
+          }
+        ],
+        "collected_answers": [
+          {
+            "question_id": "phase2_entry_position",
+            "value": "below",
+            "raw_value": "below"
+          },
+          {
+            "question_id": "phase2_icon_strings",
+            "value": "provide",
+            "raw_value": "provide"
+          }
+        ],
+        "awaiting_since": "2026-03-25T03:00:05",
+        "paused_from_status": null,
+        "workspace_id": "workspace_07dd1a87fc0e",
+        "workspace_norm": "d:/repo",
+        "session_id": "thread_001",
+        "session_name": "Demo task",
+        "session_norm": "demo task",
+        "backend_session_id": "native-session-001",
+        "backend_session_resumable": true,
+        "backend_transport": "cli",
+        "queued_task_id": null,
+        "queued_snapshot_file": null,
+        "created_at": "2026-03-25T02:22:17",
+        "updated_at": "2026-03-25T02:22:18"
+      },
+      "session_state": {
+        "session_id": "thread_001",
+        "workspace_id": "workspace_07dd1a87fc0e",
+        "thread_id": "thread_001",
+        "session_name": "Demo task",
+        "session_norm": "demo task",
+        "backend": "opencode",
+        "profile": null,
+        "permission": null,
+        "repo_path": "D:\\repo",
+        "workdir": null,
+        "status": "waiting_user",
+        "current_task_id": "20260325_022217_7632",
+        "last_task_snapshot_file": "snapshots/20260325_022217_7632.json",
+        "queued_task_id": null,
+        "queued_snapshot_file": null,
+        "pending_task_count": 0,
+        "history_files": [
+          "runs/20260325_022217_7632/result.json"
+        ],
+        "last_summary": "Need more answers.",
+        "lifecycle": "active",
+        "last_active_at": "2026-03-25T03:00:05",
+        "last_progress_at": "2026-03-25T02:22:18",
+        "backend_session_id": "native-session-001",
+        "backend_session_resumable": true,
+        "backend_transport": "cli",
+        "created_at": "2026-03-25T02:22:17",
+        "updated_at": "2026-03-25T02:22:18"
+      },
+      "latest_snapshot": {
+        "task_id": "20260325_022217_7632",
+        "thread_id": "thread_001",
+        "backend": "opencode",
+        "repo_path": "D:\\repo",
+        "workdir": null,
+        "task_text": "Inspect both modules.",
+        "profile": null,
+        "permission": null,
+        "acceptance": [],
+        "timeout_minutes": 60,
+        "mode": "modify",
+        "attachments": [],
+        "created_at": "2026-03-25T02:22:17",
+        "updated_at": "2026-03-25T02:22:17",
+        "run_mode": "new",
+        "backend_session_id": null,
+        "turn_text": null,
+        "backend_transport": "sdk"
+      },
+      "effective_pending_question_ids": [
+        "phase2_entry_position",
+        "phase2_icon_strings",
+        "phase2_k9_support",
+        "phase2_device_validation"
+      ]
+    },
+    "pause": {
+      "stats": {
+        "fetched": 1,
+        "processed": 1,
+        "skipped": 0,
+        "failed": 0
+      },
+      "step": "pause",
+      "thread_state": {
+        "thread_id": "thread_001",
+        "root_message_id": "<root@example.com>",
+        "latest_message_id": "<sent-5@example.com>",
+        "subject_norm": "demo task",
+        "backend": "opencode",
+        "repo_path": "D:\\repo",
+        "workdir": null,
+        "current_task_id": "20260325_022217_7632",
+        "last_task_snapshot_file": "snapshots/20260325_022217_7632.json",
+        "status": "paused",
+        "profile": null,
+        "permission": null,
+        "history_files": [
+          "runs/20260325_022217_7632/result.json"
+        ],
+        "last_summary": "Need more answers.",
+        "lifecycle": "active",
+        "last_active_at": "2026-03-25T03:00:05",
+        "last_progress_at": "2026-03-25T02:22:18",
+        "pending_question_id": "phase2_device_validation",
+        "pending_question_text": "Device validation requirement?",
+        "pending_choices": [
+          "acceptable",
+          "device_required"
+        ],
+        "pending_question_set_id": "phase2",
+        "pending_questions": [
+          {
+            "question_set_id": "phase2",
+            "question_id": "phase2_entry_position",
+            "question_type": "single_choice",
+            "question_text": "Where should the entry go?",
+            "required": true,
+            "choices": [
+              "top",
+              "below"
+            ],
+            "choice_labels": {
+              "top": "账户列表上方",
+              "below": "账户列表下方"
+            }
+          },
+          {
+            "question_set_id": "phase2",
+            "question_id": "phase2_icon_strings",
+            "question_type": "single_choice",
+            "question_text": "Who provides strings?",
+            "required": true,
+            "choices": [
+              "provide",
+              "reuse"
+            ],
+            "choice_labels": {
+              "provide": "你提供",
+              "reuse": "复用现有"
+            }
+          },
+          {
+            "question_set_id": "phase2",
+            "question_id": "phase2_k9_support",
+            "question_type": "single_choice",
+            "question_text": "Support K-9 too?",
+            "required": true,
+            "choices": [
+              "both",
+              "thunderbird_only"
+            ],
+            "choice_labels": {
+              "both": "两者都需要",
+              "thunderbird_only": "仅 Thunderbird"
+            }
+          },
+          {
+            "question_set_id": "phase2",
+            "question_id": "phase2_device_validation",
+            "question_type": "single_choice",
+            "question_text": "Device validation requirement?",
+            "required": true,
+            "choices": [
+              "acceptable",
+              "device_required"
+            ],
+            "choice_labels": {
+              "acceptable": "可接受",
+              "device_required": "必须设备验证"
+            }
+          }
+        ],
+        "collected_answers": [
+          {
+            "question_id": "phase2_entry_position",
+            "value": "below",
+            "raw_value": "below"
+          },
+          {
+            "question_id": "phase2_icon_strings",
+            "value": "provide",
+            "raw_value": "provide"
+          }
+        ],
+        "awaiting_since": "2026-03-25T03:00:05",
+        "paused_from_status": "awaiting_user_input",
+        "workspace_id": "workspace_07dd1a87fc0e",
+        "workspace_norm": "d:/repo",
+        "session_id": "thread_001",
+        "session_name": "Demo task",
+        "session_norm": "demo task",
+        "backend_session_id": "native-session-001",
+        "backend_session_resumable": true,
+        "backend_transport": "cli",
+        "queued_task_id": null,
+        "queued_snapshot_file": null,
+        "created_at": "2026-03-25T02:22:17",
+        "updated_at": "2026-03-25T02:22:18"
+      },
+      "session_state": {
+        "session_id": "thread_001",
+        "workspace_id": "workspace_07dd1a87fc0e",
+        "thread_id": "thread_001",
+        "session_name": "Demo task",
+        "session_norm": "demo task",
+        "backend": "opencode",
+        "profile": null,
+        "permission": null,
+        "repo_path": "D:\\repo",
+        "workdir": null,
+        "status": "paused",
+        "current_task_id": "20260325_022217_7632",
+        "last_task_snapshot_file": "snapshots/20260325_022217_7632.json",
+        "queued_task_id": null,
+        "queued_snapshot_file": null,
+        "pending_task_count": 0,
+        "history_files": [
+          "runs/20260325_022217_7632/result.json"
+        ],
+        "last_summary": "Need more answers.",
+        "lifecycle": "active",
+        "last_active_at": "2026-03-25T03:00:05",
+        "last_progress_at": "2026-03-25T02:22:18",
+        "backend_session_id": "native-session-001",
+        "backend_session_resumable": true,
+        "backend_transport": "cli",
+        "created_at": "2026-03-25T02:22:17",
+        "updated_at": "2026-03-25T02:22:18"
+      },
+      "latest_snapshot": {
+        "task_id": "20260325_022217_7632",
+        "thread_id": "thread_001",
+        "backend": "opencode",
+        "repo_path": "D:\\repo",
+        "workdir": null,
+        "task_text": "Inspect both modules.",
+        "profile": null,
+        "permission": null,
+        "acceptance": [],
+        "timeout_minutes": 60,
+        "mode": "modify",
+        "attachments": [],
+        "created_at": "2026-03-25T02:22:17",
+        "updated_at": "2026-03-25T02:22:17",
+        "run_mode": "new",
+        "backend_session_id": null,
+        "turn_text": null,
+        "backend_transport": "sdk"
+      },
+      "effective_pending_question_ids": [
+        "phase2_entry_position",
+        "phase2_icon_strings",
+        "phase2_k9_support",
+        "phase2_device_validation"
+      ]
+    },
+    "resume_without_answer": {
+      "stats": {
+        "fetched": 1,
+        "processed": 1,
+        "skipped": 0,
+        "failed": 0
+      },
+      "step": "resume_without_answer",
+      "thread_state": {
+        "thread_id": "thread_001",
+        "root_message_id": "<root@example.com>",
+        "latest_message_id": "<sent-6@example.com>",
+        "subject_norm": "demo task",
+        "backend": "opencode",
+        "repo_path": "D:\\repo",
+        "workdir": null,
+        "current_task_id": "20260325_022217_7632",
+        "last_task_snapshot_file": "snapshots/20260325_022217_7632.json",
+        "status": "awaiting_user_input",
+        "profile": null,
+        "permission": null,
+        "history_files": [
+          "runs/20260325_022217_7632/result.json"
+        ],
+        "last_summary": "Need more answers.",
+        "lifecycle": "active",
+        "last_active_at": "2026-03-25T03:00:05",
+        "last_progress_at": "2026-03-25T02:22:18",
+        "pending_question_id": "phase2_device_validation",
+        "pending_question_text": "Device validation requirement?",
+        "pending_choices": [
+          "acceptable",
+          "device_required"
+        ],
+        "pending_question_set_id": "phase2",
+        "pending_questions": [
+          {
+            "question_set_id": "phase2",
+            "question_id": "phase2_entry_position",
+            "question_type": "single_choice",
+            "question_text": "Where should the entry go?",
+            "required": true,
+            "choices": [
+              "top",
+              "below"
+            ],
+            "choice_labels": {
+              "top": "账户列表上方",
+              "below": "账户列表下方"
+            }
+          },
+          {
+            "question_set_id": "phase2",
+            "question_id": "phase2_icon_strings",
+            "question_type": "single_choice",
+            "question_text": "Who provides strings?",
+            "required": true,
+            "choices": [
+              "provide",
+              "reuse"
+            ],
+            "choice_labels": {
+              "provide": "你提供",
+              "reuse": "复用现有"
+            }
+          },
+          {
+            "question_set_id": "phase2",
+            "question_id": "phase2_k9_support",
+            "question_type": "single_choice",
+            "question_text": "Support K-9 too?",
+            "required": true,
+            "choices": [
+              "both",
+              "thunderbird_only"
+            ],
+            "choice_labels": {
+              "both": "两者都需要",
+              "thunderbird_only": "仅 Thunderbird"
+            }
+          },
+          {
+            "question_set_id": "phase2",
+            "question_id": "phase2_device_validation",
+            "question_type": "single_choice",
+            "question_text": "Device validation requirement?",
+            "required": true,
+            "choices": [
+              "acceptable",
+              "device_required"
+            ],
+            "choice_labels": {
+              "acceptable": "可接受",
+              "device_required": "必须设备验证"
+            }
+          }
+        ],
+        "collected_answers": [
+          {
+            "question_id": "phase2_entry_position",
+            "value": "below",
+            "raw_value": "below"
+          },
+          {
+            "question_id": "phase2_icon_strings",
+            "value": "provide",
+            "raw_value": "provide"
+          }
+        ],
+        "awaiting_since": "2026-03-25T03:00:05",
+        "paused_from_status": null,
+        "workspace_id": "workspace_07dd1a87fc0e",
+        "workspace_norm": "d:/repo",
+        "session_id": "thread_001",
+        "session_name": "Demo task",
+        "session_norm": "demo task",
+        "backend_session_id": "native-session-001",
+        "backend_session_resumable": true,
+        "backend_transport": "cli",
+        "queued_task_id": null,
+        "queued_snapshot_file": null,
+        "created_at": "2026-03-25T02:22:17",
+        "updated_at": "2026-03-25T02:22:18"
+      },
+      "session_state": {
+        "session_id": "thread_001",
+        "workspace_id": "workspace_07dd1a87fc0e",
+        "thread_id": "thread_001",
+        "session_name": "Demo task",
+        "session_norm": "demo task",
+        "backend": "opencode",
+        "profile": null,
+        "permission": null,
+        "repo_path": "D:\\repo",
+        "workdir": null,
+        "status": "waiting_user",
+        "current_task_id": "20260325_022217_7632",
+        "last_task_snapshot_file": "snapshots/20260325_022217_7632.json",
+        "queued_task_id": null,
+        "queued_snapshot_file": null,
+        "pending_task_count": 0,
+        "history_files": [
+          "runs/20260325_022217_7632/result.json"
+        ],
+        "last_summary": "Need more answers.",
+        "lifecycle": "active",
+        "last_active_at": "2026-03-25T03:00:05",
+        "last_progress_at": "2026-03-25T02:22:18",
+        "backend_session_id": "native-session-001",
+        "backend_session_resumable": true,
+        "backend_transport": "cli",
+        "created_at": "2026-03-25T02:22:17",
+        "updated_at": "2026-03-25T02:22:18"
+      },
+      "latest_snapshot": {
+        "task_id": "20260325_022217_7632",
+        "thread_id": "thread_001",
+        "backend": "opencode",
+        "repo_path": "D:\\repo",
+        "workdir": null,
+        "task_text": "Inspect both modules.",
+        "profile": null,
+        "permission": null,
+        "acceptance": [],
+        "timeout_minutes": 60,
+        "mode": "modify",
+        "attachments": [],
+        "created_at": "2026-03-25T02:22:17",
+        "updated_at": "2026-03-25T02:22:17",
+        "run_mode": "new",
+        "backend_session_id": null,
+        "turn_text": null,
+        "backend_transport": "sdk"
+      },
+      "effective_pending_question_ids": [
+        "phase2_entry_position",
+        "phase2_icon_strings",
+        "phase2_k9_support",
+        "phase2_device_validation"
+      ]
+    },
+    "pause_again": {
+      "stats": {
+        "fetched": 1,
+        "processed": 1,
+        "skipped": 0,
+        "failed": 0
+      },
+      "step": "pause_again",
+      "thread_state": {
+        "thread_id": "thread_001",
+        "root_message_id": "<root@example.com>",
+        "latest_message_id": "<sent-7@example.com>",
+        "subject_norm": "demo task",
+        "backend": "opencode",
+        "repo_path": "D:\\repo",
+        "workdir": null,
+        "current_task_id": "20260325_022217_7632",
+        "last_task_snapshot_file": "snapshots/20260325_022217_7632.json",
+        "status": "paused",
+        "profile": null,
+        "permission": null,
+        "history_files": [
+          "runs/20260325_022217_7632/result.json"
+        ],
+        "last_summary": "Need more answers.",
+        "lifecycle": "active",
+        "last_active_at": "2026-03-25T03:00:05",
+        "last_progress_at": "2026-03-25T02:22:18",
+        "pending_question_id": "phase2_device_validation",
+        "pending_question_text": "Device validation requirement?",
+        "pending_choices": [
+          "acceptable",
+          "device_required"
+        ],
+        "pending_question_set_id": "phase2",
+        "pending_questions": [
+          {
+            "question_set_id": "phase2",
+            "question_id": "phase2_entry_position",
+            "question_type": "single_choice",
+            "question_text": "Where should the entry go?",
+            "required": true,
+            "choices": [
+              "top",
+              "below"
+            ],
+            "choice_labels": {
+              "top": "账户列表上方",
+              "below": "账户列表下方"
+            }
+          },
+          {
+            "question_set_id": "phase2",
+            "question_id": "phase2_icon_strings",
+            "question_type": "single_choice",
+            "question_text": "Who provides strings?",
+            "required": true,
+            "choices": [
+              "provide",
+              "reuse"
+            ],
+            "choice_labels": {
+              "provide": "你提供",
+              "reuse": "复用现有"
+            }
+          },
+          {
+            "question_set_id": "phase2",
+            "question_id": "phase2_k9_support",
+            "question_type": "single_choice",
+            "question_text": "Support K-9 too?",
+            "required": true,
+            "choices": [
+              "both",
+              "thunderbird_only"
+            ],
+            "choice_labels": {
+              "both": "两者都需要",
+              "thunderbird_only": "仅 Thunderbird"
+            }
+          },
+          {
+            "question_set_id": "phase2",
+            "question_id": "phase2_device_validation",
+            "question_type": "single_choice",
+            "question_text": "Device validation requirement?",
+            "required": true,
+            "choices": [
+              "acceptable",
+              "device_required"
+            ],
+            "choice_labels": {
+              "acceptable": "可接受",
+              "device_required": "必须设备验证"
+            }
+          }
+        ],
+        "collected_answers": [
+          {
+            "question_id": "phase2_entry_position",
+            "value": "below",
+            "raw_value": "below"
+          },
+          {
+            "question_id": "phase2_icon_strings",
+            "value": "provide",
+            "raw_value": "provide"
+          }
+        ],
+        "awaiting_since": "2026-03-25T03:00:05",
+        "paused_from_status": "awaiting_user_input",
+        "workspace_id": "workspace_07dd1a87fc0e",
+        "workspace_norm": "d:/repo",
+        "session_id": "thread_001",
+        "session_name": "Demo task",
+        "session_norm": "demo task",
+        "backend_session_id": "native-session-001",
+        "backend_session_resumable": true,
+        "backend_transport": "cli",
+        "queued_task_id": null,
+        "queued_snapshot_file": null,
+        "created_at": "2026-03-25T02:22:17",
+        "updated_at": "2026-03-25T02:22:18"
+      },
+      "session_state": {
+        "session_id": "thread_001",
+        "workspace_id": "workspace_07dd1a87fc0e",
+        "thread_id": "thread_001",
+        "session_name": "Demo task",
+        "session_norm": "demo task",
+        "backend": "opencode",
+        "profile": null,
+        "permission": null,
+        "repo_path": "D:\\repo",
+        "workdir": null,
+        "status": "paused",
+        "current_task_id": "20260325_022217_7632",
+        "last_task_snapshot_file": "snapshots/20260325_022217_7632.json",
+        "queued_task_id": null,
+        "queued_snapshot_file": null,
+        "pending_task_count": 0,
+        "history_files": [
+          "runs/20260325_022217_7632/result.json"
+        ],
+        "last_summary": "Need more answers.",
+        "lifecycle": "active",
+        "last_active_at": "2026-03-25T03:00:05",
+        "last_progress_at": "2026-03-25T02:22:18",
+        "backend_session_id": "native-session-001",
+        "backend_session_resumable": true,
+        "backend_transport": "cli",
+        "created_at": "2026-03-25T02:22:17",
+        "updated_at": "2026-03-25T02:22:18"
+      },
+      "latest_snapshot": {
+        "task_id": "20260325_022217_7632",
+        "thread_id": "thread_001",
+        "backend": "opencode",
+        "repo_path": "D:\\repo",
+        "workdir": null,
+        "task_text": "Inspect both modules.",
+        "profile": null,
+        "permission": null,
+        "acceptance": [],
+        "timeout_minutes": 60,
+        "mode": "modify",
+        "attachments": [],
+        "created_at": "2026-03-25T02:22:17",
+        "updated_at": "2026-03-25T02:22:17",
+        "run_mode": "new",
+        "backend_session_id": null,
+        "turn_text": null,
+        "backend_transport": "sdk"
+      },
+      "effective_pending_question_ids": [
+        "phase2_entry_position",
+        "phase2_icon_strings",
+        "phase2_k9_support",
+        "phase2_device_validation"
+      ]
+    },
+    "resume_with_answers": {
+      "stats": {
+        "fetched": 1,
+        "processed": 1,
+        "skipped": 0,
+        "failed": 0
+      },
+      "step": "resume_with_answers",
+      "thread_state": {
+        "thread_id": "thread_001",
+        "root_message_id": "<root@example.com>",
+        "latest_message_id": "<sent-10@example.com>",
+        "subject_norm": "demo task",
+        "backend": "opencode",
+        "repo_path": "D:\\repo",
+        "workdir": null,
+        "current_task_id": "20260325_022218_019f",
+        "last_task_snapshot_file": "snapshots/20260325_022218_019f.json",
+        "status": "done",
+        "profile": null,
+        "permission": null,
+        "history_files": [
+          "runs/20260325_022217_7632/result.json",
+          "runs/20260325_022218_019f/result.json"
+        ],
+        "last_summary": "Completed successfully.",
+        "lifecycle": "active",
+        "last_active_at": "2026-03-25T03:10:05",
+        "last_progress_at": "2026-03-25T03:10:05",
+        "pending_question_id": null,
+        "pending_question_text": null,
+        "pending_choices": [],
+        "pending_question_set_id": null,
+        "pending_questions": [],
+        "collected_answers": [],
+        "awaiting_since": null,
+        "paused_from_status": null,
+        "workspace_id": "workspace_07dd1a87fc0e",
+        "workspace_norm": "d:/repo",
+        "session_id": "thread_001",
+        "session_name": "Demo task",
+        "session_norm": "demo task",
+        "backend_session_id": "native-session-001",
+        "backend_session_resumable": true,
+        "backend_transport": "cli",
+        "queued_task_id": null,
+        "queued_snapshot_file": null,
+        "created_at": "2026-03-25T02:22:17",
+        "updated_at": "2026-03-25T02:22:18"
+      },
+      "session_state": {
+        "session_id": "thread_001",
+        "workspace_id": "workspace_07dd1a87fc0e",
+        "thread_id": "thread_001",
+        "session_name": "Demo task",
+        "session_norm": "demo task",
+        "backend": "opencode",
+        "profile": null,
+        "permission": null,
+        "repo_path": "D:\\repo",
+        "workdir": null,
+        "status": "done",
+        "current_task_id": "20260325_022218_019f",
+        "last_task_snapshot_file": "snapshots/20260325_022218_019f.json",
+        "queued_task_id": null,
+        "queued_snapshot_file": null,
+        "pending_task_count": 0,
+        "history_files": [
+          "runs/20260325_022217_7632/result.json",
+          "runs/20260325_022218_019f/result.json"
+        ],
+        "last_summary": "Completed successfully.",
+        "lifecycle": "active",
+        "last_active_at": "2026-03-25T03:10:05",
+        "last_progress_at": "2026-03-25T03:10:05",
+        "backend_session_id": "native-session-001",
+        "backend_session_resumable": true,
+        "backend_transport": "cli",
+        "created_at": "2026-03-25T02:22:17",
+        "updated_at": "2026-03-25T02:22:18"
+      },
+      "latest_snapshot": {
+        "task_id": "20260325_022218_019f",
+        "thread_id": "thread_001",
+        "backend": "opencode",
+        "repo_path": "D:\\repo",
+        "workdir": null,
+        "task_text": "Inspect both modules.\n\nAdditional context from reply:\nResolved answers for question set phase2:\n- phase2_entry_position: below\n  Question: Where should the entry go?\n- phase2_icon_strings: provide\n  Question: Who provides strings?\n- phase2_k9_support: thunderbird_only\n  Question: Support K-9 too?\n- phase2_device_validation: acceptable\n  Question: Device validation requirement?",
+        "profile": null,
+        "permission": null,
+        "acceptance": [],
+        "timeout_minutes": 60,
+        "mode": "modify",
+        "attachments": [],
+        "created_at": "2026-03-25T02:22:18",
+        "updated_at": "2026-03-25T02:22:18",
+        "run_mode": "resume",
+        "backend_session_id": "native-session-001",
+        "turn_text": "Resolved answers for question set phase2:\n- phase2_entry_position: below\n- phase2_icon_strings: provide\n- phase2_k9_support: thunderbird_only\n- phase2_device_validation: acceptable\n\nContinue the task with these answers.",
+        "backend_transport": "cli"
+      },
+      "effective_pending_question_ids": [],
+      "adapter_task_run_modes": [
+        "new",
+        "resume"
+      ],
+      "adapter_turn_texts": [
+        null,
+        "Resolved answers for question set phase2:\n- phase2_entry_position: below\n- phase2_icon_strings: provide\n- phase2_k9_support: thunderbird_only\n- phase2_device_validation: acceptable\n\nContinue the task with these answers."
+      ]
+    }
+  },
+  "sent_subjects": [
+    "[ACCEPTED][S:thread_001] Demo task",
+    "[RUNNING][S:thread_001] Demo task",
+    "[QUESTION][S:thread_001] Demo task",
+    "[QUESTION][S:thread_001] Demo task",
+    "[PAUSED][S:thread_001] Demo task",
+    "[QUESTION][S:thread_001] Demo task",
+    "[PAUSED][S:thread_001] Demo task",
+    "[ACCEPTED][S:thread_001] Demo task",
+    "[RUNNING][S:thread_001] Demo task",
+    "[DONE][S:thread_001] Demo task"
+  ],
+  "cleanup": {
+    "required": false,
+    "cleanup_ok": true,
+    "reason": "fixture smoke; no external process or listener is started"
+  },
+  "failures": [],
+  "smoke_result_path": "E:\\projects\\mail_based_task_manager\\_tmp_waiting_state_variant_smoke\\waiting-state-variant-smoke-20260325_022217\\smoke_result.json"
+}

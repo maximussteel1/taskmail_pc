@@ -1,0 +1,30 @@
+{
+  "success": false,
+  "backend": "opencode",
+  "run_name": "opencode-sdk-runtime-smoke-20260325_013208",
+  "seed_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_runtime_smoke\\opencode-sdk-runtime-smoke-20260325_013208\\seed.json",
+  "task_root": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_runtime_smoke\\opencode-sdk-runtime-smoke-20260325_013208\\tasks",
+  "result_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_runtime_smoke\\opencode-sdk-runtime-smoke-20260325_013208\\tasks\\thread_001\\runs\\task_001\\result.json",
+  "stdout_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_runtime_smoke\\opencode-sdk-runtime-smoke-20260325_013208\\tasks\\thread_001\\runs\\task_001\\stdout.log",
+  "summary_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_runtime_smoke\\opencode-sdk-runtime-smoke-20260325_013208\\tasks\\thread_001\\runs\\task_001\\summary.md",
+  "file_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_runtime_smoke\\opencode-sdk-runtime-smoke-20260325_013208\\repo\\smoke_note.txt",
+  "file_exists": false,
+  "file_content": null,
+  "status": "failed",
+  "backend_transport": "sdk",
+  "backend_session_id": "ses_2df1894f3ffekxsgNFbt01QgeK",
+  "changed_files": [],
+  "cleanup": {
+    "backend": "opencode",
+    "cleanup_ok": false,
+    "reason": "missing sdk_turn.json"
+  },
+  "failures": [
+    "Unexpected run status: failed",
+    "Expected file was not created: smoke_note.txt",
+    "Stdout is missing expected lines: FILE: smoke_note.txt, STATUS: OK",
+    "RunResult.changed_files does not include smoke_note.txt.",
+    "Backend cleanup verification failed."
+  ],
+  "smoke_result_path": "E:\\projects\\mail_based_task_manager\\_tmp_sdk_runtime_smoke\\opencode-sdk-runtime-smoke-20260325_013208\\smoke_result.json"
+}

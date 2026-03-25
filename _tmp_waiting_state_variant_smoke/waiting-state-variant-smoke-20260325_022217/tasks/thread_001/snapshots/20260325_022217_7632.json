@@ -1,0 +1,20 @@
+{
+  "task_id": "20260325_022217_7632",
+  "thread_id": "thread_001",
+  "backend": "opencode",
+  "repo_path": "D:\\repo",
+  "workdir": null,
+  "task_text": "Inspect both modules.",
+  "profile": null,
+  "permission": null,
+  "acceptance": [],
+  "timeout_minutes": 60,
+  "mode": "modify",
+  "attachments": [],
+  "created_at": "2026-03-25T02:22:17",
+  "updated_at": "2026-03-25T02:22:17",
+  "run_mode": "new",
+  "backend_session_id": null,
+  "turn_text": null,
+  "backend_transport": "sdk"
+}

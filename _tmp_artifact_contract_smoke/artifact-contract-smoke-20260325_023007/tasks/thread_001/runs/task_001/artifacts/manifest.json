@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "path": "E:\\projects\\mail_based_task_manager\\_tmp_artifact_contract_smoke\\artifact-contract-smoke-20260325_023007\\preview.png",
+      "name": "preview.png",
+      "mime": "image/png",
+      "attach": true,
+      "inline": true,
+      "caption": "Preview"
+    },
+    {
+      "path": "E:\\projects\\mail_based_task_manager\\_tmp_artifact_contract_smoke\\artifact-contract-smoke-20260325_023007\\report.md",
+      "name": "report.md",
+      "mime": "text/markdown",
+      "attach": true,
+      "inline": false
+    },
+    {
+      "path": "E:\\projects\\mail_based_task_manager\\_tmp_artifact_contract_smoke\\artifact-contract-smoke-20260325_023007\\missing.txt",
+      "name": "missing.txt",
+      "mime": "text/plain",
+      "attach": true,
+      "inline": false
+    }
+  ]
+}

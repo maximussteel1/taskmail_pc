@@ -1,0 +1,27 @@
+{
+  "task_id": "task_001",
+  "thread_id": "thread_001",
+  "backend": "opencode",
+  "status": "success",
+  "exit_code": 0,
+  "started_at": "2026-03-25T01:32:41",
+  "finished_at": "2026-03-25T01:32:48",
+  "stdout_file": "runs/task_001/stdout.log",
+  "stderr_file": "runs/task_001/stderr.log",
+  "summary_file": "runs/task_001/summary.md",
+  "artifacts_dir": "runs/task_001/artifacts",
+  "changed_files": [
+    "smoke_note.txt"
+  ],
+  "tests_passed": null,
+  "error_type": null,
+  "error_message": null,
+  "question_id": null,
+  "question_text": null,
+  "pending_choices": [],
+  "question_set_id": null,
+  "pending_questions": [],
+  "backend_session_id": "ses_2df181351ffeGYycKa3kNzOQ92",
+  "backend_session_resumable": true,
+  "backend_transport": "sdk"
+}

@@ -1,0 +1,571 @@
+{
+  "relay_url": "ws://124.223.41.153:8787/control",
+  "transport_token_id": "6f05b17d957d",
+  "hello_ack": {
+    "message_type": "hello_ack",
+    "connection_id": "relay-conn:android-control-live-smoke:fe7ba892",
+    "server_time": "2026-03-24T00:31:09",
+    "heartbeat_seconds": 30,
+    "transport_token_id": "6f05b17d957d",
+    "accepted_payload_schemas": [
+      "taskmail-bootstrap-control-contract-v2",
+      "taskmail-transport-probe-payload-v1"
+    ]
+  },
+  "first_frames": [
+    {
+      "message_type": "command_ack",
+      "request_id": "probe_req_live_20260324_001",
+      "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+      "command_type": "transport_probe",
+      "payload_schema": "taskmail-transport-probe-payload-v1",
+      "accepted": true,
+      "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+      "received_at": "2026-03-24T00:31:09",
+      "transport_message_id": "<177428346923.1239646.12698155602305775312@mail-runner.local>",
+      "related": {
+        "ui_surface": "transport_probe_live_smoke",
+        "trace_id": "trace-live-transport-probe-001",
+        "probe_id": "probe_live_20260324_001",
+        "request_id": "probe_req_live_20260324_001",
+        "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+        "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956"
+      }
+    },
+    {
+      "message_type": "event",
+      "request_id": "probe_req_live_20260324_001",
+      "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+      "command_type": "transport_probe",
+      "payload_schema": "taskmail-transport-probe-payload-v1",
+      "event_type": "vps_probe_packet_received",
+      "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+      "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_packet_received",
+      "sent_at": "2026-03-24T00:31:09",
+      "payload": {
+        "probe_id": "probe_live_20260324_001",
+        "probe_event_type": "vps_probe_packet_received",
+        "scenario": "android_direct_ping_to_vps_to_pc",
+        "direction": "android_to_pc",
+        "transport_kind": "mail",
+        "timeline": {
+          "clock_source": "vps_monotonic",
+          "monotonic_ms": 0
+        },
+        "summary_text": "relay received transport_probe command"
+      },
+      "related": {
+        "ui_surface": "transport_probe_live_smoke",
+        "trace_id": "trace-live-transport-probe-001",
+        "probe_id": "probe_live_20260324_001",
+        "request_id": "probe_req_live_20260324_001",
+        "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+        "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+        "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_packet_received"
+      }
+    },
+    {
+      "message_type": "event",
+      "request_id": "probe_req_live_20260324_001",
+      "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+      "command_type": "transport_probe",
+      "payload_schema": "taskmail-transport-probe-payload-v1",
+      "event_type": "vps_probe_packet_accepted",
+      "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+      "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_packet_accepted",
+      "sent_at": "2026-03-24T00:31:09",
+      "payload": {
+        "probe_id": "probe_live_20260324_001",
+        "probe_event_type": "vps_probe_packet_accepted",
+        "scenario": "android_direct_ping_to_vps_to_pc",
+        "direction": "android_to_pc",
+        "transport_kind": "mail",
+        "timeline": {
+          "clock_source": "vps_monotonic",
+          "monotonic_ms": 0
+        },
+        "summary_text": "relay accepted transport_probe command into replayable store"
+      },
+      "related": {
+        "ui_surface": "transport_probe_live_smoke",
+        "trace_id": "trace-live-transport-probe-001",
+        "probe_id": "probe_live_20260324_001",
+        "request_id": "probe_req_live_20260324_001",
+        "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+        "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+        "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_packet_accepted"
+      }
+    },
+    {
+      "message_type": "event",
+      "request_id": "probe_req_live_20260324_001",
+      "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+      "command_type": "transport_probe",
+      "payload_schema": "taskmail-transport-probe-payload-v1",
+      "event_type": "vps_probe_bridge_started",
+      "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+      "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_bridge_started",
+      "sent_at": "2026-03-24T00:31:09",
+      "payload": {
+        "probe_id": "probe_live_20260324_001",
+        "probe_event_type": "vps_probe_bridge_started",
+        "scenario": "android_direct_ping_to_vps_to_pc",
+        "direction": "android_to_pc",
+        "transport_kind": "mail",
+        "timeline": {
+          "clock_source": "vps_monotonic",
+          "monotonic_ms": 0
+        },
+        "summary_text": "relay started probe mail bridge",
+        "delivery": {
+          "to_addr": "sgjcc@qq.com",
+          "subject": "[TPROBE][A2P][MAIL] probe_live_20260324_001"
+        }
+      },
+      "related": {
+        "ui_surface": "transport_probe_live_smoke",
+        "trace_id": "trace-live-transport-probe-001",
+        "probe_id": "probe_live_20260324_001",
+        "request_id": "probe_req_live_20260324_001",
+        "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+        "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+        "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_bridge_started"
+      }
+    },
+    {
+      "message_type": "event",
+      "request_id": "probe_req_live_20260324_001",
+      "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+      "command_type": "transport_probe",
+      "payload_schema": "taskmail-transport-probe-payload-v1",
+      "event_type": "vps_probe_bridge_finished",
+      "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+      "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_bridge_finished",
+      "sent_at": "2026-03-24T00:31:09",
+      "payload": {
+        "probe_id": "probe_live_20260324_001",
+        "probe_event_type": "vps_probe_bridge_finished",
+        "scenario": "android_direct_ping_to_vps_to_pc",
+        "direction": "android_to_pc",
+        "transport_kind": "mail",
+        "timeline": {
+          "clock_source": "vps_monotonic",
+          "monotonic_ms": 268
+        },
+        "summary_text": "relay finished probe mail bridge submission",
+        "delivery": {
+          "to_addr": "sgjcc@qq.com",
+          "subject": "[TPROBE][A2P][MAIL] probe_live_20260324_001",
+          "transport_message_id": "<177428346923.1239646.12698155602305775312@mail-runner.local>"
+        }
+      },
+      "related": {
+        "ui_surface": "transport_probe_live_smoke",
+        "trace_id": "trace-live-transport-probe-001",
+        "probe_id": "probe_live_20260324_001",
+        "request_id": "probe_req_live_20260324_001",
+        "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+        "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+        "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_bridge_finished"
+      }
+    },
+    {
+      "message_type": "event",
+      "request_id": "probe_req_live_20260324_001",
+      "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+      "command_type": "transport_probe",
+      "payload_schema": "taskmail-transport-probe-payload-v1",
+      "event_type": "vps_probe_result_started",
+      "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+      "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_result_started",
+      "sent_at": "2026-03-24T00:31:09",
+      "payload": {
+        "probe_id": "probe_live_20260324_001",
+        "probe_event_type": "vps_probe_result_started",
+        "scenario": "android_direct_ping_to_vps_to_pc",
+        "direction": "android_to_pc",
+        "transport_kind": "mail",
+        "timeline": {
+          "clock_source": "vps_monotonic",
+          "monotonic_ms": 268
+        },
+        "summary_text": "relay started transport_probe result materialization",
+        "delivery": {
+          "to_addr": "sgjcc@qq.com",
+          "subject": "[TPROBE][A2P][MAIL] probe_live_20260324_001",
+          "transport_message_id": "<177428346923.1239646.12698155602305775312@mail-runner.local>"
+        }
+      },
+      "related": {
+        "ui_surface": "transport_probe_live_smoke",
+        "trace_id": "trace-live-transport-probe-001",
+        "probe_id": "probe_live_20260324_001",
+        "request_id": "probe_req_live_20260324_001",
+        "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+        "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+        "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_result_started"
+      }
+    },
+    {
+      "message_type": "event",
+      "request_id": "probe_req_live_20260324_001",
+      "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+      "command_type": "transport_probe",
+      "payload_schema": "taskmail-transport-probe-payload-v1",
+      "event_type": "vps_probe_result_finished",
+      "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+      "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_result_finished",
+      "sent_at": "2026-03-24T00:31:09",
+      "payload": {
+        "probe_id": "probe_live_20260324_001",
+        "probe_event_type": "vps_probe_result_finished",
+        "scenario": "android_direct_ping_to_vps_to_pc",
+        "direction": "android_to_pc",
+        "transport_kind": "mail",
+        "timeline": {
+          "clock_source": "vps_monotonic",
+          "monotonic_ms": 268
+        },
+        "summary_text": "relay finished transport_probe result materialization",
+        "outcome": "observed",
+        "delivery": {
+          "to_addr": "sgjcc@qq.com",
+          "subject": "[TPROBE][A2P][MAIL] probe_live_20260324_001",
+          "transport_message_id": "<177428346923.1239646.12698155602305775312@mail-runner.local>"
+        }
+      },
+      "related": {
+        "ui_surface": "transport_probe_live_smoke",
+        "trace_id": "trace-live-transport-probe-001",
+        "probe_id": "probe_live_20260324_001",
+        "request_id": "probe_req_live_20260324_001",
+        "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+        "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+        "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_result_finished"
+      }
+    },
+    {
+      "message_type": "result",
+      "request_id": "probe_req_live_20260324_001",
+      "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+      "command_type": "transport_probe",
+      "payload_schema": "taskmail-transport-probe-payload-v1",
+      "result_type": "transport_probe_result",
+      "status": "completed",
+      "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+      "result_id": "transport-probe-result:probe_req_live_20260324_001",
+      "sent_at": "2026-03-24T00:31:09",
+      "payload": {
+        "probe_id": "probe_live_20260324_001",
+        "scenario": "android_direct_ping_to_vps_to_pc",
+        "direction": "android_to_pc",
+        "transport_kind": "mail",
+        "payload_text": "PHASE6_CONTROL_TRANSPORT_PROBE_SMOKE_20260324",
+        "timeout_seconds": 180,
+        "outcome": "observed",
+        "summary_text": "relay submitted transport_probe mail toward the bot mailbox",
+        "observation_scope": "relay_mail_bridge",
+        "delivery": {
+          "to_addr": "sgjcc@qq.com",
+          "subject": "[TPROBE][A2P][MAIL] probe_live_20260324_001",
+          "transport_message_id": "<177428346923.1239646.12698155602305775312@mail-runner.local>"
+        },
+        "timeline": {
+          "clock_source": "vps_monotonic",
+          "monotonic_ms": 268
+        }
+      },
+      "related": {
+        "ui_surface": "transport_probe_live_smoke",
+        "trace_id": "trace-live-transport-probe-001",
+        "probe_id": "probe_live_20260324_001",
+        "request_id": "probe_req_live_20260324_001",
+        "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+        "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+        "result_id": "transport-probe-result:probe_req_live_20260324_001"
+      }
+    }
+  ],
+  "replay_frames": [
+    {
+      "message_type": "command_ack",
+      "request_id": "probe_req_live_20260324_001",
+      "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+      "command_type": "transport_probe",
+      "payload_schema": "taskmail-transport-probe-payload-v1",
+      "accepted": true,
+      "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+      "received_at": "2026-03-24T00:31:09",
+      "transport_message_id": "<177428346923.1239646.12698155602305775312@mail-runner.local>",
+      "related": {
+        "ui_surface": "transport_probe_live_smoke",
+        "trace_id": "trace-live-transport-probe-001",
+        "probe_id": "probe_live_20260324_001",
+        "request_id": "probe_req_live_20260324_001",
+        "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+        "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956"
+      }
+    },
+    {
+      "message_type": "event",
+      "request_id": "probe_req_live_20260324_001",
+      "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+      "command_type": "transport_probe",
+      "payload_schema": "taskmail-transport-probe-payload-v1",
+      "event_type": "vps_probe_packet_received",
+      "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+      "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_packet_received",
+      "sent_at": "2026-03-24T00:31:09",
+      "payload": {
+        "probe_id": "probe_live_20260324_001",
+        "probe_event_type": "vps_probe_packet_received",
+        "scenario": "android_direct_ping_to_vps_to_pc",
+        "direction": "android_to_pc",
+        "transport_kind": "mail",
+        "timeline": {
+          "clock_source": "vps_monotonic",
+          "monotonic_ms": 0
+        },
+        "summary_text": "relay received transport_probe command"
+      },
+      "related": {
+        "ui_surface": "transport_probe_live_smoke",
+        "trace_id": "trace-live-transport-probe-001",
+        "probe_id": "probe_live_20260324_001",
+        "request_id": "probe_req_live_20260324_001",
+        "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+        "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+        "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_packet_received"
+      }
+    },
+    {
+      "message_type": "event",
+      "request_id": "probe_req_live_20260324_001",
+      "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+      "command_type": "transport_probe",
+      "payload_schema": "taskmail-transport-probe-payload-v1",
+      "event_type": "vps_probe_packet_accepted",
+      "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+      "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_packet_accepted",
+      "sent_at": "2026-03-24T00:31:09",
+      "payload": {
+        "probe_id": "probe_live_20260324_001",
+        "probe_event_type": "vps_probe_packet_accepted",
+        "scenario": "android_direct_ping_to_vps_to_pc",
+        "direction": "android_to_pc",
+        "transport_kind": "mail",
+        "timeline": {
+          "clock_source": "vps_monotonic",
+          "monotonic_ms": 0
+        },
+        "summary_text": "relay accepted transport_probe command into replayable store"
+      },
+      "related": {
+        "ui_surface": "transport_probe_live_smoke",
+        "trace_id": "trace-live-transport-probe-001",
+        "probe_id": "probe_live_20260324_001",
+        "request_id": "probe_req_live_20260324_001",
+        "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+        "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+        "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_packet_accepted"
+      }
+    },
+    {
+      "message_type": "event",
+      "request_id": "probe_req_live_20260324_001",
+      "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+      "command_type": "transport_probe",
+      "payload_schema": "taskmail-transport-probe-payload-v1",
+      "event_type": "vps_probe_bridge_started",
+      "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+      "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_bridge_started",
+      "sent_at": "2026-03-24T00:31:09",
+      "payload": {
+        "probe_id": "probe_live_20260324_001",
+        "probe_event_type": "vps_probe_bridge_started",
+        "scenario": "android_direct_ping_to_vps_to_pc",
+        "direction": "android_to_pc",
+        "transport_kind": "mail",
+        "timeline": {
+          "clock_source": "vps_monotonic",
+          "monotonic_ms": 0
+        },
+        "summary_text": "relay started probe mail bridge",
+        "delivery": {
+          "to_addr": "sgjcc@qq.com",
+          "subject": "[TPROBE][A2P][MAIL] probe_live_20260324_001"
+        }
+      },
+      "related": {
+        "ui_surface": "transport_probe_live_smoke",
+        "trace_id": "trace-live-transport-probe-001",
+        "probe_id": "probe_live_20260324_001",
+        "request_id": "probe_req_live_20260324_001",
+        "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+        "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+        "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_bridge_started"
+      }
+    },
+    {
+      "message_type": "event",
+      "request_id": "probe_req_live_20260324_001",
+      "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+      "command_type": "transport_probe",
+      "payload_schema": "taskmail-transport-probe-payload-v1",
+      "event_type": "vps_probe_bridge_finished",
+      "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+      "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_bridge_finished",
+      "sent_at": "2026-03-24T00:31:09",
+      "payload": {
+        "probe_id": "probe_live_20260324_001",
+        "probe_event_type": "vps_probe_bridge_finished",
+        "scenario": "android_direct_ping_to_vps_to_pc",
+        "direction": "android_to_pc",
+        "transport_kind": "mail",
+        "timeline": {
+          "clock_source": "vps_monotonic",
+          "monotonic_ms": 268
+        },
+        "summary_text": "relay finished probe mail bridge submission",
+        "delivery": {
+          "to_addr": "sgjcc@qq.com",
+          "subject": "[TPROBE][A2P][MAIL] probe_live_20260324_001",
+          "transport_message_id": "<177428346923.1239646.12698155602305775312@mail-runner.local>"
+        }
+      },
+      "related": {
+        "ui_surface": "transport_probe_live_smoke",
+        "trace_id": "trace-live-transport-probe-001",
+        "probe_id": "probe_live_20260324_001",
+        "request_id": "probe_req_live_20260324_001",
+        "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+        "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+        "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_bridge_finished"
+      }
+    },
+    {
+      "message_type": "event",
+      "request_id": "probe_req_live_20260324_001",
+      "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+      "command_type": "transport_probe",
+      "payload_schema": "taskmail-transport-probe-payload-v1",
+      "event_type": "vps_probe_result_started",
+      "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+      "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_result_started",
+      "sent_at": "2026-03-24T00:31:09",
+      "payload": {
+        "probe_id": "probe_live_20260324_001",
+        "probe_event_type": "vps_probe_result_started",
+        "scenario": "android_direct_ping_to_vps_to_pc",
+        "direction": "android_to_pc",
+        "transport_kind": "mail",
+        "timeline": {
+          "clock_source": "vps_monotonic",
+          "monotonic_ms": 268
+        },
+        "summary_text": "relay started transport_probe result materialization",
+        "delivery": {
+          "to_addr": "sgjcc@qq.com",
+          "subject": "[TPROBE][A2P][MAIL] probe_live_20260324_001",
+          "transport_message_id": "<177428346923.1239646.12698155602305775312@mail-runner.local>"
+        }
+      },
+      "related": {
+        "ui_surface": "transport_probe_live_smoke",
+        "trace_id": "trace-live-transport-probe-001",
+        "probe_id": "probe_live_20260324_001",
+        "request_id": "probe_req_live_20260324_001",
+        "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+        "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+        "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_result_started"
+      }
+    },
+    {
+      "message_type": "event",
+      "request_id": "probe_req_live_20260324_001",
+      "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+      "command_type": "transport_probe",
+      "payload_schema": "taskmail-transport-probe-payload-v1",
+      "event_type": "vps_probe_result_finished",
+      "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+      "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_result_finished",
+      "sent_at": "2026-03-24T00:31:09",
+      "payload": {
+        "probe_id": "probe_live_20260324_001",
+        "probe_event_type": "vps_probe_result_finished",
+        "scenario": "android_direct_ping_to_vps_to_pc",
+        "direction": "android_to_pc",
+        "transport_kind": "mail",
+        "timeline": {
+          "clock_source": "vps_monotonic",
+          "monotonic_ms": 268
+        },
+        "summary_text": "relay finished transport_probe result materialization",
+        "outcome": "observed",
+        "delivery": {
+          "to_addr": "sgjcc@qq.com",
+          "subject": "[TPROBE][A2P][MAIL] probe_live_20260324_001",
+          "transport_message_id": "<177428346923.1239646.12698155602305775312@mail-runner.local>"
+        }
+      },
+      "related": {
+        "ui_surface": "transport_probe_live_smoke",
+        "trace_id": "trace-live-transport-probe-001",
+        "probe_id": "probe_live_20260324_001",
+        "request_id": "probe_req_live_20260324_001",
+        "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+        "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+        "event_id": "transport-probe-event:probe_req_live_20260324_001:vps_probe_result_finished"
+      }
+    },
+    {
+      "message_type": "result",
+      "request_id": "probe_req_live_20260324_001",
+      "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+      "command_type": "transport_probe",
+      "payload_schema": "taskmail-transport-probe-payload-v1",
+      "result_type": "transport_probe_result",
+      "status": "completed",
+      "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+      "result_id": "transport-probe-result:probe_req_live_20260324_001",
+      "sent_at": "2026-03-24T00:31:09",
+      "payload": {
+        "probe_id": "probe_live_20260324_001",
+        "scenario": "android_direct_ping_to_vps_to_pc",
+        "direction": "android_to_pc",
+        "transport_kind": "mail",
+        "payload_text": "PHASE6_CONTROL_TRANSPORT_PROBE_SMOKE_20260324",
+        "timeout_seconds": 180,
+        "outcome": "observed",
+        "summary_text": "relay submitted transport_probe mail toward the bot mailbox",
+        "observation_scope": "relay_mail_bridge",
+        "delivery": {
+          "to_addr": "sgjcc@qq.com",
+          "subject": "[TPROBE][A2P][MAIL] probe_live_20260324_001",
+          "transport_message_id": "<177428346923.1239646.12698155602305775312@mail-runner.local>"
+        },
+        "timeline": {
+          "clock_source": "vps_monotonic",
+          "monotonic_ms": 268
+        }
+      },
+      "related": {
+        "ui_surface": "transport_probe_live_smoke",
+        "trace_id": "trace-live-transport-probe-001",
+        "probe_id": "probe_live_20260324_001",
+        "request_id": "probe_req_live_20260324_001",
+        "packet_id": "android-control:transport-probe:probe_req_live_20260324_001",
+        "receipt_id": "relay-receipt:android-control:transport-probe:probe_req_live_20260324_001:a3478956",
+        "result_id": "transport-probe-result:probe_req_live_20260324_001"
+      }
+    }
+  ],
+  "expected_event_types": [
+    "vps_probe_packet_received",
+    "vps_probe_packet_accepted",
+    "vps_probe_bridge_started",
+    "vps_probe_bridge_finished",
+    "vps_probe_result_started",
+    "vps_probe_result_finished"
+  ]
+}

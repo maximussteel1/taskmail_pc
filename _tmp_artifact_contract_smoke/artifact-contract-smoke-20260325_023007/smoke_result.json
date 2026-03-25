@@ -1,0 +1,69 @@
+{
+  "success": true,
+  "run_name": "artifact-contract-smoke-20260325_023007",
+  "task_root": "E:\\projects\\mail_based_task_manager\\_tmp_artifact_contract_smoke\\artifact-contract-smoke-20260325_023007\\tasks",
+  "manifest_path": "E:\\projects\\mail_based_task_manager\\_tmp_artifact_contract_smoke\\artifact-contract-smoke-20260325_023007\\tasks\\thread_001\\runs\\task_001\\artifacts\\manifest.json",
+  "artifact_index_path": "E:\\projects\\mail_based_task_manager\\_tmp_artifact_contract_smoke\\artifact-contract-smoke-20260325_023007\\tasks\\thread_001\\runs\\task_001\\artifacts\\artifact_index.json",
+  "binding_index_path": "E:\\projects\\mail_based_task_manager\\_tmp_artifact_contract_smoke\\artifact-contract-smoke-20260325_023007\\tasks\\thread_001\\runs\\task_001\\artifacts\\artifact_file_binding_index.json",
+  "resolved_artifacts": [
+    {
+      "artifact_id": "artifact-preview",
+      "path": "E:\\projects\\mail_based_task_manager\\_tmp_artifact_contract_smoke\\artifact-contract-smoke-20260325_023007\\preview.png",
+      "name": "preview.png",
+      "kind": "image",
+      "content_type": "image/png",
+      "source": "manifest",
+      "attach": true,
+      "inline_preview": true,
+      "caption": "Preview"
+    },
+    {
+      "artifact_id": "artifact-report",
+      "path": "E:\\projects\\mail_based_task_manager\\_tmp_artifact_contract_smoke\\artifact-contract-smoke-20260325_023007\\report.md",
+      "name": "report.md",
+      "kind": "file",
+      "content_type": "text/markdown",
+      "source": "manifest",
+      "attach": true,
+      "inline_preview": false,
+      "caption": null
+    }
+  ],
+  "skipped": [
+    "Skipped attachment because file does not exist: E:\\projects\\mail_based_task_manager\\_tmp_artifact_contract_smoke\\artifact-contract-smoke-20260325_023007\\missing.txt"
+  ],
+  "candidate_artifact_manifest": [
+    {
+      "artifact_id": "artifact-preview",
+      "kind": "image",
+      "name": "preview.png",
+      "content_type": "image/png",
+      "size": 8,
+      "download_ref": "/v1/files/file_preview_001/content",
+      "download_ref_source": "artifact_file_binding_index"
+    },
+    {
+      "artifact_id": "artifact-report",
+      "kind": "file",
+      "name": "report.md",
+      "content_type": "text/markdown",
+      "size": 18,
+      "download_ref": null,
+      "download_ref_source": null
+    }
+  ],
+  "gaps": [
+    {
+      "kind": "download_ref_not_universal",
+      "summary": "Current local artifact truth only gets download_ref after a file-surface binding exists; local-only artifacts remain unresolved.",
+      "recorded": true
+    }
+  ],
+  "cleanup": {
+    "required": false,
+    "cleanup_ok": true,
+    "reason": "fixture smoke; no external process or listener is started"
+  },
+  "failures": [],
+  "smoke_result_path": "E:\\projects\\mail_based_task_manager\\_tmp_artifact_contract_smoke\\artifact-contract-smoke-20260325_023007\\smoke_result.json"
+}

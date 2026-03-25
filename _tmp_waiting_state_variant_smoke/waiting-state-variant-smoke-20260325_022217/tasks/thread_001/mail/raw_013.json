@@ -1,0 +1,17 @@
+{
+  "message_id": "<resume-final@example.com>",
+  "subject": "Re: [PAUSED][S:thread_001] Demo task",
+  "from_addr": "user@example.com",
+  "to_addr": "runner@example.com",
+  "date": "2026-03-25T03:00:00",
+  "in_reply_to": "<sent-7@example.com>",
+  "references": [
+    "<root@example.com>",
+    "<sent-7@example.com>"
+  ],
+  "body_text": "/resume\nAnswers:\nphase2_k9_support: thunderbird_only\nphase2_device_validation: acceptable",
+  "attachments": [],
+  "raw_headers": {
+    "Subject": "Re: [PAUSED][S:thread_001] Demo task"
+  }
+}

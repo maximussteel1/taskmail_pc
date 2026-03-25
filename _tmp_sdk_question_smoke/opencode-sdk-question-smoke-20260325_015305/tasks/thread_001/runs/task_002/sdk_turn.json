@@ -1,0 +1,48 @@
+{
+  "base_url": "http://127.0.0.1:56556",
+  "port": 56556,
+  "session_id": "ses_2df0565fbffeSfwSQlXecAEYbZ",
+  "provider_id": "alibaba-coding-plan-cn",
+  "model_id": "qwen3.5-plus",
+  "message_count": 5,
+  "assistant_parts": [
+    {
+      "id": "prt_d20fabb6a001L4tsgzn2iQ3si8",
+      "messageID": "msg_d20fab84f001DXrZajhxQqzC8i",
+      "sessionID": "ses_2df0565fbffeSfwSQlXecAEYbZ",
+      "type": "step-start",
+      "snapshot": "abc66642472c63e69dec72b4a24dea296219e86a"
+    },
+    {
+      "id": "prt_d20fabb6b001fJGMjKXAryPEIK",
+      "messageID": "msg_d20fab84f001DXrZajhxQqzC8i",
+      "sessionID": "ses_2df0565fbffeSfwSQlXecAEYbZ",
+      "text": "---TASK-RUN-RESULT-BEGIN---\nchanged_files: question_smoke_note.txt\ntests_passed: unknown\nerror_type: \nerror_message: \n---TASK-RUN-RESULT-END---",
+      "type": "text",
+      "time": {
+        "start": 1774374796367.0,
+        "end": 1774374796367.0
+      }
+    },
+    {
+      "id": "prt_d20fabc5000124YpxXQPu5D6Aw",
+      "cost": 0.0,
+      "messageID": "msg_d20fab84f001DXrZajhxQqzC8i",
+      "sessionID": "ses_2df0565fbffeSfwSQlXecAEYbZ",
+      "tokens": {
+        "cache": {
+          "read": 0.0,
+          "write": 0.0
+        },
+        "input": 14149.0,
+        "output": 38.0,
+        "reasoning": 0.0,
+        "total": 14187
+      },
+      "type": "step-finish",
+      "reason": "stop",
+      "snapshot": "abc66642472c63e69dec72b4a24dea296219e86a"
+    }
+  ],
+  "assistant_reply": "---TASK-RUN-RESULT-BEGIN---\nchanged_files: question_smoke_note.txt\ntests_passed: unknown\nerror_type: \nerror_message: \n---TASK-RUN-RESULT-END---"
+}
