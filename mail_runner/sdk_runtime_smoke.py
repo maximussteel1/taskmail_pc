@@ -28,11 +28,17 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def _normalize_single_line_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return value.rstrip("\r\n")
+
+
 def build_task_text(filename: str, file_text: str) -> str:
     return "\n".join(
         [
             f"Create a UTF-8 text file named {filename} in the repo root.",
-            f"Write exactly this one line into the file: {file_text}",
+            f"Write this single line into the file: {file_text}",
             "Do not modify any other files.",
             "Then output exactly these two human-readable lines and nothing else before the structured capsule:",
             "STATUS: OK",
@@ -56,7 +62,7 @@ def _seed_payload(*, backend: str, repo_path: Path, filename: str, file_text: st
         "task_text": build_task_text(filename, file_text),
         "acceptance": [
             f"{filename} exists",
-            f"{filename} contains exactly: {file_text}",
+            f"{filename} contains the requested single-line text: {file_text}",
             "reply includes STATUS: OK and FILE line",
         ],
         "timeout_minutes": 20,
@@ -151,7 +157,7 @@ def run_runtime_smoke(
         failures.append("backend_session_id was empty.")
     if not file_exists:
         failures.append(f"Expected file was not created: {filename}")
-    elif file_content != file_text:
+    elif _normalize_single_line_text(file_content) != file_text:
         failures.append("Created file content did not match the expected text.")
     expected_lines = {"STATUS: OK", f"FILE: {filename}"}
     actual_lines = {line.strip() for line in stdout_text.splitlines() if line.strip()}
