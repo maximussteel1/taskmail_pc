@@ -44,6 +44,15 @@ from .direct_actions import (
 )
 from .loopback import LoopbackRelayServer
 from .packet_store import InMemoryAcceptedPacketStore, PersistentAcceptedPacketStore
+from .pc_control_protocol import (
+    PcCommandAckMessage,
+    PcHeartbeatMessage,
+    PcHelloMessage,
+    PcWorkspaceSnapshotMessage,
+    build_pc_error,
+    parse_pc_control_client_message,
+)
+from .pc_control_runtime import PcCommandDispatchValidationError, PcControlRuntime, build_pc_control_runtime
 from .post_creation_actions import (
     RelayTaskMailDirectCurrentSessionReplyMailBridge,
     RelayTaskMailDirectCurrentSessionStatusMailBridge,
@@ -56,6 +65,7 @@ _HTTP_RESPONSE_HEADERS = [("Content-Type", "application/json; charset=utf-8")]
 _HTTP_HEADER_LIMIT_BYTES = 64 * 1024
 _RELAY_WEBSOCKET_PATH = "/relay"
 _CONTROL_WEBSOCKET_PATH = "/control"
+_PC_CONTROL_WEBSOCKET_PATH = "/pc-control"
 
 
 def _timestamp() -> str:
@@ -105,6 +115,7 @@ def build_health_payload(
     session_store,
     *,
     packet_store=None,
+    pc_control_runtime: PcControlRuntime | None = None,
     listening_host: str | None = None,
     listening_port: int | None = None,
 ) -> dict[str, Any]:
@@ -123,6 +134,11 @@ def build_health_payload(
         "task_root": _task_root_diagnostics(config.task_root or None),
         "auth": {
             "transport_token_id": token_fingerprint(config.transport_token),
+        },
+        "pc_control": {
+            "node_count": pc_control_runtime.node_store.count() if pc_control_runtime is not None else 0,
+            "workspace_count": pc_control_runtime.workspace_store.count() if pc_control_runtime is not None else 0,
+            "command_count": pc_control_runtime.command_store.count() if pc_control_runtime is not None else 0,
         },
     }
 
@@ -169,6 +185,7 @@ def build_http_server(
     *,
     session_store: InMemorySessionStore | None = None,
     packet_store: InMemoryAcceptedPacketStore | None = None,
+    pc_control_runtime: PcControlRuntime | None = None,
     file_upload_limit_bytes: int | None = None,
 ) -> ThreadingHTTPServer:
     store = session_store or InMemorySessionStore()
@@ -241,6 +258,7 @@ def build_http_server(
                         config,
                         store,
                         packet_store=packets,
+                        pc_control_runtime=pc_control_runtime,
                         listening_host=str(host),
                         listening_port=int(port),
                     ),
@@ -615,6 +633,7 @@ async def _handle_unified_connection(
     config: RelayServerConfig,
     session_store,
     packet_store,
+    pc_control_runtime: PcControlRuntime,
     listen_ref: dict[str, Any],
     websocket_target: tuple[str, int],
     http_target: tuple[str, int],
@@ -626,7 +645,7 @@ async def _handle_unified_connection(
         request_bytes, _method, raw_path, headers = request
         normalized_path = urlparse(raw_path).path
         is_websocket_upgrade = (
-            normalized_path in {_RELAY_WEBSOCKET_PATH, _CONTROL_WEBSOCKET_PATH}
+            normalized_path in {_RELAY_WEBSOCKET_PATH, _CONTROL_WEBSOCKET_PATH, _PC_CONTROL_WEBSOCKET_PATH}
             and headers.get("upgrade", "").lower() == "websocket"
             and "upgrade" in headers.get("connection", "").lower()
         )
@@ -637,6 +656,7 @@ async def _handle_unified_connection(
                     config,
                     session_store,
                     packet_store=packet_store,
+                    pc_control_runtime=pc_control_runtime,
                     listening_host=str(listen_ref.get("host") or config.host),
                     listening_port=int(listen_ref.get("port") or config.port),
                 ),
@@ -720,22 +740,25 @@ def _parse_multipart_form_data(request_headers: Any, body: bytes) -> dict[str, d
     return fields
 
 
-async def _process_request(path: str, _request_headers: Any, *, config: RelayServerConfig, session_store, packet_store):
+async def _process_request(path: str, _request_headers: Any, *, config: RelayServerConfig, session_store, packet_store, pc_control_runtime):
     if path not in {"/healthz", "/readyz"}:
         return None
     return _json_response(
         HTTPStatus.OK,
-        build_health_payload(config, session_store, packet_store=packet_store),
+        build_health_payload(config, session_store, packet_store=packet_store, pc_control_runtime=pc_control_runtime),
     )
 
 
-async def _websocket_handler(websocket, path: str, *, relay: LoopbackRelayServer) -> None:
+async def _websocket_handler(websocket, path: str, *, relay: LoopbackRelayServer, pc_control_runtime: PcControlRuntime) -> None:
     normalized_path = str(path or "").strip() or "/"
     if normalized_path == _RELAY_WEBSOCKET_PATH:
         await _relay_websocket_handler(websocket, relay=relay)
         return
     if normalized_path == _CONTROL_WEBSOCKET_PATH:
         await _control_websocket_handler(websocket, relay=relay)
+        return
+    if normalized_path == _PC_CONTROL_WEBSOCKET_PATH:
+        await _pc_control_websocket_handler(websocket, pc_control_runtime=pc_control_runtime)
         return
     await websocket.close(code=1008, reason="unsupported_path")
 
@@ -980,6 +1003,149 @@ async def _control_websocket_handler(websocket, *, relay: LoopbackRelayServer) -
             relay.session_store.close_session(connection_id, closed_at=_timestamp())
 
 
+async def _pc_control_websocket_handler(websocket, *, pc_control_runtime: PcControlRuntime) -> None:
+    provided_token = _extract_bearer_token(getattr(websocket, "request_headers", {}))
+    server_connection_id: str | None = None
+    pc_id: str | None = None
+    connection_epoch: int | None = None
+    send_lock = asyncio.Lock()
+
+    async def _send_payload(payload: dict[str, Any]) -> None:
+        async with send_lock:
+            await websocket.send(json.dumps(payload, ensure_ascii=False))
+
+    def _protocol_error(*, code: str, message: str, trace_id: str, payload_pc_id: str | None = None, payload_epoch: int = 0) -> dict[str, Any]:
+        return build_pc_error(
+            message_id=f"pc-control-error:{_timestamp()}",
+            trace_id=trace_id,
+            pc_id=payload_pc_id,
+            connection_epoch=payload_epoch,
+            sent_at=_timestamp(),
+            code=code,
+            message=message,
+        )
+
+    try:
+        async for raw_message in websocket:
+            allow_pending_dispatches = False
+            try:
+                payload = json.loads(raw_message)
+                if not isinstance(payload, dict):
+                    raise ValueError("payload must be an object")
+            except Exception as exc:
+                responses = [
+                    _protocol_error(
+                        code="invalid_json",
+                        message=str(exc),
+                        trace_id="trace:pc-control:invalid-json",
+                        payload_pc_id=pc_id,
+                        payload_epoch=connection_epoch or 0,
+                    )
+                ]
+            else:
+                try:
+                    message = parse_pc_control_client_message(payload)
+                except Exception as exc:
+                    responses = [
+                        _protocol_error(
+                            code="invalid_payload",
+                            message=str(exc),
+                            trace_id=str(payload.get("trace_id") or "trace:pc-control:invalid-payload"),
+                            payload_pc_id=str(payload.get("pc_id") or "").strip() or pc_id,
+                            payload_epoch=int(payload.get("connection_epoch") or 0) if isinstance(payload.get("connection_epoch"), int) else (connection_epoch or 0),
+                        )
+                    ]
+                else:
+                    if isinstance(message, PcHelloMessage):
+                        response, next_connection_id, next_epoch = pc_control_runtime.handle_hello(
+                            message,
+                            provided_token=provided_token,
+                        )
+                        responses = [response]
+                        if response.get("type") == "hello_ack":
+                            server_connection_id = next_connection_id
+                            pc_id = message.pc_id
+                            connection_epoch = next_epoch
+                            allow_pending_dispatches = True
+                    else:
+                        if server_connection_id is None or pc_id is None or connection_epoch is None:
+                            responses = [
+                                _protocol_error(
+                                    code="missing_connection",
+                                    message="pc_hello is required before heartbeat or workspace_snapshot",
+                                    trace_id=message.trace_id,
+                                    payload_pc_id=message.pc_id,
+                                    payload_epoch=message.connection_epoch,
+                                )
+                            ]
+                        elif message.pc_id != pc_id:
+                            responses = [
+                                _protocol_error(
+                                    code="pc_id_mismatch",
+                                    message="message pc_id does not match the current connection",
+                                    trace_id=message.trace_id,
+                                    payload_pc_id=message.pc_id,
+                                    payload_epoch=message.connection_epoch,
+                                )
+                            ]
+                        elif isinstance(message, PcHeartbeatMessage):
+                            response = pc_control_runtime.handle_heartbeat(message, connection_id=server_connection_id)
+                            responses = [] if response is None else [response]
+                            allow_pending_dispatches = response is None
+                        elif isinstance(message, PcWorkspaceSnapshotMessage):
+                            response = pc_control_runtime.handle_workspace_snapshot(message, connection_id=server_connection_id)
+                            responses = [] if response is None else [response]
+                            allow_pending_dispatches = response is None
+                        elif isinstance(message, PcCommandAckMessage):
+                            response = pc_control_runtime.handle_command_ack(message, connection_id=server_connection_id)
+                            responses = [] if response is None else [response]
+                            allow_pending_dispatches = response is None
+                        else:
+                            responses = [
+                                _protocol_error(
+                                    code="unsupported_message_type",
+                                    message="unsupported pc-control client message",
+                                    trace_id=message.trace_id,
+                                    payload_pc_id=message.pc_id,
+                                    payload_epoch=message.connection_epoch,
+                                )
+                            ]
+
+            if allow_pending_dispatches and server_connection_id is not None and pc_id is not None and connection_epoch is not None:
+                try:
+                    responses.extend(
+                        pc_control_runtime.collect_pending_dispatches(
+                            pc_id=pc_id,
+                            connection_id=server_connection_id,
+                            connection_epoch=connection_epoch,
+                        )
+                    )
+                except PcCommandDispatchValidationError as exc:
+                    responses = [
+                        _protocol_error(
+                            code=exc.code,
+                            message=exc.message,
+                            trace_id=f"trace:pc-control:dispatch:{pc_id}",
+                            payload_pc_id=pc_id,
+                            payload_epoch=connection_epoch,
+                        )
+                    ]
+
+            first_response = responses[0] if responses else None
+            for response in responses:
+                await _send_payload(response)
+            if first_response is not None and first_response.get("type") == "error" and server_connection_id is None:
+                await websocket.close(code=1008, reason=str(first_response.get("payload", {}).get("code") or "error"))
+                return
+    finally:
+        if server_connection_id is not None and pc_id is not None and connection_epoch is not None:
+            pc_control_runtime.close_connection(
+                pc_id=pc_id,
+                connection_id=server_connection_id,
+                connection_epoch=connection_epoch,
+            )
+
+
 async def _subscription_push_loop(
     websocket,
     *,
@@ -1006,10 +1172,12 @@ async def run_relay_server(
     *,
     session_store: PersistentSessionStore | None = None,
     packet_store: PersistentAcceptedPacketStore | None = None,
+    pc_control_runtime: PcControlRuntime | None = None,
     shutdown_event: asyncio.Event | None = None,
 ) -> None:
     sessions = session_store or PersistentSessionStore(config.state_dir)
     packets = packet_store or PersistentAcceptedPacketStore(config.state_dir)
+    pc_runtime = pc_control_runtime or build_pc_control_runtime(config)
     relay = build_runtime_relay(
         config,
         session_store=sessions,
@@ -1021,6 +1189,7 @@ async def run_relay_server(
         relay=relay,
         session_store=sessions,
         packet_store=packets,
+        pc_control_runtime=pc_runtime,
         ssl_context=ssl_context,
     )
     try:
@@ -1045,6 +1214,7 @@ async def start_relay_server(
     relay: LoopbackRelayServer,
     session_store,
     packet_store,
+    pc_control_runtime: PcControlRuntime | None = None,
     ssl_context: ssl.SSLContext | None = None,
     file_upload_limit_bytes: int | None = None,
 ):
@@ -1058,12 +1228,14 @@ async def start_relay_server(
     websocket_server = None
     http_server = None
     http_thread = None
+    pc_runtime = pc_control_runtime or build_pc_control_runtime(config)
     try:
         websocket_server = await _start_internal_websocket_server(
             internal_config,
             relay=relay,
             session_store=session_store,
             packet_store=packet_store,
+            pc_control_runtime=pc_runtime,
         )
         websocket_host, websocket_port = websocket_server.sockets[0].getsockname()[:2]
 
@@ -1071,6 +1243,7 @@ async def start_relay_server(
             internal_config,
             session_store=session_store,
             packet_store=packet_store,
+            pc_control_runtime=pc_runtime,
             file_upload_limit_bytes=file_upload_limit_bytes,
         )
         http_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
@@ -1085,6 +1258,7 @@ async def start_relay_server(
                 config=config,
                 session_store=session_store,
                 packet_store=packet_store,
+                pc_control_runtime=pc_runtime,
                 listen_ref=listen_ref,
                 websocket_target=(str(websocket_host), int(websocket_port)),
                 http_target=(str(http_host), int(http_port)),
@@ -1121,9 +1295,15 @@ async def _start_internal_websocket_server(
     relay: LoopbackRelayServer,
     session_store,
     packet_store,
+    pc_control_runtime: PcControlRuntime,
 ):
     return await websockets.serve(
-        lambda websocket, path: _websocket_handler(websocket, path, relay=relay),
+        lambda websocket, path: _websocket_handler(
+            websocket,
+            path,
+            relay=relay,
+            pc_control_runtime=pc_control_runtime,
+        ),
         config.host,
         config.port,
         process_request=lambda path, request_headers: _process_request(
@@ -1132,6 +1312,7 @@ async def _start_internal_websocket_server(
             config=config,
             session_store=session_store,
             packet_store=packet_store,
+            pc_control_runtime=pc_control_runtime,
         ),
         ping_interval=30,
         ping_timeout=30,

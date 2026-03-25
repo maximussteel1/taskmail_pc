@@ -266,6 +266,53 @@ def test_compile_task_preserves_sdk_transport_for_codex_continuation() -> None:
     assert compiled.run_mode == "resume"
 
 
+def test_compile_task_preserves_sdk_transport_for_opencode_continuation() -> None:
+    snapshot = _snapshot()
+    snapshot.backend_transport = "sdk"
+    state = _thread_state()
+    state.backend_transport = "sdk"
+    state.backend_session_id = "sdk-thread-oc-001"
+    state.backend_session_resumable = True
+
+    compiled = compile_task(
+        ParsedMailAction(
+            action="ANSWER_QUESTION",
+            confidence=1.0,
+            raw_user_text="TOKEN-123",
+        ),
+        state,
+        snapshot,
+        task_id="task_006_sdk_opencode",
+        now="2026-03-12T12:45:12",
+    )
+
+    assert compiled is not None
+    assert compiled.backend == BACKEND_OPENCODE
+    assert compiled.backend_transport == "sdk"
+    assert compiled.backend_session_id == "sdk-thread-oc-001"
+    assert compiled.run_mode == "resume"
+
+
+def test_compile_task_uses_backend_default_transport_when_switching_backend() -> None:
+    compiled = compile_task(
+        ParsedMailAction(
+            action="UPDATE_TASK",
+            confidence=0.95,
+            backend=BACKEND_CODEX,
+            task_text_delta="Inspect the codebase and report findings.",
+        ),
+        _thread_state(),
+        _snapshot(),
+        task_id="task_006_switch_backend",
+        now="2026-03-12T12:45:13",
+        default_transport_for_backend=lambda backend: "sdk" if backend == BACKEND_CODEX else "cli",
+    )
+
+    assert compiled is not None
+    assert compiled.backend == BACKEND_CODEX
+    assert compiled.backend_transport == "sdk"
+
+
 def test_compile_task_handles_explicit_resume_action() -> None:
     state = _thread_state()
     state.backend_session_id = "native-session-001"

@@ -26,19 +26,22 @@ Current outbound reference skeleton:
 - 当前行为变化时，优先更新本目录文档
 - 如与 [README.md](../../README.md) 或 [state.md](../../state.md) 冲突，以当前事实为准
 - 如与 `docs/plans/` 或 `docs/platform/` 冲突，以本目录定义的当前协议边界为准
+- 可复用操作手册、冒烟步骤、环境经验默认放 `docs/reference/`，除非它们已经上升为当前协议或运行时真相
 - TaskMail direct relay/control/file 相关 current truth 以 `taskmail_direct_control_file_contract.md` 为中心，再配合 `mail_protocol.md`、`android_runner_communication_contract.md`、`multimedia_mail_protocol.md` 与 `pc_mail_output_protocol.md` 阅读；2026-03-24 起当前已落地 shared `/control` 的两条已实现能力：bootstrap `sync_project_folders v2`，以及 relay-side `transport_probe` harness；其中 `transport_probe_result` 现在会在可见时等待并投影 `_mailbox/transport_probes/` 里的 PC observation，区分 `observed / timed_out / submitted / failed`
 
 分层依据见 [document_layering_plan.md](../document_layering_plan.md)。
 
-## Codex Transport
+## SDK-First Transport
 
-- New Codex threads now default to the SDK transport for real continuous sessions.
+- New OpenCode and Codex threads now default to the SDK transport for real continuous sessions.
 - `backend_transport` is persisted on snapshots, thread state, session state, and run results.
 - Legacy persisted records that do not have `backend_transport` are interpreted as `cli` for backward compatibility.
+- reply continuation、`/resume` 和 `ANSWER_QUESTION` 现在会继承当前 thread/session 已持久化的 `backend_transport`；显式切 backend 或显式 `/new` 时，再按目标 backend 默认 transport 重新解析。
+- OpenCode runtime SDK turns now go through a short-lived local `opencode serve`; the adapter stops that temporary listener after the turn finishes.
 - The SDK bridge runs through `scripts/codex_sdk_sidecar/dist/index.js`.
 - The SDK adapter now injects default proxy env vars for the sidecar when `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, or `NO_PROXY` are unset, so `codex + sdk` does not depend on an interactive shell wrapper to reach the local proxy.
 - The SDK sidecar now treats terminal `turn.completed` / `turn.failed` events as the end of the turn and closes the streamed iterator immediately, so a slow or wedged Codex CLI exit does not keep the mail-runner thread stuck in `running`.
-- CLI remains available as fallback by storing `backend_transport: cli` on an existing thread or by setting `codex_transport_default: cli`.
+- CLI remains available as fallback by storing `backend_transport: cli` on an existing thread or by setting `opencode_transport_default: cli` / `codex_transport_default: cli`.
 
 ## Session Lifecycle
 

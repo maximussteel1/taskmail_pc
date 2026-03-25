@@ -21,6 +21,7 @@ class RelayServerConfig:
     port: int
     transport_token: str
     state_dir: str = "relay_state"
+    pc_control_credentials_path: str = ""
     task_root: str = ""
     smtp_host: str = ""
     smtp_port: int = 465
@@ -46,6 +47,8 @@ class RelayServerConfig:
             raise ValueError("port must be an integer between 0 and 65535")
         _require_text(self.transport_token, "transport_token")
         _require_text(self.state_dir, "state_dir")
+        if self.pc_control_credentials_path:
+            _require_text(self.pc_control_credentials_path, "pc_control_credentials_path")
         if self.task_root:
             _require_text(self.task_root, "task_root")
         if not isinstance(self.smtp_port, int) or not (1 <= self.smtp_port <= 65535):
@@ -141,6 +144,7 @@ def load_relay_server_config(
     port: int | str | None = None,
     transport_token: str | None = None,
     state_dir: str | None = None,
+    pc_control_credentials_path: str | None = None,
     task_root: str | None = None,
     smtp_host: str | None = None,
     smtp_port: int | str | None = None,
@@ -172,6 +176,9 @@ def load_relay_server_config(
         port=int(raw_port),
         transport_token=(transport_token or os.getenv("MAIL_RELAY_TOKEN", "")).strip(),
         state_dir=(state_dir or os.getenv("MAIL_RELAY_STATE_DIR", "relay_state")).strip(),
+        pc_control_credentials_path=(
+            pc_control_credentials_path or os.getenv("MAIL_RELAY_PC_CONTROL_CREDENTIALS_PATH", "")
+        ).strip(),
         task_root=(task_root or os.getenv("MAIL_RUNNER_TASK_ROOT", "")).strip(),
         smtp_host=(smtp_host or os.getenv("MAIL_RELAY_SMTP_HOST", "")).strip(),
         smtp_port=int(raw_smtp_port),

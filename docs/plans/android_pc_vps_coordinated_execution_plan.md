@@ -1,9 +1,20 @@
 # Android / PC / VPS Coordinated Execution Plan
 
+> 2026-03-25 note:
+>
+> This document is no longer the active repository-side mainline owner plan.
+>
+> It is now a legacy direct-connect staged plan kept for closeout and migration reference only.
+>
+> Current future-direction authority:
+>
+> - `docs/plans/android_pc_vps_evolution_authority.md`
+> - `docs/plans/vps_first_multi_pc_control_plane_mainline_v0.1.md`
+
 ## Status
 
 - Date: 2026-03-21
-- Scope: active cross-repo staged execution plan for the public-IP plaintext direct-connect direction
+- Scope: legacy staged execution plan for the public-IP plaintext direct-connect direction
 - Layer: Layer 2 repository plan
 - Assumption: owner-operated system with one primary user path
 - Related docs:
@@ -22,8 +33,8 @@ Turn the new direction choice into one staged plan both repositories can follow:
 - current mail behavior remains the implemented baseline today
 - mail stays available as fallback while the direct path is built
 
-This document is planning authority for the staged path.
-It is **not** a claim that the repository already implements the direct path as the product default.
+This document is no longer planning authority for the active mainline.
+It remains useful only as staged historical context for the older direct-connect line.
 
 ## Current Planning Position
 

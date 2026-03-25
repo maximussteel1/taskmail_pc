@@ -17,6 +17,8 @@ from .adapters.codex_adapter import CodexAdapter
 from .adapters.codex_routing_adapter import CodexRoutingAdapter
 from .adapters.codex_sdk_adapter import CodexSdkAdapter
 from .adapters.opencode_adapter import OpenCodeAdapter
+from .adapters.opencode_routing_adapter import OpenCodeRoutingAdapter
+from .adapters.opencode_sdk_adapter import OpenCodeSdkAdapter
 from .config import AppConfig, load_config
 from .dispatcher import Dispatcher
 from .models import RunResult, TaskSnapshot, ThreadState
@@ -125,6 +127,7 @@ class SerialTaskRunner:
         dispatcher: Dispatcher,
         max_active_sessions: int = 4,
         max_active_sessions_per_workspace: int = 2,
+        opencode_transport_default: str = "sdk",
         codex_transport_default: str = "sdk",
         recovery_callback_factory: RecoveryCallbackFactory | None = None,
         monitor_window_manager: MonitorWindowManager | None = None,
@@ -133,6 +136,7 @@ class SerialTaskRunner:
         self.dispatcher = dispatcher
         self.max_active_sessions = max(1, int(max_active_sessions))
         self.max_active_sessions_per_workspace = max(1, int(max_active_sessions_per_workspace))
+        self.opencode_transport_default = opencode_transport_default
         self.codex_transport_default = codex_transport_default
         self._recovery_callback_factory = recovery_callback_factory
         self._monitor_window_manager = monitor_window_manager
@@ -423,6 +427,8 @@ class SerialTaskRunner:
         return f"thread_{max(existing, default=0) + 1:03d}"
 
     def _default_transport_for_backend(self, backend: str) -> str:
+        if backend == "opencode":
+            return self.opencode_transport_default
         if backend == "codex":
             return self.codex_transport_default
         return BACKEND_TRANSPORT_CLI
@@ -761,7 +767,10 @@ class SerialTaskRunner:
 def _build_dispatcher(config: AppConfig | None = None) -> Dispatcher:
     effective_config = config or AppConfig()
     return Dispatcher(
-        opencode_adapter=OpenCodeAdapter(effective_config),
+        opencode_adapter=OpenCodeRoutingAdapter(
+            cli_adapter=OpenCodeAdapter(effective_config),
+            sdk_adapter=OpenCodeSdkAdapter(effective_config),
+        ),
         codex_adapter=CodexRoutingAdapter(
             cli_adapter=CodexAdapter(effective_config),
             sdk_adapter=CodexSdkAdapter(effective_config),
@@ -785,6 +794,7 @@ def main(argv: list[str] | None = None) -> int:
         _build_dispatcher(config),
         max_active_sessions=config.max_active_sessions,
         max_active_sessions_per_workspace=config.max_active_sessions_per_workspace,
+        opencode_transport_default=config.opencode_transport_default,
         codex_transport_default=config.codex_transport_default,
     )
     try:

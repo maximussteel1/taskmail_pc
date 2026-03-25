@@ -4,6 +4,7 @@
 
 - Updated At: 2026-03-24
 - Current Runtime Stage: post-Phase-8 / TaskMail direct relay-control-file mainline in progress
+- Current Planning Mainline: `VPS-first multi-PC control plane`
 - Status: Active
 - Current Truth Layer: `docs/current/*`
 - Bootstrap Entry: `.\.venv\Scripts\python.exe -m mail_runner.app --once --config <mail_config.bot.local.yaml>`
@@ -12,6 +13,7 @@
 - Test Command: `.\.venv\Scripts\python.exe -m pytest`
 - Latest Recorded Full-Suite Validation: `2026-03-24` -> `452 passed`
 - Note: `2026-03-24` 已为 shared `/control` current-session session-action 扩展补跑 `.\.venv\Scripts\python.exe -m pytest`，结果 `452 passed`
+- Note: `2026-03-24` 已在 `mail_config.bot.relay.local.yaml + _tmp_live_mail_runner` 这组 relay-enabled host 上，完成 Android 真机 `thread_023` fresh-session smoke；后续 current-session plain direct `reply` 与 current-session direct `/status` 两条样本都已收齐 Android retained send record、`session_action_closeout.json`、canonical mail 与 closeout bundle，且两条 bundle 的 `same_run_bind.effective_bind_level` 都稳定为 `request_id`
 
 ## Current Runtime Facts
 
@@ -55,16 +57,18 @@
 
 ## Planning Status
 
-- repository-side `TaskMail direct relay/control/file` 这条线仍是当前主线；current behavior 已大面积落地到代码和 `docs/current/*`，但整条线尚未闭环
-- `phase2/phase3/phase4`、post-creation、taskmail control/file 相关文档不应被误读成“纯历史”；它们当前仍是这条主线的 closeout / evidence / handoff 支撑资料
-- `P9 HTML` 仍是冻结线，不会因为这次 closeout 自动重新变成当前主线
-- `VPS ingress truth v1` 当前仍是后继候选线，不是当前主线
+- 当前代码行为仍是 mail-first，但 future-direction mainline 已切到 `VPS-first 多 PC 控制面`
+- 旧的 `TaskMail direct relay/control/file` 相关文档现在应按 compatibility / closeout / migration reference 读法维护
+- `2026-03-24` 的 `thread_023` 真机 smoke 与其他 direct closeout 证据仍然有效，但它们不再定义未来主线，只定义当前兼容行为与历史迁移材料
+- `VPS ingress truth v1` 当前不再单独读成“主线之后的候选线”，而应作为新主线的前置参考
+- `P9 HTML` 仍是冻结线，不会因为这次 authority reset 自动重新变成当前主线
 
 ## Next Candidate Lines
 
-- `VPS ingress truth v1`
-- 基于 current closeout evidence，决定是否升级 current-session direct `/status` / plain `reply` 的 Layer 1 读法
-- 如需重启 HTML / P9，只能在当前主线明确收口并显式 reopen 后进行，不能隐式借用旧 backlog 口径
+- 冻结 `PC <-> VPS` 字段级 schema
+- 落地 `PC` 节点注册、心跳与 `workspace_snapshot`
+- 落地 `command / event / output_chunk / result / artifact_manifest` 骨架
+- 如需重启 HTML / P9，只能在新主线明确排期并显式 reopen 后进行，不能隐式借用旧 backlog 口径
 
 ## Historical Note
 

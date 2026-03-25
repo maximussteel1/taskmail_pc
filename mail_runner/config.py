@@ -9,7 +9,7 @@ from typing import Any
 
 import yaml
 
-from .status import BACKEND_CODEX, BACKEND_TRANSPORT_CLI, BACKEND_TRANSPORT_SDK
+from .status import BACKEND_CODEX, BACKEND_OPENCODE, BACKEND_TRANSPORT_CLI, BACKEND_TRANSPORT_SDK
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.yaml"
@@ -80,6 +80,7 @@ class AppConfig:
     monitor_window_history_limit: int = 12
     opencode_command: str = ""
     codex_command: str = ""
+    opencode_transport_default: str = BACKEND_TRANSPORT_SDK
     codex_transport_default: str = BACKEND_TRANSPORT_SDK
     codex_sdk_sidecar_command: str = ""
     codex_sdk_sidecar_workdir: str = ""
@@ -112,6 +113,8 @@ class AppConfig:
         return task_root if task_root.is_absolute() else (root / task_root)
 
     def default_transport_for_backend(self, backend: str) -> str:
+        if backend == BACKEND_OPENCODE:
+            return self.opencode_transport_default
         if backend == BACKEND_CODEX:
             return self.codex_transport_default
         return BACKEND_TRANSPORT_CLI
@@ -150,10 +153,10 @@ def _coerce_value(field_name: str, value: Any) -> Any:
         return int(value)
     if field_name in _FLOAT_FIELDS:
         return float(value)
-    if field_name == "codex_transport_default":
+    if field_name in {"opencode_transport_default", "codex_transport_default"}:
         normalized = str(value).strip().lower()
         if normalized not in {BACKEND_TRANSPORT_CLI, BACKEND_TRANSPORT_SDK}:
-            raise ValueError("codex_transport_default must be either 'cli' or 'sdk'")
+            raise ValueError(f"{field_name} must be either 'cli' or 'sdk'")
         return normalized
     if field_name == "imap_receive_mode":
         normalized = str(value).strip().lower()

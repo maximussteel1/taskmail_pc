@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 
 from .models import ParsedMailAction, TaskSnapshot, ThreadState
@@ -12,7 +13,7 @@ from .question_utils import (
     effective_question_set_id,
     merge_question_answers,
 )
-from .status import BACKEND_CODEX, BACKEND_TRANSPORT_CLI
+from .status import BACKEND_TRANSPORT_CLI
 
 _APPEND_PREFIX = "Additional context from reply:"
 
@@ -57,11 +58,18 @@ def _combine_turn_text(raw_text: str, incoming_paths: list[str]) -> str:
     return "\n\n".join(parts).strip()
 
 
-def _continued_backend_transport(*, backend: str, current_backend: str, current_transport: str) -> str:
-    if backend != BACKEND_CODEX:
-        return BACKEND_TRANSPORT_CLI
-    if current_backend == BACKEND_CODEX:
-        return current_transport
+def _continued_backend_transport(
+    *,
+    backend: str,
+    current_backend: str,
+    current_transport: str,
+    default_transport_for_backend: Callable[[str], str] | None,
+) -> str:
+    normalized_transport = str(current_transport or "").strip()
+    if backend == current_backend and normalized_transport:
+        return normalized_transport
+    if default_transport_for_backend is not None:
+        return default_transport_for_backend(backend)
     return BACKEND_TRANSPORT_CLI
 
 
@@ -127,6 +135,7 @@ def compile_task(
     thread_id: str | None = None,
     incoming_attachment_paths: list[str] | None = None,
     fallback_to_new_run: bool = False,
+    default_transport_for_backend: Callable[[str], str] | None = None,
 ) -> TaskSnapshot | None:
     if action.action in {"STATUS_QUERY", "LAST_RESULT_QUERY", "RESTART_RUNNER", "KILL", "UNKNOWN", "LIST_SESSIONS", "PAUSE_SESSION"}:
         return None
@@ -145,6 +154,7 @@ def compile_task(
         backend=backend,
         current_backend=thread_state.backend,
         current_transport=thread_state.backend_transport,
+        default_transport_for_backend=default_transport_for_backend,
     )
 
     if action.action == "RERUN":

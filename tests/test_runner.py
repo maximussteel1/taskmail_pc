@@ -635,3 +635,30 @@ def test_serial_task_runner_defaults_codex_seed_transport_to_sdk(tmp_path) -> No
     assert result.backend == BACKEND_CODEX
     assert result.backend_transport == "sdk"
     assert state.backend_transport == "sdk"
+
+
+def test_serial_task_runner_defaults_opencode_seed_transport_to_sdk(tmp_path) -> None:
+    seed_path = tmp_path / "seed.json"
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    seed_path.write_text(
+        json.dumps(
+            {
+                "backend": "opencode",
+                "repo_path": str(repo_dir),
+                "task_text": "Inspect the repo.",
+                "workdir": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    task_root = tmp_path / "tasks"
+    dispatcher = Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0))
+    runner = SerialTaskRunner(task_root, dispatcher, opencode_transport_default="sdk")
+
+    result = runner.start(seed_path)
+    state = load_thread_state(result.thread_id, task_root)
+
+    assert result.backend == BACKEND_OPENCODE
+    assert result.backend_transport == "sdk"
+    assert state.backend_transport == "sdk"

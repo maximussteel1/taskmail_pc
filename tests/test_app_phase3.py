@@ -932,6 +932,28 @@ def test_process_once_new_codex_task_defaults_to_sdk_transport(tmp_path) -> None
     assert adapter.snapshots[-1].backend_transport == "sdk"
 
 
+def test_process_once_new_opencode_task_defaults_to_sdk_transport(tmp_path) -> None:
+    adapter = RecordingAdapter()
+    dispatcher = Dispatcher(adapter, MockAdapter(sleep_seconds=0))
+    envelope = MailEnvelope(
+        message_id="<root-opencode@example.com>",
+        subject="[OC] Demo task",
+        from_addr="user@example.com",
+        to_addr="bot@example.com",
+        date="2026-03-25T12:09:00",
+        body_text="Repo: D:\\repo\nTask:\nInspect the project.\n",
+        raw_headers={"Subject": "[OC] Demo task"},
+    )
+    client = FakeMailClient([envelope])
+    config = AppConfig(from_addr="user@example.com", from_name="Mail Runner", task_root="tasks")
+
+    stats = process_once(config, base_dir=tmp_path, mail_client=client, dispatcher=dispatcher)
+
+    assert stats == {"fetched": 1, "processed": 1, "skipped": 0, "failed": 0}
+    assert adapter.snapshots[-1].backend == BACKEND_OPENCODE
+    assert adapter.snapshots[-1].backend_transport == "sdk"
+
+
 def test_process_once_auto_ends_oldest_active_session_when_creating_fifth_one(tmp_path) -> None:
     task_root = tmp_path / "tasks"
     _create_finished_thread(task_root, "thread_001", last_active_at="2026-03-12T12:01:00", updated_at="2026-03-12T12:01:00")

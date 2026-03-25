@@ -20,6 +20,8 @@ from .adapters.codex_adapter import CodexAdapter
 from .adapters.codex_routing_adapter import CodexRoutingAdapter
 from .adapters.codex_sdk_adapter import CodexSdkAdapter
 from .adapters.opencode_adapter import OpenCodeAdapter
+from .adapters.opencode_routing_adapter import OpenCodeRoutingAdapter
+from .adapters.opencode_sdk_adapter import OpenCodeSdkAdapter
 from .config import AppConfig, load_config
 from .context_layer import build_context
 from .dispatcher import Dispatcher
@@ -32,6 +34,7 @@ from .monitor_windows import MonitorWindowManager
 from .outbound.service import build_references as _build_references, send_status_update as _send_status_update
 from .question_utils import effective_pending_questions, merge_question_answers, missing_required_question_ids
 from .parser import parse_initial_task, parse_subject
+from .pc_control_plane_client import build_pc_control_plane_client
 from .project_folder_sync import build_project_folder_sync_body, list_project_folders
 from .reporter import (
     MAIL_STATUS_ACCEPTED,
@@ -123,6 +126,8 @@ BOOTSTRAP_MODULES = (
     "mail_runner.adapters.base",
     "mail_runner.adapters.mock_adapter",
     "mail_runner.adapters.opencode_adapter",
+    "mail_runner.adapters.opencode_routing_adapter",
+    "mail_runner.adapters.opencode_sdk_adapter",
     "mail_runner.adapters.codex_adapter",
     "mail_runner.adapters.codex_routing_adapter",
     "mail_runner.adapters.codex_sdk_adapter",
@@ -262,7 +267,10 @@ def bootstrap(config: AppConfig, base_dir: str | Path | None = None) -> dict[str
 def _build_dispatcher(config: AppConfig | None = None) -> Dispatcher:
     effective_config = config or AppConfig()
     return Dispatcher(
-        opencode_adapter=OpenCodeAdapter(effective_config),
+        opencode_adapter=OpenCodeRoutingAdapter(
+            cli_adapter=OpenCodeAdapter(effective_config),
+            sdk_adapter=OpenCodeSdkAdapter(effective_config),
+        ),
         codex_adapter=CodexRoutingAdapter(
             cli_adapter=CodexAdapter(effective_config),
             sdk_adapter=CodexSdkAdapter(effective_config),
@@ -1112,10 +1120,10 @@ def _start_new_session_from_reply(
         now=_timestamp(),
         thread_id=runner.next_thread_id(),
         incoming_attachment_paths=incoming_attachment_paths,
+        default_transport_for_backend=config.default_transport_for_backend,
     )
     if compiled is None:
         return False
-    compiled.backend_transport = config.default_transport_for_backend(compiled.backend)
     return _start_snapshot_run(
         runner,
         compiled,
@@ -1988,6 +1996,7 @@ def _handle_existing_action(
         now=_timestamp(),
         incoming_attachment_paths=incoming_attachment_paths,
         fallback_to_new_run=recovery_from_failed_thread,
+        default_transport_for_backend=config.default_transport_for_backend,
     )
     if compiled is None:
         _send_existing_action_status_update(
@@ -2162,6 +2171,7 @@ def process_once(
         active_dispatcher,
         max_active_sessions=config.max_active_sessions,
         max_active_sessions_per_workspace=config.max_active_sessions_per_workspace,
+        opencode_transport_default=config.opencode_transport_default,
         codex_transport_default=config.codex_transport_default,
         recovery_callback_factory=_build_recovery_callback_factory(config, task_root, client),
     )
@@ -2178,10 +2188,15 @@ def run_forever(config: AppConfig, *, base_dir: str | Path | None = None) -> Non
         _build_dispatcher(config),
         max_active_sessions=config.max_active_sessions,
         max_active_sessions_per_workspace=config.max_active_sessions_per_workspace,
+        opencode_transport_default=config.opencode_transport_default,
         codex_transport_default=config.codex_transport_default,
         recovery_callback_factory=_build_recovery_callback_factory(config, task_root, client),
         monitor_window_manager=_build_monitor_window_manager(config, task_root=task_root, base_dir=base_dir),
     )
+    pc_control_client = build_pc_control_plane_client(config, runner=runner)
+    if pc_control_client is not None:
+        LOGGER.info("Starting pc-control sidecar. pc_id=%s relay_url=%s", config.relay_client_id, config.relay_url)
+        pc_control_client.start()
     try:
         while True:
             runner.collect_finished()
@@ -2225,6 +2240,8 @@ def run_forever(config: AppConfig, *, base_dir: str | Path | None = None) -> Non
                     client.receive_mode(),
                 )
     finally:
+        if pc_control_client is not None:
+            pc_control_client.stop()
         client.close()
 
 

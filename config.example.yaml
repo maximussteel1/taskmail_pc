@@ -30,6 +30,7 @@ project_sync_roots:
 # Empty means auto-discover the CLI. Use "demo" for local adapter dry runs.
 opencode_command: ""
 codex_command: ""
+opencode_transport_default: sdk
 codex_transport_default: sdk
 # Empty means using the bundled sidecar at scripts/codex_sdk_sidecar/dist/index.js.
 codex_sdk_sidecar_command: ""

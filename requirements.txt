@@ -2,3 +2,4 @@ PyYAML>=6.0
 pytest>=8.0
 cos-python-sdk-v5>=1.9.38
 websockets>=11,<13
+opencode-ai>=0.1.0a36

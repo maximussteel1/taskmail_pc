@@ -19,6 +19,7 @@ def test_load_config_uses_defaults_when_file_is_missing(tmp_path: Path) -> None:
     assert config.max_active_sessions_per_workspace == 2
     assert config.task_root == "tasks"
     assert config.project_sync_roots == ["D:\\projects", "E:\\projects"]
+    assert config.opencode_transport_default == "sdk"
     assert config.codex_transport_default == "sdk"
     assert config.codex_sdk_sidecar_command == ""
     assert config.spawn_monitor_windows is False
@@ -52,6 +53,7 @@ def test_load_config_reads_yaml_values_and_ignores_removed_keys(tmp_path: Path) 
                 "monitor_window_refresh_seconds: 7",
                 "monitor_window_buffer_lines: 600",
                 "monitor_window_history_limit: 20",
+                "opencode_transport_default: cli",
                 "codex_transport_default: cli",
                 "codex_sdk_sidecar_command: node scripts/codex_sdk_sidecar/dist/index.js",
                 "outbound_transport: relay",
@@ -85,6 +87,7 @@ def test_load_config_reads_yaml_values_and_ignores_removed_keys(tmp_path: Path) 
     assert config.monitor_window_refresh_seconds == 7
     assert config.monitor_window_buffer_lines == 600
     assert config.monitor_window_history_limit == 20
+    assert config.opencode_transport_default == "cli"
     assert config.codex_transport_default == "cli"
     assert config.codex_sdk_sidecar_command == "node scripts/codex_sdk_sidecar/dist/index.js"
     assert config.outbound_transport == "relay"
@@ -116,6 +119,7 @@ def test_environment_variables_override_yaml(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.setenv("MAIL_RUNNER_MONITOR_WINDOW_BUFFER_LINES", "700")
     monkeypatch.setenv("MAIL_RUNNER_MONITOR_WINDOW_HISTORY_LIMIT", "18")
     monkeypatch.setenv("MAIL_RUNNER_PROJECT_SYNC_ROOTS", "D:\\alpha;E:\\beta")
+    monkeypatch.setenv("MAIL_RUNNER_OPENCODE_TRANSPORT_DEFAULT", "cli")
     monkeypatch.setenv("MAIL_RUNNER_CODEX_TRANSPORT_DEFAULT", "cli")
 
     config = load_config(str(config_path))
@@ -132,6 +136,7 @@ def test_environment_variables_override_yaml(tmp_path: Path, monkeypatch) -> Non
     assert config.monitor_window_refresh_seconds == 9
     assert config.monitor_window_buffer_lines == 700
     assert config.monitor_window_history_limit == 18
+    assert config.opencode_transport_default == "cli"
     assert config.codex_transport_default == "cli"
     assert not hasattr(config, "prune_old_status_mails")
     assert config.project_sync_roots == ["D:\\alpha", "E:\\beta"]

@@ -9,7 +9,7 @@
 - 提供核心 dataclass、基础配置加载和启动自检入口
 - 提供 `workspace.py`、`thread_store.py`、`state_capsule.py` 的本地状态与落盘能力
 - 提供 `MockAdapter`、`Dispatcher` 和本地 demo `runner`
-- 提供真实 `OpenCodeAdapter` / `CodexAdapter` CLI 薄封装，支持 `prompt.txt` 落盘、stdout/stderr 捕获、退出码回收和子进程 kill
+- 提供真实 `OpenCode` / `Codex` 的 `sdk-first` runtime 接线；其中 `OpenCode` SDK 通过临时本地 `opencode serve` 执行，`Codex` SDK 通过 Node sidecar 执行，CLI 仍保留为兼容 fallback
 - 提供真实后端输出摘要提取：成功时从 `stdout` 提取用户摘要，失败时从 `stderr` 提取主要错误，并同步到 `summary.md`、`result.json`、`thread_state.json` 和状态邮件
 - 提供显式问题协议：后端可输出一个或多个 `question capsule`，系统会将该轮结果落为 `awaiting_user_input` 并发送 `[QUESTION]`
 - 提供等待态回复恢复：用户回复答案后会生成新的 snapshot 并继续执行，而不是直接丢弃等待中的任务主线
@@ -44,10 +44,13 @@
 - 已完成 Phase 6 本地问答恢复验证：`QUESTION -> ANSWER -> DONE` 和等待态 `RERUN` 拒绝路径均已由自动化测试覆盖
 - 提供根目录 `state.md` 记录每个阶段完成后的当前项目状态
 
-## Codex Transport
+## SDK-First Transport
 
-- New Codex threads now default to the SDK transport for continuous sessions; old records without `backend_transport` stay on CLI for compatibility.
-- The SDK bridge is implemented as a thin Node sidecar at `scripts/codex_sdk_sidecar/dist/index.js`, while CLI remains the fallback path.
+- New OpenCode and Codex threads now default to the SDK transport; old records without `backend_transport` stay on CLI for compatibility.
+- reply continuation、`/resume` 和 `ANSWER_QUESTION` 现在会继承当前 thread/session 已持久化的 `backend_transport`；显式切 backend 或显式 `/new` 时，再按目标 backend 默认 transport 重新解析。
+- OpenCode runtime SDK turns use a short-lived local `opencode serve` and close that temporary listener after the turn finishes.
+- Codex runtime SDK turns use the Node sidecar at `scripts/codex_sdk_sidecar/dist/index.js`.
+- CLI remains the fallback path when a thread explicitly stores `backend_transport: cli` or the config default is switched back.
 
 ## Session Lifecycle
 
@@ -67,6 +70,7 @@
 ```text
 docs/
   current/
+  reference/
   plans/
   platform/
   research/
@@ -87,11 +91,12 @@ task.md
 
 文档分层基线见 [docs/document_layering_plan.md](docs/document_layering_plan.md)。
 当前活跃协议文档集中在 [docs/current/README.md](docs/current/README.md)；
+可复用操作参考集中在 [docs/reference/README.md](docs/reference/README.md)；
 当前仓库改造计划集中在 [docs/plans/README.md](docs/plans/README.md)；
 未来平台文档集中在 [docs/platform/README.md](docs/platform/README.md)；
 当前 backlog 重置口径见 [docs/plans/coding_backlog.md](docs/plans/coding_backlog.md)。
 
-当前 Android / relay / output 相关 authority 以 [docs/current/taskmail_direct_control_file_contract.md](docs/current/taskmail_direct_control_file_contract.md)、[docs/current/android_runner_communication_contract.md](docs/current/android_runner_communication_contract.md)、[docs/current/pc_mail_output_protocol.md](docs/current/pc_mail_output_protocol.md) 和 [docs/current/multimedia_mail_protocol.md](docs/current/multimedia_mail_protocol.md) 为准。`docs/plans/README.md` 现在用于区分当前主线、后继候选线、冻结线和支撑性 closeout/handoff 文档；repo-side `TaskMail direct relay/control/file` 这条线虽然已经落地了大段 current behavior，但按当前口径仍然是 active mainline，不应被误读成已完成退场。
+当前 Android / relay / output 相关 authority 以 [docs/current/taskmail_direct_control_file_contract.md](docs/current/taskmail_direct_control_file_contract.md)、[docs/current/android_runner_communication_contract.md](docs/current/android_runner_communication_contract.md)、[docs/current/pc_mail_output_protocol.md](docs/current/pc_mail_output_protocol.md) 和 [docs/current/multimedia_mail_protocol.md](docs/current/multimedia_mail_protocol.md) 为准。`docs/plans/README.md` 现在用于区分“当前行为的兼容/closeout 参考线”和“当前 future-direction 主线”；自 `2026-03-25` 起，future-direction active mainline 已切到 `VPS-first 多 PC 控制面`，旧的 `TaskMail direct relay/control/file` 只应按 current-behavior migration reference 阅读。
 
 ## 当前架构现状
 
@@ -237,6 +242,71 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\safe_shutdown_mail
 - `.\.venv\Scripts\python.exe .\scripts\live_smoke_mail_question_answer.py --config .\_tmp_live_mail_runner\mail_config.loop_30s.yaml --sender-config .\mail_config.local.yaml --backend opencode`
 - `.\.venv\Scripts\python.exe .\scripts\live_smoke_mail_kill.py --config .\_tmp_live_mail_runner\mail_config.loop_30s.yaml --sender-config .\mail_config.local.yaml --backend codex`
 - `.\.venv\Scripts\python.exe .\scripts\live_smoke_mail_sync.py --config .\_tmp_live_mail_runner\mail_config.loop_30s.yaml --sender-config .\mail_config.local.yaml`
+
+本地 OpenCode SDK 冒烟脚本：
+
+- `.\.venv\Scripts\python.exe .\scripts\opencode_sdk_smoke.py`
+- 脚本会在临时 workspace 里拉起 `opencode serve`，通过 Python SDK 发一个最小任务，并验证 `smoke_note.txt` 是否按预期创建
+- 默认结果写到 `._tmp_opencode_sdk_smoke\<run-name>\result.json`
+- 使用参考见 [docs/reference/opencode_sdk_smoke.md](docs/reference/opencode_sdk_smoke.md)
+- 当前验证结果见 [docs/reference/opencode_sdk_validation.md](docs/reference/opencode_sdk_validation.md)
+
+独立 sdk-first runtime smoke：
+
+- `.\.venv\Scripts\python.exe .\scripts\sdk_runtime_smoke.py --backend opencode`
+- `.\.venv\Scripts\python.exe .\scripts\sdk_runtime_smoke.py --backend codex`
+- 这两条 smoke 不挂在 `tests/` 主测试集里，结果默认写到 `._tmp_sdk_runtime_smoke\<run-name>\smoke_result.json`
+- 使用参考见 [docs/reference/sdk_runtime_smoke.md](docs/reference/sdk_runtime_smoke.md)
+- 当前验证结果见 [docs/reference/sdk_runtime_smoke_validation.md](docs/reference/sdk_runtime_smoke_validation.md)
+
+独立 sdk-first question-answer smoke：
+
+- `.\.venv\Scripts\python.exe .\scripts\sdk_question_answer_smoke.py --backend opencode`
+- `.\.venv\Scripts\python.exe .\scripts\sdk_question_answer_smoke.py --backend codex`
+- 这两条 smoke 同样不挂在 `tests/` 主测试集里，结果默认写到 `._tmp_sdk_question_smoke\<run-name>\smoke_result.json`
+- 使用参考见 [docs/reference/sdk_question_answer_smoke.md](docs/reference/sdk_question_answer_smoke.md)
+- 当前验证结果见 [docs/reference/sdk_question_answer_smoke_validation.md](docs/reference/sdk_question_answer_smoke_validation.md)
+
+独立 waiting-state variant smoke：
+
+- `.\.venv\Scripts\python.exe .\scripts\waiting_state_variant_smoke.py`
+- 这条 smoke 同样不挂在 `tests/` 主测试集里，结果默认写到 `._tmp_waiting_state_variant_smoke\<run-name>\smoke_result.json`
+- 它是 fixture harness，不消耗真实 backend 额度，但会保留完整状态机证据
+- 使用参考见 [docs/reference/waiting_state_variant_smoke.md](docs/reference/waiting_state_variant_smoke.md)
+- 当前验证结果见 [docs/reference/waiting_state_variant_smoke_validation.md](docs/reference/waiting_state_variant_smoke_validation.md)
+
+独立 artifact contract smoke：
+
+- `.\.venv\Scripts\python.exe .\scripts\artifact_contract_smoke.py`
+- 这条 smoke 同样不挂在 `tests/` 主测试集里，结果默认写到 `._tmp_artifact_contract_smoke\<run-name>\smoke_result.json`
+- 它会复核当前 `RunArtifact + artifact_index.json` truth layer，并额外记录候选 `artifact_manifest` 投影
+- 使用参考见 [docs/reference/artifact_contract_smoke.md](docs/reference/artifact_contract_smoke.md)
+- 当前验证结果见 [docs/reference/artifact_contract_smoke_validation.md](docs/reference/artifact_contract_smoke_validation.md)
+
+独立 PC control-plane fixture smoke：
+
+- `.\.venv\Scripts\python.exe .\scripts\pc_control_plane_fixture_smoke.py`
+- 这条 smoke 同样不挂在 `tests/` 主测试集里，结果默认写到 `._tmp_pc_control_plane_fixture_smoke\<run-name>\smoke_result.json`
+- 它会复核当前已实现的 `pc_hello / hello_ack / workspace_snapshot / command_dispatch / command_ack / connection_epoch` 骨架，并显式记录 `event/result/output_chunk` gap
+- 使用参考见 [docs/reference/pc_control_plane_fixture_smoke.md](docs/reference/pc_control_plane_fixture_smoke.md)
+- 当前验证结果见 [docs/reference/pc_control_plane_fixture_smoke_validation.md](docs/reference/pc_control_plane_fixture_smoke_validation.md)
+
+独立 sdk-first permission smoke：
+
+- `.\.venv\Scripts\python.exe .\scripts\sdk_permission_smoke.py --backend opencode`
+- `.\.venv\Scripts\python.exe .\scripts\sdk_permission_smoke.py --backend codex`
+- 这两条 smoke 同样不挂在 `tests/` 主测试集里，结果默认写到 `._tmp_sdk_permission_smoke\<run-name>\smoke_result.json`
+- 使用参考见 [docs/reference/sdk_permission_smoke.md](docs/reference/sdk_permission_smoke.md)
+- 当前验证结果见 [docs/reference/sdk_permission_smoke_validation.md](docs/reference/sdk_permission_smoke_validation.md)
+
+独立 sdk-first stream smoke：
+
+- `.\.venv\Scripts\python.exe .\scripts\sdk_stream_smoke.py --backend codex`
+- `.\.venv\Scripts\python.exe .\scripts\sdk_stream_smoke.py --backend opencode`
+- 这两条 smoke 同样不挂在 `tests/` 主测试集里，结果默认写到 `._tmp_sdk_stream_smoke\<run-name>\stream_smoke_result.json`
+- `Codex` 会验证 `stream.events.jsonl` 与最小 `output_chunk` 候选投影；`OpenCode` 会显式记录当前 stream gap
+- 使用参考见 [docs/reference/sdk_stream_smoke.md](docs/reference/sdk_stream_smoke.md)
+- 当前验证结果见 [docs/reference/sdk_stream_smoke_validation.md](docs/reference/sdk_stream_smoke_validation.md)
 
 当前最新 `Permission:` live 结果落在：
 
@@ -522,10 +592,10 @@ question_id: phase2_device_validation
 
 ## 后续事项
 
-- repository-side `TaskMail direct relay/control/file` 这条线仍是当前主线；不要把它误读成“已经完成后退场”
-- `phase2/phase3/phase4/post_creation/taskmail_*` 文档当前仍是这条主线的 closeout / evidence / handoff 支撑资料，不是单纯历史
-- 当前主线之后最明确的候选线是 `VPS ingress truth v1`
-- “是否升级 current-session direct `/status` / plain `reply` 的 Layer 1 读法” 当前仍是 decision line，不是已冻结执行计划
+- 当前代码行为仍是 mail-first，但 future-direction active mainline 已切到 `VPS-first 多 PC 控制面`
+- `phase2/phase3/phase4/post_creation/taskmail_*` 文档当前应按 compatibility / closeout / migration reference 读取，不再是未来主线 owner queue
+- 新主线当前优先事项是：`PC` 节点注册、`workspace_snapshot`、`command/event/output_chunk/result/artifact_manifest` 协议骨架
+- `VPS ingress truth v1` 当前更适合作为新主线的前置参考，而不是单独的“下一条主线”
 - 如需重启 HTML / `P9`，必须显式 reopen；不能因为旧文档仍在仓库里就默认恢复为当前主线
 - 如果后续重新打开 session / routing 方向，再讨论 non-reply reuse、cross-workspace routing 和更强的 session targeting，而不是继续沿用旧 roadmap 口径
 - 多媒体邮件输入输出的当前事实仍以 [docs/current/multimedia_mail_protocol.md](docs/current/multimedia_mail_protocol.md) 为准

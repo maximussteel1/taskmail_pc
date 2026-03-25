@@ -2,7 +2,7 @@
 
 ## Status
 
-- Date: 2026-03-23
+- Date: 2026-03-24
 - Scope: repository-side handoff from the first post-creation session-action implementation slice into live closeout evidence capture and Layer 1 upgrade review
 - Layer: Layer 2 repository note
 - Related docs:
@@ -147,6 +147,120 @@
 ```powershell
 .\.venv\Scripts\python.exe .\scripts\build_taskmail_closeout_bundle.py <thread_id> --task-root .\tasks --android-send-records <android_send_records.json> --write-run-artifact
 ```
+
+## Latest Live Smoke Result
+
+### 2026-03-24 / `thread_023`
+
+这轮在真实 Android 设备 + relay-enabled host + VPS relay 上，已经按当前窄口径收齐一轮 fresh session + post-creation closeout 证据。
+
+执行前置条件：
+
+- host 使用 `mail_config.bot.relay.local.yaml + _tmp_live_mail_runner`
+- `scripts/manage_mail_runner.ps1 status` 最终确认：
+  - `host_state.json -> status=running`
+  - `Relay task-root sync -> enabled=True, running=True`
+- 本轮先补回仓库根目录 `work_bot.pem`，再重启 host；否则当前环境会把 relay task-root sync 判成 disabled，进而把 locator 问题误伤到 direct lane 读法
+
+fresh session 种子：
+
+- Android 首封新任务创建 `thread_023`
+- repo：`E:\projects\android_task_manager`
+- thread state 最终落到：
+  - `tasks/thread_023/thread_state.json`
+  - `status=done`
+  - `last_summary=SMOKE_FRESH_20260324_A`
+- fresh session 的 Android retained `new_task` evidence 已保留在：
+  - `_tmp_live_mail_runner/thread023_taskmail_new_task_send_records.json`
+- 其中当前样本对应：
+  - `request_id=req_3f53309b4b0441c5af146abe98e39d53`
+  - `receipt_id=relay-receipt:android-taskmail:new-task:req_3f53309b4b0441c5af146abe98e39d53:a0dced0d`
+  - `transport_message_id=<177436455008.1567967.8220906009454055614@mail-runner.local>`
+
+### Sample B: current-session plain direct `reply`
+
+当前样本结果：
+
+- Android retained send evidence：
+  - `_tmp_live_mail_runner/thread023_taskmail_session_action_send_records.json`
+  - `request_id=req_2dae54d7212340f0ad72dc4253bdc0d5`
+  - `receipt_id=relay-receipt:android-taskmail:session-action:req_2dae54d7212340f0ad72dc4253bdc0d5:be76625a`
+  - `transport_message_id=<177436470093.1567967.12425651481810591539@mail-runner.local>`
+- PC ingress raw mail：
+  - `tasks/thread_023/mail/raw_005.json`
+- thread-scoped closeout：
+  - `tasks/thread_023/session_actions/req_2dae54d7212340f0ad72dc4253bdc0d5/session_action_closeout.json`
+- run-scoped supporting evidence：
+  - `tasks/thread_023/runs/20260324_230518_ddcd/canonical_summary.json`
+- terminal canonical mail：
+  - `tasks/thread_023/mail/raw_008.json`
+  - `subject=[DONE][S:thread_023] say hi`
+- closeout bundle：
+  - `_tmp_live_mail_runner/thread023_reply_closeout_bundle.json`
+
+当前判读结果：
+
+- bundle 的 `pc_canonical_outcome.source=session_action_closeout`
+- bundle 的 `android_latest_send_evidence.selection=request_id`
+- bundle 的 `same_run_bind.effective_bind_level=request_id`
+- `same_run_bind.matched_fields` 当前稳定包含：
+  - `request_id`
+  - `transport_message_id`
+
+### Sample A: current-session direct `/status`
+
+当前样本结果：
+
+- Android retained send evidence：
+  - `_tmp_live_mail_runner/thread023_taskmail_session_action_send_records.json`
+  - `request_id=req_6f5bc135a2954807adaa6d007f6ac35d`
+  - `receipt_id=relay-receipt:android-taskmail:session-action:req_6f5bc135a2954807adaa6d007f6ac35d:b6ad3989`
+  - `transport_message_id=<177436498200.1567967.4856832740287505895@mail-runner.local>`
+- PC ingress raw mail：
+  - `tasks/thread_023/mail/raw_009.json`
+- thread-scoped closeout：
+  - `tasks/thread_023/session_actions/req_6f5bc135a2954807adaa6d007f6ac35d/session_action_closeout.json`
+- canonical `[STATUS]` mail：
+  - `tasks/thread_023/mail/raw_010.json`
+  - `subject=[STATUS][S:thread_023] say hi`
+- closeout bundle：
+  - `_tmp_live_mail_runner/thread023_status_closeout_bundle.json`
+
+当前判读结果：
+
+- bundle 的 `pc_canonical_outcome.source=session_action_closeout`
+- bundle 的 `android_latest_send_evidence.selection=request_id`
+- bundle 的 `same_run_bind.effective_bind_level=request_id`
+- `same_run_bind.matched_fields` 当前稳定包含：
+  - `request_id`
+  - `transport_message_id`
+
+### Current Readout
+
+截至这轮 `thread_023` 真机 smoke，当前可以明确读到：
+
+- current-session plain direct `reply` 已在真实 Android / relay / PC 链路上完成：
+  - Android retained send record
+  - PC ingress raw mail
+  - `session_action_closeout.json`
+  - `canonical_summary.json`
+  - canonical terminal mail
+  - closeout bundle
+- current-session direct `/status` 也已在同一条真实链路上完成：
+  - Android retained send record
+  - PC ingress raw mail
+  - `session_action_closeout.json`
+  - canonical `[STATUS]` mail
+  - closeout bundle
+- 两条样本的 closeout bundle 都已经把 `same_run_bind` 稳定提升到 `request_id`
+- 本轮没有观察到 subject / state capsule / terminal semantics drift
+- Android UI 在 plain `reply` 完成后短暂仍显示 `running`，但 PC truth 与 relay 侧都已完成收口；这在当前应读作客户端刷新滞后，不应直接判成 closeout failure
+
+这轮结果足以支撑：
+
+1. 当前 closeout workflow 已能在真实 Android + relay-enabled host 上收齐两条窄口径样本
+2. 下一步可以讨论是否把这组证据提升为 current-session direct `/status` / plain `reply` 的 Layer 1 读法升级依据
+3. 但在 owner 明确决定前，不应因为这轮样本成功，就自动改写 `docs/current/*`
 
 ## Closeout Review Questions
 
