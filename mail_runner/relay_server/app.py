@@ -22,6 +22,12 @@ import websockets
 
 from ..config import load_config
 from ..file_surface import FileSurfaceStore, FileSurfaceUploadError
+from .android_create_session_facade import (
+    ANDROID_CREATE_SESSION_PATH,
+    AndroidCreateSessionRequestError,
+    AndroidCreateSessionSubmitTimeout,
+    submit_android_create_session_command,
+)
 from .auth import token_fingerprint, validate_transport_token
 from .config import RelayServerConfig, load_relay_server_config
 from .control_protocol import (
@@ -324,6 +330,69 @@ def build_http_server(
 
         def do_POST(self) -> None:  # noqa: N802
             path = self._normalized_path()
+            if path == ANDROID_CREATE_SESSION_PATH:
+                if not self._require_transport_token():
+                    self._discard_request_body()
+                    return
+                if pc_control_runtime is None:
+                    self._discard_request_body()
+                    self._write_json(
+                        503,
+                        {
+                            "status": "error",
+                            "error_code": "pc_control_unavailable",
+                            "error_message": "pc_control_runtime is not configured",
+                            "retryable": True,
+                        },
+                    )
+                    return
+                try:
+                    raw_length = str(self.headers.get("Content-Length", "") or "").strip()
+                    content_length = int(raw_length)
+                    if content_length < 0:
+                        raise ValueError("Content-Length must be non-negative")
+                    body = self.rfile.read(content_length)
+                    payload = json.loads(body.decode("utf-8"))
+                    response_payload = submit_android_create_session_command(
+                        payload,
+                        pc_control_runtime=pc_control_runtime,
+                    )
+                except json.JSONDecodeError as exc:
+                    self._write_json(
+                        400,
+                        {
+                            "status": "error",
+                            "error_code": "invalid_json",
+                            "error_message": f"request body is not valid JSON: {exc}",
+                            "retryable": False,
+                        },
+                    )
+                    return
+                except AndroidCreateSessionRequestError as exc:
+                    self._write_json(
+                        400,
+                        {
+                            "status": "error",
+                            "error_code": "invalid_payload",
+                            "error_message": str(exc),
+                            "retryable": False,
+                        },
+                    )
+                    return
+                except AndroidCreateSessionSubmitTimeout as exc:
+                    self._write_json(
+                        504,
+                        {
+                            "status": "error",
+                            "error_code": "submit_ack_timeout",
+                            "error_message": str(exc),
+                            "retryable": True,
+                            "command_id": exc.command_id,
+                        },
+                    )
+                    return
+                self._write_json(200, response_payload)
+                return
             if path == _PC_CONTROL_OPERATOR_DISPATCH_PATH:
                 if not self._require_transport_token():
                     self._discard_request_body()
