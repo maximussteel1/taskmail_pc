@@ -17,6 +17,14 @@ ANDROID_CREATE_SESSION_PATH = "/v1/android/create-session"
 ANDROID_CREATE_SESSION_SCHEMA_VERSION = "taskmail-android-create-session-facade-v1"
 _ACK_WAIT_SECONDS = 5.0
 _ACK_POLL_SECONDS = 0.05
+_ALLOWED_REJECT_ERROR_CODES = {
+    "unsupported_backend",
+    "unsupported_profile",
+    "unsupported_permission",
+    "profile_model_unresolved",
+    "workspace_unavailable",
+    "pc_offline",
+}
 
 
 def _timestamp() -> str:
@@ -38,10 +46,10 @@ def _optional_text(value: Any, field_name: str) -> str | None:
     return normalized or None
 
 
-def _mapping_field(payload: dict[str, Any], field_name: str) -> dict[str, Any]:
+def _required_mapping_field(payload: dict[str, Any], field_name: str) -> dict[str, Any]:
     value = payload.get(field_name)
     if value is None:
-        return {}
+        raise AndroidCreateSessionRequestError(f"{field_name} is required and must be a JSON object")
     if not isinstance(value, dict):
         raise AndroidCreateSessionRequestError(f"{field_name} must be a JSON object")
     return dict(value)
@@ -86,16 +94,18 @@ def _generate_session_id() -> str:
     return f"thread_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{secrets.token_hex(3)}"
 
 
-def _map_facade_error_code(code: str | None) -> str | None:
+def _normalize_reject_error_code(code: str | None) -> str:
     normalized = str(code or "").strip()
     if not normalized:
-        return None
+        raise AndroidCreateSessionContractError("rejected submit_ack must include an error_code")
     if normalized in {"unknown_workspace", "workspace_unavailable"}:
-        return "workspace_unavailable"
+        normalized = "workspace_unavailable"
     if normalized in {"unknown_pc", "pc_not_online", "pc_offline"}:
-        return "pc_offline"
+        normalized = "pc_offline"
     if normalized == "unsupported_backend_transport":
-        return "unsupported_backend"
+        normalized = "unsupported_backend"
+    if normalized not in _ALLOWED_REJECT_ERROR_CODES:
+        raise AndroidCreateSessionContractError(f"unmapped rejected submit_ack error_code: {normalized}")
     return normalized
 
 
@@ -106,11 +116,16 @@ def _build_submit_ack(
     reason: str | None = None,
     error_code: str | None = None,
 ) -> dict[str, Any]:
+    normalized_error_code = (
+        _normalize_reject_error_code(error_code)
+        if str(ack_status or "").strip() == "rejected"
+        else None
+    )
     return {
         "ack_status": ack_status,
         "queue_position": queue_position,
         "reason": reason,
-        "error_code": _map_facade_error_code(error_code),
+        "error_code": normalized_error_code,
     }
 
 
@@ -153,6 +168,10 @@ class AndroidCreateSessionRequestError(ValueError):
     pass
 
 
+class AndroidCreateSessionContractError(RuntimeError):
+    pass
+
+
 class AndroidCreateSessionSubmitTimeout(RuntimeError):
     def __init__(self, *, command_id: str) -> None:
         self.command_id = command_id
@@ -180,7 +199,7 @@ class AndroidCreateSessionCommand:
             pc_id=_require_text(payload.get("pc_id"), "pc_id"),
             workspace_id=_require_text(payload.get("workspace_id"), "workspace_id"),
             prompt=_require_text(payload.get("prompt"), "prompt"),
-            execution_policy=_mapping_field(payload, "execution_policy"),
+            execution_policy=_required_mapping_field(payload, "execution_policy"),
             mode=_optional_text(payload.get("mode"), "mode"),
             timeout_seconds=_optional_positive_int(payload.get("timeout_seconds"), "timeout_seconds"),
             acceptance=_optional_text_list(payload.get("acceptance"), "acceptance"),
@@ -276,6 +295,7 @@ __all__ = [
     "ANDROID_CREATE_SESSION_PATH",
     "ANDROID_CREATE_SESSION_SCHEMA_VERSION",
     "AndroidCreateSessionCommand",
+    "AndroidCreateSessionContractError",
     "AndroidCreateSessionRequestError",
     "AndroidCreateSessionSubmitTimeout",
     "submit_android_create_session_command",

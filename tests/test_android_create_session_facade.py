@@ -37,9 +37,21 @@ class _StubRunner:
 
 
 def _post_create_session(url: str, payload: dict[str, object]) -> requests.Response:
+    return _post_create_session_with_token(url, payload, auth_token="android-secret")
+
+
+def _post_create_session_with_token(
+    url: str,
+    payload: dict[str, object],
+    *,
+    auth_token: str | None,
+) -> requests.Response:
+    headers = {}
+    if auth_token is not None:
+        headers["Authorization"] = f"Bearer {auth_token}"
     return requests.post(
         url,
-        headers={"Authorization": "Bearer relay-secret"},
+        headers=headers,
         json=payload,
         timeout=5,
     )
@@ -99,6 +111,7 @@ async def _run_create_session_roundtrip_test(
         host="127.0.0.1",
         port=0,
         transport_token="relay-secret",
+        android_app_token="android-secret",
         state_dir=str(state_dir),
         smtp_host="smtp.example.com",
         smtp_port=587,
@@ -191,6 +204,7 @@ def test_android_create_session_requires_prompt_when_posting_http(tmp_path) -> N
         host="127.0.0.1",
         port=0,
         transport_token="relay-secret",
+        android_app_token="android-secret",
         state_dir=str(tmp_path / "relay_state"),
     )
     runtime = build_pc_control_runtime(config)
@@ -217,11 +231,78 @@ def test_android_create_session_requires_prompt_when_posting_http(tmp_path) -> N
         thread.join(timeout=5)
 
 
+def test_android_create_session_requires_execution_policy_when_posting_http(tmp_path) -> None:
+    config = RelayServerConfig(
+        host="127.0.0.1",
+        port=0,
+        transport_token="relay-secret",
+        android_app_token="android-secret",
+        state_dir=str(tmp_path / "relay_state"),
+    )
+    runtime = build_pc_control_runtime(config)
+    server = build_http_server(config, session_store=InMemorySessionStore(), pc_control_runtime=runtime)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address[:2]
+        response = _post_create_session(
+            f"http://{host}:{port}{ANDROID_CREATE_SESSION_PATH}",
+            {
+                "pc_id": "pc_home",
+                "workspace_id": "workspace_001",
+                "prompt": "Refactor floor_shear.py",
+            },
+        )
+        payload = response.json()
+
+        assert response.status_code == 400
+        assert payload["error_code"] == "invalid_payload"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_android_create_session_requires_dedicated_android_app_token(tmp_path) -> None:
+    config = RelayServerConfig(
+        host="127.0.0.1",
+        port=0,
+        transport_token="relay-secret",
+        android_app_token="android-secret",
+        state_dir=str(tmp_path / "relay_state"),
+    )
+    runtime = build_pc_control_runtime(config)
+    server = build_http_server(config, session_store=InMemorySessionStore(), pc_control_runtime=runtime)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address[:2]
+        response = _post_create_session_with_token(
+            f"http://{host}:{port}{ANDROID_CREATE_SESSION_PATH}",
+            {
+                "pc_id": "pc_home",
+                "workspace_id": "workspace_001",
+                "prompt": "Refactor floor_shear.py",
+                "execution_policy": {"backend": "codex"},
+            },
+            auth_token="relay-secret",
+        )
+        payload = response.json()
+
+        assert response.status_code == 401
+        assert payload["error_code"] == "unauthorized"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_android_create_session_maps_pc_offline_to_rejected_submit_ack(tmp_path) -> None:
     config = RelayServerConfig(
         host="127.0.0.1",
         port=0,
         transport_token="relay-secret",
+        android_app_token="android-secret",
         state_dir=str(tmp_path / "relay_state"),
     )
     runtime = build_pc_control_runtime(config)
@@ -257,6 +338,7 @@ def test_android_create_session_maps_workspace_unavailable_to_rejected_submit_ac
         host="127.0.0.1",
         port=0,
         transport_token="relay-secret",
+        android_app_token="android-secret",
         state_dir=str(tmp_path / "relay_state"),
     )
     runtime = build_pc_control_runtime(config)
@@ -370,4 +452,94 @@ def test_android_create_session_roundtrip_surfaces_profile_model_unresolved_with
     assert payload["status"] == "rejected"
     assert payload["submit_ack"]["ack_status"] == "rejected"
     assert payload["submit_ack"]["error_code"] == "profile_model_unresolved"
+    assert "session_binding" not in payload
+
+
+def test_android_create_session_roundtrip_surfaces_unsupported_backend_without_binding(tmp_path) -> None:
+    result = asyncio.run(
+        _run_create_session_roundtrip_test(
+            tmp_path,
+            runner=_StubRunner(),
+            execution_policy={
+                "backend": "claude",
+                "permission": "default",
+            },
+        )
+    )
+    response = result["response"]
+    payload = result["payload"]
+
+    assert response.status_code == 200
+    assert payload["status"] == "rejected"
+    assert payload["submit_ack"]["ack_status"] == "rejected"
+    assert payload["submit_ack"]["error_code"] == "unsupported_backend"
+    assert "session_binding" not in payload
+
+
+def test_android_create_session_roundtrip_surfaces_unsupported_profile_without_binding(tmp_path) -> None:
+    result = asyncio.run(
+        _run_create_session_roundtrip_test(
+            tmp_path,
+            runner=_StubRunner(),
+            execution_policy={
+                "backend": "codex",
+                "profile": "ghost",
+                "permission": "default",
+                "backend_transport": "sdk",
+            },
+        )
+    )
+    response = result["response"]
+    payload = result["payload"]
+
+    assert response.status_code == 200
+    assert payload["status"] == "rejected"
+    assert payload["submit_ack"]["ack_status"] == "rejected"
+    assert payload["submit_ack"]["error_code"] == "unsupported_profile"
+    assert "session_binding" not in payload
+
+
+def test_android_create_session_roundtrip_surfaces_unsupported_permission_without_binding(tmp_path) -> None:
+    result = asyncio.run(
+        _run_create_session_roundtrip_test(
+            tmp_path,
+            runner=_StubRunner(),
+            execution_policy={
+                "backend": "codex",
+                "profile": "default",
+                "permission": "dangerous",
+                "backend_transport": "sdk",
+            },
+        )
+    )
+    response = result["response"]
+    payload = result["payload"]
+
+    assert response.status_code == 200
+    assert payload["status"] == "rejected"
+    assert payload["submit_ack"]["ack_status"] == "rejected"
+    assert payload["submit_ack"]["error_code"] == "unsupported_permission"
+    assert "session_binding" not in payload
+
+
+def test_android_create_session_maps_unsupported_backend_transport_to_unsupported_backend(tmp_path) -> None:
+    result = asyncio.run(
+        _run_create_session_roundtrip_test(
+            tmp_path,
+            runner=_StubRunner(),
+            execution_policy={
+                "backend": "codex",
+                "profile": "default",
+                "permission": "default",
+                "backend_transport": "http",
+            },
+        )
+    )
+    response = result["response"]
+    payload = result["payload"]
+
+    assert response.status_code == 200
+    assert payload["status"] == "rejected"
+    assert payload["submit_ack"]["ack_status"] == "rejected"
+    assert payload["submit_ack"]["error_code"] == "unsupported_backend"
     assert "session_binding" not in payload

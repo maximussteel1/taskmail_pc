@@ -89,6 +89,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tls-certfile", default="", help="Remote TLS certificate path for WSS/HTTPS.")
     parser.add_argument("--tls-keyfile", default="", help="Remote TLS private key path for WSS/HTTPS.")
     parser.add_argument("--transport-token", default="", help="Explicit relay transport token.")
+    parser.add_argument(
+        "--android-app-token",
+        default="",
+        help="Explicit bearer token for the Android-facing create-session facade.",
+    )
     return parser
 
 
@@ -287,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         tls_keyfile=args.tls_keyfile,
     )
     transport_token = str(args.transport_token or "").strip() or secrets.token_urlsafe(32)
+    android_app_token = str(args.android_app_token or "").strip() or secrets.token_urlsafe(32)
     release_name = datetime.now().strftime("release_%Y%m%d_%H%M%S")
 
     with tempfile.TemporaryDirectory(prefix="relay-deploy-") as temp_dir_name:
@@ -295,7 +301,14 @@ def main(argv: list[str] | None = None) -> int:
         env_path = temp_dir / f"{config.service_name}.env"
         unit_path = temp_dir / f"{config.service_name}.service"
         _create_bundle(repo_root, bundle_path)
-        env_path.write_text(render_env_file(config, transport_token=transport_token), encoding="utf-8")
+        env_path.write_text(
+            render_env_file(
+                config,
+                transport_token=transport_token,
+                android_app_token=android_app_token,
+            ),
+            encoding="utf-8",
+        )
         unit_path.write_text(render_systemd_unit(config), encoding="utf-8")
 
         prepared_key, prepared_key_dir = _prepare_private_key_copy(key_path)
@@ -324,6 +337,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"env_file_path={config.env_file_path}",
                 f"public_health_url={public_health_url}",
                 f"transport_token_id={token_fingerprint(transport_token)}",
+                f"android_app_token={android_app_token}",
+                f"android_app_token_id={token_fingerprint(android_app_token)}",
                 "bootstrap_output_start",
                 bootstrap_result.stdout.strip(),
                 "bootstrap_output_end",

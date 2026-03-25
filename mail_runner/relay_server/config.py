@@ -20,6 +20,7 @@ class RelayServerConfig:
     host: str
     port: int
     transport_token: str
+    android_app_token: str = ""
     state_dir: str = "relay_state"
     pc_control_credentials_path: str = ""
     task_root: str = ""
@@ -46,6 +47,8 @@ class RelayServerConfig:
         if not isinstance(self.port, int) or not (0 <= self.port <= 65535):
             raise ValueError("port must be an integer between 0 and 65535")
         _require_text(self.transport_token, "transport_token")
+        if self.android_app_token:
+            _require_text(self.android_app_token, "android_app_token")
         _require_text(self.state_dir, "state_dir")
         if self.pc_control_credentials_path:
             _require_text(self.pc_control_credentials_path, "pc_control_credentials_path")
@@ -143,6 +146,7 @@ def load_relay_server_config(
     host: str | None = None,
     port: int | str | None = None,
     transport_token: str | None = None,
+    android_app_token: str | None = None,
     state_dir: str | None = None,
     pc_control_credentials_path: str | None = None,
     task_root: str | None = None,
@@ -175,6 +179,7 @@ def load_relay_server_config(
         host=(host or os.getenv("MAIL_RELAY_HOST", "127.0.0.1")).strip(),
         port=int(raw_port),
         transport_token=(transport_token or os.getenv("MAIL_RELAY_TOKEN", "")).strip(),
+        android_app_token=(android_app_token or os.getenv("MAIL_RELAY_ANDROID_APP_TOKEN", "")).strip(),
         state_dir=(state_dir or os.getenv("MAIL_RELAY_STATE_DIR", "relay_state")).strip(),
         pc_control_credentials_path=(
             pc_control_credentials_path or os.getenv("MAIL_RELAY_PC_CONTROL_CREDENTIALS_PATH", "")

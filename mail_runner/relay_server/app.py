@@ -24,11 +24,12 @@ from ..config import load_config
 from ..file_surface import FileSurfaceStore, FileSurfaceUploadError
 from .android_create_session_facade import (
     ANDROID_CREATE_SESSION_PATH,
+    AndroidCreateSessionContractError,
     AndroidCreateSessionRequestError,
     AndroidCreateSessionSubmitTimeout,
     submit_android_create_session_command,
 )
-from .auth import token_fingerprint, validate_transport_token
+from .auth import token_fingerprint, validate_bearer_token, validate_transport_token
 from .config import RelayServerConfig, load_relay_server_config
 from .control_protocol import (
     ControlBridgeError,
@@ -259,6 +260,33 @@ def build_http_server(
             )
             return False
 
+        def _require_android_app_token(self) -> bool:
+            expected_token = str(config.android_app_token or "").strip()
+            if not expected_token:
+                self._write_json(
+                    503,
+                    {
+                        "status": "error",
+                        "error_code": "android_app_auth_unavailable",
+                        "error_message": "android app auth is not configured for this relay",
+                        "retryable": True,
+                    },
+                )
+                return False
+            provided_token = _extract_bearer_token(self.headers)
+            if validate_bearer_token(provided_token, expected_token):
+                return True
+            self._write_json(
+                401,
+                {
+                    "status": "error",
+                    "error_code": "unauthorized",
+                    "error_message": "android app token mismatch",
+                    "retryable": False,
+                },
+            )
+            return False
+
         def _normalized_path(self) -> str:
             return urlparse(self.path).path
 
@@ -331,7 +359,7 @@ def build_http_server(
         def do_POST(self) -> None:  # noqa: N802
             path = self._normalized_path()
             if path == ANDROID_CREATE_SESSION_PATH:
-                if not self._require_transport_token():
+                if not self._require_android_app_token():
                     self._discard_request_body()
                     return
                 if pc_control_runtime is None:
@@ -376,6 +404,17 @@ def build_http_server(
                             "error_code": "invalid_payload",
                             "error_message": str(exc),
                             "retryable": False,
+                        },
+                    )
+                    return
+                except AndroidCreateSessionContractError as exc:
+                    self._write_json(
+                        502,
+                        {
+                            "status": "error",
+                            "error_code": "android_create_session_contract_violation",
+                            "error_message": str(exc),
+                            "retryable": True,
                         },
                     )
                     return
@@ -1595,6 +1634,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default=None, help="Bind host; defaults to MAIL_RELAY_HOST or 127.0.0.1.")
     parser.add_argument("--port", type=int, default=None, help="Bind port; defaults to MAIL_RELAY_PORT or 8787.")
     parser.add_argument("--transport-token", default=None, help="Required relay transport token.")
+    parser.add_argument(
+        "--android-app-token",
+        default=None,
+        help="Optional bearer token for the Android-facing create-session facade.",
+    )
     parser.add_argument("--state-dir", default=None, help="Persistent state directory for sessions and packets.")
     parser.add_argument("--smtp-host", default=None, help="SMTP host used by the relay for user-facing delivery.")
     parser.add_argument("--smtp-port", type=int, default=None, help="SMTP port used by the relay.")
@@ -1631,6 +1675,7 @@ def main(argv: list[str] | None = None) -> int:
         host=args.host,
         port=args.port,
         transport_token=args.transport_token,
+        android_app_token=args.android_app_token,
         state_dir=args.state_dir,
         smtp_host=args.smtp_host,
         smtp_port=args.smtp_port,

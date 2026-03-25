@@ -130,8 +130,16 @@ class RelayDeploymentConfig:
         return f"/etc/systemd/system/{self.service_name}.service"
 
 
-def render_env_file(config: RelayDeploymentConfig, *, transport_token: str) -> str:
+def render_env_file(
+    config: RelayDeploymentConfig,
+    *,
+    transport_token: str,
+    android_app_token: str | None = None,
+) -> str:
     normalized_token = _require_text(transport_token, "transport_token")
+    normalized_android_app_token = str(android_app_token or "").strip()
+    if normalized_android_app_token:
+        normalized_android_app_token = _require_text(normalized_android_app_token, "android_app_token")
     lines = [
         f"MAIL_RELAY_HOST={config.bind_host}",
         f"MAIL_RELAY_PORT={config.port}",
@@ -147,6 +155,8 @@ def render_env_file(config: RelayDeploymentConfig, *, transport_token: str) -> s
         f"MAIL_RELAY_LOG_LEVEL={config.log_level}",
         f"MAIL_RELAY_SERVER_NAME={config.server_name}",
     ]
+    if normalized_android_app_token:
+        lines.append(f"MAIL_RELAY_ANDROID_APP_TOKEN={normalized_android_app_token}")
     if config.task_root:
         lines.append(f"MAIL_RUNNER_TASK_ROOT={config.task_root}")
     if config.taskmail_bot_mailbox_addr:

@@ -32,7 +32,25 @@ def test_render_env_file_includes_relay_runtime_values() -> None:
     assert "MAIL_RELAY_SMTP_USER=bot@example.com" in env_text
     assert "MAIL_RELAY_FROM_ADDR=bot@example.com" in env_text
     assert "MAIL_RELAY_LOG_LEVEL=DEBUG" in env_text
+    assert "MAIL_RELAY_ANDROID_APP_TOKEN=" not in env_text
     assert env_text.endswith("\n")
+
+
+def test_render_env_file_includes_android_app_token_when_enabled() -> None:
+    config = RelayDeploymentConfig(
+        smtp_host="smtp.example.com",
+        smtp_user="bot@example.com",
+        smtp_password="secret",
+        from_addr="bot@example.com",
+    )
+
+    env_text = render_env_file(
+        config,
+        transport_token="relay-secret",
+        android_app_token="android-secret",
+    )
+
+    assert "MAIL_RELAY_ANDROID_APP_TOKEN=android-secret" in env_text
 
 
 def test_render_env_file_includes_taskmail_direct_bridge_values_when_enabled() -> None:

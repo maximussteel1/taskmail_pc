@@ -19,6 +19,7 @@ def test_load_relay_server_config_reads_explicit_values(monkeypatch: pytest.Monk
         host="0.0.0.0",
         port=9797,
         transport_token="relay-secret",
+        android_app_token="",
         state_dir="relay_state",
         pc_control_credentials_path="",
         task_root="",
@@ -49,6 +50,7 @@ def test_load_relay_server_config_reads_environment(monkeypatch: pytest.MonkeyPa
         host="127.0.0.2",
         port=9898,
         transport_token="env-token",
+        android_app_token="",
         state_dir="relay_state",
         pc_control_credentials_path="",
         task_root="",
@@ -86,6 +88,15 @@ def test_load_relay_server_config_reads_taskmail_direct_bridge_values(monkeypatc
     assert config.taskmail_direct_smtp_user == "taskmail-user@example.com"
     assert config.taskmail_direct_smtp_password == "user-secret"
     assert config.taskmail_direct_ingress_enabled is True
+
+
+def test_load_relay_server_config_reads_android_app_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAIL_RELAY_TOKEN", "env-token")
+    monkeypatch.setenv("MAIL_RELAY_ANDROID_APP_TOKEN", "android-secret")
+
+    config = load_relay_server_config()
+
+    assert config.android_app_token == "android-secret"
 
 
 def test_load_relay_server_config_reads_task_root_from_mail_runner_env(monkeypatch: pytest.MonkeyPatch) -> None:

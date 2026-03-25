@@ -22,6 +22,7 @@ Even after the PC enables VPS relay, Android should continue to communicate with
 Current direct exceptions:
 
 - when the relay operator enables TaskMail direct ingress, Android may submit the first `new_task` action to `/relay`
+- when the relay operator provisions the Android-facing create-session facade, Android may also `POST /v1/android/create-session`
 - when the relay operator enables TaskMail direct ingress, Android may also submit the bootstrap `sync_project_folders` action to `/relay`
 - when the relay operator provisions the current shared `/control` slice, Android may also submit bootstrap `sync_project_folders` to `/control`
 - when the relay operator provisions the current shared `/control` session-action slice, Android may also submit current-session direct `/status` and plain `reply` to `/control`
@@ -46,6 +47,10 @@ Current direct exceptions:
 - when the relay operator provisions the current Phase 3 direct inbound wire, Android may subscribe the current active session detail on `/relay`
 - this Phase 3 path is read-side only and is limited to `session_snapshot` / `session_delta` freshness for one active session detail view
 - oversized relay-hosted artifacts may now surface to Android as `/v1/files` download links inside normal task mail, but `/v1/files` is not a general Android control API
+- current `POST /v1/android/create-session` is a thin app-facing facade, not a `/pc-control` or `/debug/pc-control/dispatch` rebranding; it accepts `pc_id / workspace_id / prompt / execution_policy` plus optional `repo_path / workdir`
+- current facade success returns `command_id + submit_ack`; when `submit_ack.ack_status=accepted|accepted_but_queued`, the same submit window also returns `session_binding(session_id/pc_id/workspace_id)`
+- current facade-facing rejected `submit_ack.error_code` is fixed to: `unsupported_backend`, `unsupported_profile`, `unsupported_permission`, `profile_model_unresolved`, `workspace_unavailable`, `pc_offline`
+- current facade auth is a dedicated `Authorization: Bearer <android_app_token>` admission, separate from the internal relay transport token
 
 Android should **not** implement the VPS relay WebSocket protocol as a general-purpose or primary app protocol in the current phase.
 
@@ -279,6 +284,7 @@ Current shared `/control` note:
 
 - `/control` is on the same relay host/port as `/relay`
 - `/control` and `/v1/files` reuse the same `Authorization: Bearer <transport_token>` path
+- `POST /v1/android/create-session` stays on the same host/port, but it uses a separate `Authorization: Bearer <android_app_token>` path
 - Android must still start with `hello` and wait for `hello_ack`
 - Android should read `accepted_payload_schemas` from `hello_ack`; the current slice may advertise:
   - `post-creation-session-action-contract-v1`
