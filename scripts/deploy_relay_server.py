@@ -51,6 +51,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--from-name", default="Mail Runner Relay", help="From display name used by the relay.")
     parser.add_argument("--from-addr", required=True, help="From email address used by the relay.")
     parser.add_argument(
+        "--control-plane-mode",
+        default="hybrid",
+        choices=["mail_first", "hybrid", "vps_only"],
+        help="MAIL_RUNNER_CONTROL_PLANE_MODE injected into the relay environment.",
+    )
+    parser.add_argument(
         "--taskmail-bot-mailbox-addr",
         default="",
         help="Bot mailbox address used as the delivery target for direct TaskMail new_task bridge ingress.",
@@ -281,6 +287,7 @@ def main(argv: list[str] | None = None) -> int:
         smtp_password=args.smtp_password,
         from_name=args.from_name,
         from_addr=args.from_addr,
+        control_plane_mode=args.control_plane_mode,
         taskmail_bot_mailbox_addr=args.taskmail_bot_mailbox_addr,
         taskmail_direct_from_name=args.taskmail_direct_from_name,
         taskmail_direct_from_addr=args.taskmail_direct_from_addr,

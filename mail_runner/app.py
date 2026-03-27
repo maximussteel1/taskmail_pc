@@ -567,11 +567,12 @@ def _sleep_with_runtime_control(
     runner: SerialTaskRunner,
     runtime_dir: Path | None,
     mail_client: MailClient | None = None,
+    mail_ingress_enabled: bool = True,
 ) -> bool:
     remaining = max(0.0, float(seconds))
     while remaining > 0:
         sleep_seconds = min(1.0, remaining)
-        if mail_client is not None:
+        if mail_client is not None and mail_ingress_enabled:
             event_detected = mail_client.wait_for_new_messages(sleep_seconds)
         else:
             time.sleep(sleep_seconds)
@@ -1005,6 +1006,8 @@ def _start_snapshot_run(
     session_name: str | None,
     save_incoming_on_accept: bool,
     background: bool,
+    pc_control_client: Any | None = None,
+    accepted_state_callback: Callable[[ThreadState], None] | None = None,
     accepted_reply_message_id: str | None = None,
     accepted_references: list[str] | None = None,
     accepted_reply_to_existing: bool = True,
@@ -1027,6 +1030,11 @@ def _start_snapshot_run(
     def on_accepted(state: ThreadState) -> None:
         if save_incoming_on_accept:
             save_raw_mail(state.thread_id, incoming_envelope, task_root)
+        if accepted_state_callback is not None:
+            try:
+                accepted_state_callback(state)
+            except Exception:
+                LOGGER.exception("pc-control accepted-state callback failed. thread=%s", state.thread_id)
         _send_status_update(
             mail_client,
             config,
@@ -1040,6 +1048,7 @@ def _start_snapshot_run(
             reply_message_id=accepted_reply_message_id,
             references=accepted_references,
             reply_to_existing=accepted_reply_to_existing,
+            pc_control_client=pc_control_client,
         )
 
     def on_running(state: ThreadState) -> None:
@@ -1052,6 +1061,7 @@ def _start_snapshot_run(
             status_label=MAIL_STATUS_RUNNING,
             state=state,
             task_snapshot=snapshot,
+            pc_control_client=pc_control_client,
         )
 
     def on_finished(state: ThreadState, result: RunResult) -> None:
@@ -1071,6 +1081,7 @@ def _start_snapshot_run(
             task_snapshot=snapshot,
             result=result,
             intro=intro,
+            pc_control_client=pc_control_client,
         )
 
     if background:
@@ -1111,6 +1122,7 @@ def _start_new_session_from_reply(
     action: ParsedMailAction,
     incoming_attachment_paths: list[str] | None,
     background: bool,
+    pc_control_client: Any | None = None,
 ) -> bool:
     compiled = compile_task(
         action,
@@ -1138,6 +1150,7 @@ def _start_new_session_from_reply(
         session_name=state.session_name or subject_text,
         save_incoming_on_accept=True,
         background=background,
+        pc_control_client=pc_control_client,
         accepted_reply_to_existing=False,
     )
 
@@ -1181,12 +1194,47 @@ def _process_new_task_mail(
     runner: SerialTaskRunner,
     *,
     background: bool,
+    pc_control_client: Any | None = None,
 ) -> bool:
     try:
         task_data = parse_initial_task(envelope.body_text, default_timeout_minutes=config.default_timeout_minutes)
     except ValueError as exc:
+        if pc_control_client is not None:
+            try:
+                pc_control_client.register_ingress_candidate(
+                    envelope=envelope,
+                    classification="new_task",
+                    subject_norm=subject_info["subject_norm"],
+                    candidate_status="invalid",
+                    candidate_reason=str(exc),
+                    taskmail_request_id=str(envelope.raw_headers.get(_DIRECT_POST_CREATION_REQUEST_ID_HEADER) or "").strip() or None,
+                    packet_id=str(envelope.raw_headers.get(_DIRECT_POST_CREATION_PACKET_ID_HEADER) or "").strip() or None,
+                )
+            except Exception:
+                LOGGER.exception("Unable to mirror invalid new-task ingress to pc-control. message_id=%s", envelope.message_id)
         LOGGER.warning("Skipping invalid initial task mail %s: %s", envelope.message_id, exc)
         return False
+
+    ingress_decision: dict[str, Any] | None = None
+    if pc_control_client is not None:
+        ingress_decision = pc_control_client.register_ingress_candidate(
+            envelope=envelope,
+            classification="new_task",
+            subject_norm=subject_info["subject_norm"],
+            candidate_status="ready",
+            candidate_reason=None,
+            taskmail_request_id=str(envelope.raw_headers.get(_DIRECT_POST_CREATION_REQUEST_ID_HEADER) or "").strip() or None,
+            packet_id=str(envelope.raw_headers.get(_DIRECT_POST_CREATION_PACKET_ID_HEADER) or "").strip() or None,
+        )
+        if str(ingress_decision.get("decision") or "").strip() != "accepted":
+            LOGGER.info(
+                "Skipping new task mail due to pc-control ingress decision. message_id=%s decision=%s reason=%s",
+                envelope.message_id,
+                ingress_decision.get("decision"),
+                ingress_decision.get("reason"),
+            )
+            return False
+
     if envelope.attachments:
         envelope = _materialize_envelope_attachments(envelope, task_data["repo_path"], task_data["workdir"])
 
@@ -1222,6 +1270,23 @@ def _process_new_task_mail(
         session_name=subject_text,
         save_incoming_on_accept=True,
         background=background,
+        pc_control_client=pc_control_client,
+        accepted_state_callback=(
+            None
+            if pc_control_client is None
+            else (
+                lambda state: pc_control_client.commit_thread_binding(
+                    ingress_id=ingress_decision.get("ingress_id") if ingress_decision is not None else None,
+                    root_message_id=envelope.message_id,
+                    thread_id=state.thread_id,
+                    session_id=state.session_id or state.thread_id,
+                    repo_path=state.repo_path,
+                    workdir=state.workdir,
+                    subject_norm=state.subject_norm,
+                    degraded_mode=bool(ingress_decision.get("degraded_mode")) if ingress_decision is not None else False,
+                )
+            )
+        ),
         accepted_reply_message_id=envelope.message_id,
         accepted_references=_build_references(envelope.message_id, envelope.references),
     )
@@ -1277,6 +1342,7 @@ def _process_existing_thread_mail(
     runner: SerialTaskRunner,
     *,
     background: bool,
+    pc_control_client: Any | None = None,
 ) -> bool:
     thread_id = resolve_thread(envelope, task_root, capsule_state=capsule_state)
     if not thread_id:
@@ -1350,6 +1416,7 @@ def _process_existing_thread_mail(
         ),
         background=background,
         target_reply_chain=target_reply_chain,
+        pc_control_client=pc_control_client,
     )
 
 
@@ -1566,6 +1633,7 @@ def _handle_existing_action(
     direct_kill_target: str | None = None,
     background: bool,
     target_reply_chain: bool = False,
+    pc_control_client: Any | None = None,
 ) -> bool:
 
     if action.action == "STATUS_QUERY":
@@ -1660,6 +1728,7 @@ def _handle_existing_action(
             action=action,
             incoming_attachment_paths=incoming_attachment_paths,
             background=background,
+            pc_control_client=pc_control_client,
         )
 
     if action.action == "END_SESSION":
@@ -2041,6 +2110,7 @@ def _handle_existing_action(
         session_name=state.session_name or subject_text,
         save_incoming_on_accept=False,
         background=background,
+        pc_control_client=pc_control_client,
         accepted_reply_message_id=None if target_reply_chain else envelope.message_id,
         accepted_references=None if target_reply_chain else _build_references(envelope.message_id, envelope.references),
         accepted_reply_to_existing=True,
@@ -2056,6 +2126,7 @@ def _process_mail(
     runner: SerialTaskRunner,
     *,
     background: bool,
+    pc_control_client: Any | None = None,
 ) -> bool:
     if is_transport_probe_mail(envelope):
         return _handle_transport_probe_mail(envelope, task_root)
@@ -2084,6 +2155,19 @@ def _process_mail(
     if subject_info["is_new_task"] and not envelope.in_reply_to and not envelope.references:
         skip_reason = _new_task_mail_skip_reason(envelope, config)
         if skip_reason:
+            if pc_control_client is not None:
+                try:
+                    pc_control_client.register_ingress_candidate(
+                        envelope=envelope,
+                        classification="new_task",
+                        subject_norm=subject_info["subject_norm"],
+                        candidate_status="stale",
+                        candidate_reason=skip_reason,
+                        taskmail_request_id=str(envelope.raw_headers.get(_DIRECT_POST_CREATION_REQUEST_ID_HEADER) or "").strip() or None,
+                        packet_id=str(envelope.raw_headers.get(_DIRECT_POST_CREATION_PACKET_ID_HEADER) or "").strip() or None,
+                    )
+                except Exception:
+                    LOGGER.exception("Unable to mirror stale new-task ingress to pc-control. message_id=%s", envelope.message_id)
             LOGGER.warning(
                 "Ignoring new task mail outside freshness window. message_id=%s subject=%s detail=%s",
                 envelope.message_id,
@@ -2099,6 +2183,7 @@ def _process_mail(
             mail_client,
             runner,
             background=background,
+            pc_control_client=pc_control_client,
         )
 
     if _process_existing_thread_mail(
@@ -2110,6 +2195,7 @@ def _process_mail(
         mail_client,
         runner,
         background=background,
+        pc_control_client=pc_control_client,
     ):
         return True
 
@@ -2124,7 +2210,12 @@ def _process_batch(
     runner: SerialTaskRunner,
     *,
     background: bool,
+    pc_control_client: Any | None = None,
 ) -> dict[str, int]:
+    if not config.mail_ingress_enabled:
+        return {"fetched": 0, "processed": 0, "skipped": 0, "failed": 0}
+    if pc_control_client is not None and not pc_control_client.can_consume_mailbox():
+        return {"fetched": 0, "processed": 0, "skipped": 0, "failed": 0}
     fetched = mail_client.fetch_unseen_messages()
     stats = {"fetched": len(fetched), "processed": 0, "skipped": 0, "failed": 0}
 
@@ -2140,6 +2231,7 @@ def _process_batch(
                 mail_client,
                 runner,
                 background=background,
+                pc_control_client=pc_control_client,
             )
         except Exception:
             LOGGER.exception("Unhandled failure while processing mail %s", getattr(envelope, "message_id", "unknown"))
@@ -2204,7 +2296,14 @@ def run_forever(config: AppConfig, *, base_dir: str | Path | None = None) -> Non
             _process_runtime_thread_kill_requests(runner, runtime_dir=runtime_dir)
             _process_runtime_thread_close_requests(runner, runtime_dir=runtime_dir)
             restart_scheduled = _maybe_schedule_requested_runner_restart(runtime_dir)
-            stats = _process_batch(config, task_root, client, runner, background=True)
+            stats = _process_batch(
+                config,
+                task_root,
+                client,
+                runner,
+                background=True,
+                pc_control_client=pc_control_client,
+            )
             runner.collect_finished()
             runner.dispatch_ready()
             control_stats = _process_runtime_thread_kill_requests(runner, runtime_dir=runtime_dir)
@@ -2233,6 +2332,7 @@ def run_forever(config: AppConfig, *, base_dir: str | Path | None = None) -> Non
                 runner=runner,
                 runtime_dir=runtime_dir,
                 mail_client=client,
+                mail_ingress_enabled=config.mail_ingress_enabled,
             )
             if woke_for_mail:
                 LOGGER.info(

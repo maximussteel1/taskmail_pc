@@ -29,6 +29,7 @@ Run from the repository root on the Windows PC:
   --host <vps-ip> `
   --user ubuntu `
   --key-path .\work_bot.pem `
+  --control-plane-mode <mail_first|hybrid|vps_only> `
   --smtp-host <smtp-host> `
   --smtp-user <smtp-user> `
   --smtp-password <smtp-password> `
@@ -38,6 +39,7 @@ Run from the repository root on the Windows PC:
 Notes:
 
 - If `--transport-token` is omitted, the script generates one and prints only its fingerprint.
+- `--control-plane-mode` defaults to `hybrid`; when the relay is expected to stop provisioning old bot-mailbox mail-bridge surfaces, deploy with `--control-plane-mode vps_only`.
 - The script now deploys the repository relay package together with `requirements.txt` and installs the Python dependencies in the VPS venv.
 - `--state-dir` is optional; by default it resolves to `/opt/mail_runner_relay/shared/state`.
 - If `--tls-certfile` and `--tls-keyfile` are supplied, the relay serves `wss` / `https` on the configured port.
@@ -174,6 +176,7 @@ This `2026-03-22` probe is still intentionally partial:
 For the current Phase 2 v1 Android `new_task` smoke path, operator preflight should explicitly confirm:
 
 - `taskmail_direct_ingress_enabled=true` when Android is expected to use direct first-send
+- if the relay is intentionally running with `MAIL_RUNNER_CONTROL_PLANE_MODE=vps_only`, `taskmail_direct_ingress_enabled` should now read `false` even if the old bridge SMTP/env credentials are still present
 - `tls_enabled=true` only when the Android client is configured to use TLS for the same relay endpoint
 - `task_root.scheduler_present=true` 且 `task_root.thread_count > 0` when the relay is expected to resolve current-session actions against the shared task root
 - health passing alone is not enough; direct-ingress-disabled health should be treated as a mail-fallback scenario, not

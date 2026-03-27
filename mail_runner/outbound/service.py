@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -142,17 +143,26 @@ def _prune_previous_status_mails(mail_client: Any, task_root: Path, state: Threa
     previous_message_ids = _list_previous_status_message_ids(task_root, state, keep_message_id=keep_message_id)
     if not previous_message_ids:
         return
-    try:
-        deleted_ids = list(delete_fn(previous_message_ids, mailbox="INBOX") or [])
-    except Exception:
-        LOGGER.exception("Unable to prune old status mails for thread %s", state.thread_id)
-        return
-    if deleted_ids:
-        LOGGER.info(
-            "Pruned %s old status mails from INBOX for thread %s",
-            len(deleted_ids),
-            state.thread_id,
-        )
+    thread_id = state.thread_id
+
+    def _run_prune() -> None:
+        try:
+            deleted_ids = list(delete_fn(previous_message_ids, mailbox="INBOX") or [])
+        except Exception:
+            LOGGER.exception("Unable to prune old status mails for thread %s", thread_id)
+            return
+        if deleted_ids:
+            LOGGER.info(
+                "Pruned %s old status mails from INBOX for thread %s",
+                len(deleted_ids),
+                thread_id,
+            )
+
+    threading.Thread(
+        target=_run_prune,
+        name=f"mail-prune-{thread_id}",
+        daemon=True,
+    ).start()
 
 
 def _normalize_captured_output(text: str) -> str:
@@ -226,6 +236,41 @@ def _maybe_upsert_direct_post_creation_closeout_from_summary(
         )
 
 
+def _maybe_mirror_terminal_outcome_to_pc_control(
+    task_root: Path,
+    state: ThreadState,
+    result: RunResult,
+    *,
+    summary_path: Path,
+    pc_control_client: Any | None,
+) -> None:
+    if pc_control_client is None or not hasattr(pc_control_client, "commit_terminal_outcome"):
+        return
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception:
+        LOGGER.exception("Unable to read canonical run summary for pc-control mirror. thread=%s", state.thread_id)
+        return
+    if not isinstance(payload, dict):
+        return
+    try:
+        pc_control_client.commit_terminal_outcome(
+            thread_id=state.thread_id,
+            task_id=result.task_id,
+            run_status=result.status,
+            generated_at=str(payload.get("generated_at") or _timestamp()),
+            last_summary=str(payload.get("last_summary") or "").strip() or None,
+            terminal_mail_message_id=str(payload.get("terminal_mail_message_id") or "").strip() or None,
+            terminal_mail_subject=str(payload.get("terminal_mail_subject") or "").strip() or None,
+            taskmail_request_id=str(payload.get("request_id") or "").strip() or None,
+            packet_id=str(payload.get("packet_id") or "").strip() or None,
+            source_ingress_id=None,
+            degraded_mode=False,
+        )
+    except Exception:
+        LOGGER.exception("Unable to mirror terminal outcome to pc-control. thread=%s task_id=%s", state.thread_id, result.task_id)
+
+
 def _build_dispatcher_for_transport(config: AppConfig, mail_client: Any, *, transport_name: str):
     return build_dispatcher(
         transport_name=transport_name,
@@ -285,6 +330,7 @@ def send_status_update(
     reply_to_existing: bool = True,
     summary_override: str | None = None,
     reply_override: str | None = None,
+    pc_control_client: Any | None = None,
 ) -> str | None:
     try:
         question_id = result.question_id if result and result.question_id else state.pending_question_id
@@ -396,6 +442,13 @@ def send_status_update(
                     task_root,
                     state,
                     summary_path=summary_path,
+                )
+                _maybe_mirror_terminal_outcome_to_pc_control(
+                    task_root,
+                    state,
+                    result,
+                    summary_path=summary_path,
+                    pc_control_client=pc_control_client,
                 )
             except Exception:
                 LOGGER.exception("Unable to write canonical run summary for thread %s", state.thread_id)

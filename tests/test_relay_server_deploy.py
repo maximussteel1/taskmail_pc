@@ -19,6 +19,7 @@ def test_render_env_file_includes_relay_runtime_values() -> None:
         smtp_user="bot@example.com",
         smtp_password="secret",
         from_addr="bot@example.com",
+        control_plane_mode="vps_only",
     )
 
     env_text = render_env_file(config, transport_token="relay-secret")
@@ -31,6 +32,7 @@ def test_render_env_file_includes_relay_runtime_values() -> None:
     assert "MAIL_RELAY_SMTP_HOST=smtp.example.com" in env_text
     assert "MAIL_RELAY_SMTP_USER=bot@example.com" in env_text
     assert "MAIL_RELAY_FROM_ADDR=bot@example.com" in env_text
+    assert "MAIL_RUNNER_CONTROL_PLANE_MODE=vps_only" in env_text
     assert "MAIL_RELAY_LOG_LEVEL=DEBUG" in env_text
     assert "MAIL_RELAY_ANDROID_APP_TOKEN=" not in env_text
     assert env_text.endswith("\n")
@@ -120,6 +122,20 @@ def test_relay_deployment_config_rejects_partial_taskmail_direct_bridge() -> Non
             smtp_password="secret",
             from_addr="relay@example.com",
             taskmail_bot_mailbox_addr="bot@example.com",
+        )
+
+
+def test_relay_deployment_config_rejects_unknown_control_plane_mode() -> None:
+    with pytest.raises(
+        ValueError,
+        match="control_plane_mode must be one of:",
+    ):
+        RelayDeploymentConfig(
+            smtp_host="smtp.example.com",
+            smtp_user="bot@example.com",
+            smtp_password="secret",
+            from_addr="relay@example.com",
+            control_plane_mode="relay_only",
         )
 
 

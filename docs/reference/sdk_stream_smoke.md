@@ -9,7 +9,7 @@
 当前口径分成两条：
 
 1. `Codex SDK`：验证 `stream.events.jsonl` 是否存在，`seq` 是否连续，是否能投影出最小 `output_chunk` 候选
-2. `OpenCode SDK`：验证当前是否已经落盘同层持久化 stream 证据，并继续显式记录“尚未证明真逐段 streaming”的残余 gap
+2. `OpenCode SDK`：验证当前是否已经落盘同层 incremental stream 证据；若 `sdk_turn.json.stream_mode` 不是 `event_stream_message_parts_incremental`，则继续显式记录 residual gap
 
 ## 相关入口
 
@@ -72,9 +72,11 @@ OpenCode：
 
 1. 读取 `runs/<task_id>/stream.events.jsonl`
 2. 校验 `seq` 是否从 `1` 开始连续递增
-3. 校验至少存在 `assistant.completed` 和终态 `turn.completed`
-4. 把带 `text` 或 `delta` 的事件投影成候选 `output_chunk`
-5. 继续把“当前仍未证明 true incremental streaming”作为 residual gap 显式记录
+3. 校验至少存在 `assistant.delta`、`assistant.completed` 和终态 `turn.completed`
+4. 读取 `runs/<task_id>/sdk_turn.json`，校验 `stream_mode`
+5. 当 `stream_mode == event_stream_message_parts_incremental` 时，把这条 run 记为 `supports_incremental_stream=true`
+6. 把带 `text` 或 `delta` 的事件投影成候选 `output_chunk`
+7. 只有在 `stream.events.jsonl` 缺失，或 `stream_mode` 不是 incremental 时，才把 residual gap 显式写回 smoke 结果
 
 ## 与 pytest 的关系
 
@@ -90,6 +92,6 @@ OpenCode：
 
 出现以下任一情况时，应更新：
 
-- `sdk_stream_smoke.py` 的入口参数、验证标准或 gap 读法变化
+- `sdk_stream_smoke.py` 的入口参数、验证标准、`stream_mode` 读法或 gap 读法变化
 - `Codex SDK` 的 `stream.events.jsonl` 合同变化
-- `OpenCode SDK` 的 persisted stream 合同或 residual gap 读法变化
+- `OpenCode SDK` 的 persisted stream / incremental stream 合同或 residual gap 读法变化

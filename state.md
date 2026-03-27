@@ -2,7 +2,7 @@
 
 ## Current Snapshot
 
-- Updated At: 2026-03-26
+- Updated At: 2026-03-27
 - Current Runtime Stage: mail-first runtime active / post-Phase-8 direct compatibility line maintained
 - Current Planning Mainline: `VPS-first multi-PC control plane`
 - Status: Active
@@ -33,6 +33,13 @@
 - Note: `2026-03-25` 已把包含 `POST /debug/pc-control/dispatch` 的 relay 代码真实部署到 VPS，并在 `pc-home / workspace_969e9b323b70` 上补到 single-PC live dispatch 闭环：第一次显式 `profile=default` 暴露出 `Codex SDK` adapter 把 `default` 错当成必须查映射的实现缺口；repo-side 同日已修复 `default profile -> unset profile` 语义，并补跑 `.\.venv\Scripts\python.exe -m pytest tests/test_codex_sdk_adapter.py tests/test_cli_adapters.py tests/test_pc_control_plane_client.py`，结果 `42 passed`。修复后重启 live host，再次以显式 `profile=default` 下注入真实 `new_task`，已真实收齐 `command_ack(accepted) -> event(accepted/running/done) -> result(done) -> output_chunk(seq=1..5)`；结果路径：`_tmp_pc_control_live_smoke/pc-control-live-smoke-20260325-live-dispatch-default-profile/smoke_result.json`
 - Note: `2026-03-26` 已新增 `scripts/pc_control_live_roundtrip_smoke.py` 与对应 repo-side 纯函数回归（`.\.venv\Scripts\python.exe -m pytest tests/test_pc_control_live_roundtrip_smoke.py tests/test_pc_control_live_smoke.py tests/test_imports.py`，结果 `7 passed`），并在真实 public relay `/pc-control` 上补到 single-PC live roundtrip evidence：`command_dispatch -> command_ack -> event(accepted/running) -> output_chunk(seq=1) -> reconnect hello_ack(connection_epoch=2) -> output_resume_request(after_seq=1) -> selective replay(seq=2..3) -> event(done) -> result(done) -> artifact_manifest(download_ref_source=external_delivery_index.file_surface)`；结果路径：`_tmp_pc_control_live_smoke/pc-control-live-roundtrip-smoke-20260326-single-pc-replay-artifact-rerun2/smoke_result.json`
 - Note: `2026-03-26` 已新增 `scripts/pc_control_live_multi_pc_smoke.py` 与对应 repo-side 纯函数回归（`.\.venv\Scripts\python.exe -m pytest tests/test_pc_control_live_multi_pc_smoke.py tests/test_pc_control_live_roundtrip_smoke.py tests/test_pc_control_live_smoke.py tests/test_imports.py`，结果 `11 passed`），并在真实 public relay `/pc-control` 上补到 multi-PC live routing evidence：双 probe `pc_id` 同时在线并各自上报独立 `workspace_id` 后，定向 dispatch A 只进入 probe A、dispatch B 只进入 probe B，且两条命令都在远端 `commands.json` 收成 `ack_status=accepted -> event(accepted/running/done) -> result(done)`；结果路径：`_tmp_pc_control_live_smoke/pc-control-live-multi-pc-smoke-20260326-routing-rerun1/smoke_result.json`
+- Note: `2026-03-27` 已新增 `scripts/vps_only_checkpoint_validation.py` 与 `scripts/pc_control_operator_read.py`，把 `vps_only` checkpoint 的最小恢复验证和 `pc-control` operator read-side 收成单一 repo-side 入口；对应定向回归已补跑通过
+- Note: `2026-03-27` 已把 `OpenCode SDK` 的 first-pass true incremental streaming 收硬：repo-side 现在会在 turn 期间基于 OpenCode `event` SSE `message.part.updated / session.idle` 持续落盘 `turn.started -> assistant.delta* -> assistant.completed -> turn.completed`，并已在提权环境下用 `.\.venv\Scripts\python.exe .\scripts\sdk_stream_smoke.py --backend opencode --run-name opencode-sdk-stream-smoke-20260327_incremental_event_stream_rerun` 留下真实增量流证据；结果路径：`_tmp_sdk_stream_smoke/opencode-sdk-stream-smoke-20260327_incremental_event_stream_rerun/stream_smoke_result.json`
+- Note: `2026-03-27` 已把 `/v1/files` owner-lane 观察窗口继续扩成 `COS` 退场准备 gate：`scripts/external_delivery_window_report.py` 现在除 `window_ready` 外，还会输出 `cos_decommission_checks` / `cos_decommission_candidate`，并支持 `--require-cos-decommission-candidate` 非零退出；对应定向回归已补跑通过
+- Note: `2026-03-27` 已对真实 live deployment 完成一次 `vps_only` checkpoint rerun：初始排查确认 VPS `mail-runner-relay.service` 自 `2026-03-27 01:43` 起处于 `inactive (dead)`，随后已通过远端 `sudo systemctl start mail-runner-relay` 恢复；恢复后 `.\.venv\Scripts\python.exe .\scripts\vps_only_checkpoint_validation.py --config .\mail_config.bot.relay.local.yaml --run-name vps-only-checkpoint-validation-20260327_live_rerun` 成功通过 `healthz`、`pc-control` read-side、live `/v1/files` roundtrip 与旧 direct `new_task -> unsupported_action` 四项检查，结果路径：`_tmp_vps_only_checkpoint_validation/vps-only-checkpoint-validation-20260327_live_rerun/validation_result.json`
+- Note: `2026-03-27` 已对当前 live task root 直接跑 gate：`external_delivery_window_report_20260327_clean_gate.json` 明确给出 `window_ready=true`；`external_delivery_window_report_20260327_cos_gate.json` 仍返回非零，当前唯一阻塞是观察窗口里仍保留两条 oversize `COS` delivery（`thread_024` `49,689,448` bytes APK 与 `thread_112` `35,651,584` bytes probe），因此当前 deployment 应读成“cutover-ready，但还不是 `COS` decommission-ready”
+- Note: `2026-03-27` 已在 relay 恢复后 fresh rerun `.\.venv\Scripts\python.exe .\scripts\pc_control_live_roundtrip_smoke.py --config .\mail_config.bot.relay.local.yaml --run-name pc-control-live-roundtrip-smoke-20260327-single-pc-rerun1`，真实 public relay `/pc-control` 继续成功补到 `command_dispatch -> command_ack(accepted) -> event(accepted/running/done) -> reconnect hello_ack(connection_epoch=2) -> output_resume_request(after_seq=1) -> selective replay(seq=2..3) -> result(done) -> artifact_manifest(download_ref_source=external_delivery_index.file_surface)`；结果路径：`_tmp_pc_control_live_smoke/pc-control-live-roundtrip-smoke-20260327-single-pc-rerun1/smoke_result.json`
+- Note: `2026-03-27` 已新增 `scripts/file_surface_consumer_smoke.py` 与对应 repo-side 回归（`.\.venv\Scripts\python.exe -m pytest tests/test_file_surface_consumer_smoke.py tests/test_artifact_contract_smoke.py tests/test_file_surface.py tests/test_external_delivery.py tests/test_imports.py`，结果 `23 passed`），并已在 `mail_config.bot.relay.local.yaml` 上完成真实 live `/v1/files` transport-token consumer 验证：`download_ref_source=external_delivery_index.file_surface` 的 `GET download_ref` 在携带 transport token 时返回 `200`，缺 token / 错 token 返回 `401 unauthorized`；结果路径：`_tmp_file_surface_consumer_smoke/file-surface-consumer-smoke-20260327_live_vps_authenticated_consumer/smoke_result.json`
 
 ## Current Runtime Facts
 
@@ -56,7 +63,7 @@
   - relay-side `transport_probe` 的 `transport_probe_result`
 - 其中 `session_action_result` 当前只表示 `mail_ingress_submission` 与 `session_action_closeout` 锚点快照，不替代最终 canonical mail outcome
 - relay `/v1/files` 当前用于超阈值 artifact 的 relay-hosted external delivery；本地 artifact truth 仍保持在 `RunArtifact` + `artifact_index.json`
-- external delivery 当前支持 `external_delivery_backend_preference=auto|cos|file_surface`；默认 `auto` 保持兼容口径下的 COS-first 选择，而 `file_surface` 可在 `COS` 仍保留配置时显式优先走 relay `/v1/files`
+- external delivery 当前支持 `external_delivery_backend_preference=auto|cos|file_surface`；repo-side 默认 owner preference 已切到 `file_surface`，而 `auto` 只保留为显式 legacy `COS`-first 兼容值
 - 成功的 oversized external delivery 当前还会在 `runs/<task_id>/artifacts/external_delivery_index.json` 下落 provider/url/expires_at 级 evidence；若走 relay `/v1/files`，`artifact_file_binding_index.json` 仍继续保留 transport-facing `artifact_id -> file_id` 绑定
 - 每轮 run 当前会落 `runs/<task_id>/canonical_summary.json`
 - current-session direct `/status` 与 plain `reply` 当前会落 `session_actions/<request_id>/session_action_closeout.json`
@@ -86,9 +93,10 @@
   - Slice E-F 已落地 canonical `event / result`、`event_id/result_id` 去重、`effective_execution` 回填，以及最小 client/runtime/store/test/fixture 闭环
   - Slice G 已落地 first-pass canonical `output_chunk` packet、`stream_id + seq` 去重、基于已落盘 `stream.events.jsonl` 的 reconnect resend、显式 `output_resume_request` / server-driven resume、fixture loopback selective replay，以及 websocket roundtrip 回归
   - Slice H 已落地 first-pass canonical `artifact_manifest` packet、store/runtime/client/tests/fixture，以及基于真实 `artifact_index.json + artifact_file_binding_index.json` 的本地 truth-projection evidence；successful external delivery 现在还会下落 `external_delivery_index.json`，并已补上 live local relay `/v1/files` artifact evidence、真实 VPS relay `/v1/files` upload + metadata/content roundtrip evidence，以及 live deployment 下 `22 MiB -> file_surface` / `34 MiB -> cos` 的真实业务样本。planning 层当前应把 `/v1/files` 读成 owner lane，把 `COS` 读成 cutover 前兼容 lane；repo-side 现在也已支持通过 `external_delivery_backend_preference=file_surface` 在 `COS` 仍保留配置时显式切向 `/v1/files`
-  - `OpenCode SDK` 已落地最小同层 `stream.events.jsonl`，当前 residual gap 已收窄为“true incremental streaming 尚未验证”，不再是“完全没有 same-layer stream evidence”
+  - `OpenCode SDK` 现已落地基于 OpenCode `event` SSE 的同层 incremental `stream.events.jsonl`；`sdk_stream_smoke` 真实留证已证明 `sdk_turn.json.stream_mode=event_stream_message_parts_incremental`，当前不再把“true incremental streaming 尚未验证”读成主缺口
   - single-PC live `/pc-control` bring-up、live dispatch、live replay、以及 live `artifact_manifest` 当前都已留证：真实 public relay 已补到 `hello_ack / workspace_snapshot / stale_connection_epoch`、`command_dispatch -> command_ack -> event -> result -> output_chunk`、`output_resume_request(after_seq=1)` selective replay，以及 `artifact_manifest(download_ref_source=external_delivery_index.file_surface)`
   - multi-PC live routing 当前也已留证：双 probe `pc_id` 同时在线时，定向 dispatch 已可稳定只命中目标连接，不再串投到另一条 websocket；此前合写的“多 `PC` 路由/订阅”现在应拆开读，routing 已完成，observer / subscription 侧证据尚未单列
+  - `vps_only` checkpoint 单入口恢复验证、`pc-control` operator read-side，以及 `/v1/files` owner-lane 观察窗口 / `COS` 退场准备 gate 现在都已有 repo-side 脚本入口与回归；`/v1/files` transport-token consumer/cutover 也已补齐 live 验证，当前更实际的剩余项已经转向 Android-facing seam 联调与更高层 observer/subscription
   - 当前 live deployment 所需的首批 `COS` 兼容样本也已留证，不再是默认下一刀
   - 规划层当前应把 mail 线读成 cutover 前兼容层，而不是长期 fallback / 双主线；近期目标是直接切入 `VPS-first`
   - 规划层当前也应把 `COS` 读成 cutover 前兼容 external-delivery 线，而不是长期双通道
@@ -100,13 +108,15 @@
 
 ## Next Candidate Lines
 
-- 先继续收硬 `/v1/files` owner lane 的 cutover/decommission 观察窗口与运行门槛，不再默认继续补 artifact lane 证据
+- 先按当前已收硬的 `/v1/files` owner lane + transport-token consumer 口径进入 Android-facing seam 联调；repo-side `window_ready / cos_decommission_candidate` gate 与 authenticated consumer smoke 都已落地
   - 具体执行清单见 `docs/plans/vps_file_surface_cutover_and_cos_decommission_checklist_v0.1.md`
+- 当前 live deployment 已在 `2026-03-27` 跑到 `window_ready=true`；如果近期目标只是联调/consumer cutover，则不必再把 `cos_decommission_candidate=true` 当作前置
 - 当前 artifact lane 已至少有一条真实 `file_surface` 样本与一条真实 `COS` oversize 兼容样本；接下来更需要确认的是观察窗口内 provider 是否持续符合“普通样本走 `/v1/files`、`>32 MiB` 样本才走 `COS`”的口径
 - 如果 `pc-control` 还要继续扩 live 联调，优先把更高层多 `PC` observer / subscription 侧需求单列，而不是重复补 single-PC roundtrip 或多 `PC` routing
 - 同步准备 cutover/decommission 口径：后续 planning 不再把 mail 设计成长期 fallback 常驻线
 - 同步准备 `/v1/files` cutover / `COS` decommission 口径：后续 planning 不再把 `COS` 设计成长期 external-delivery 常驻线
-- 需要交接给下一位实现者时，直接按 `docs/plans/vps_first_multi_pc_phase1_execution_plan_v0.1.md` 中的 `6.1 COS 退场口径` 判断：先看 `/v1/files` 是否已满足 owner-lane 条件，再决定 `COS` 只保兼容还是进入删除准备
+- 如果近期目标要推进 `COS` 删除准备，而不是只推进联调，则必须先把目标 deployment 的 oversize `COS` 样本清出观察窗口，或让窗口前移到不再包含 `thread_024` / `thread_112`
+- 需要交接给下一位实现者时，直接按 `docs/plans/vps_first_multi_pc_phase1_execution_plan_v0.1.md` 中的 `6.1 COS 退场口径` 判断：先看 `scripts/external_delivery_window_report.py --require-clean-window` 与 `--require-cos-decommission-candidate` 对真实 deployment 的结果，再决定 `COS` 只保兼容还是进入删除准备
 - 继续保持本地 artifact truth 为 `RunArtifact + artifact_index.json`，不要把 control-plane packet 反向当成 truth layer
 - 继续维持 `docs/current/*` 所描述的 mail-first 兼容行为稳定，不把当前 direct closeout 线误当成新主线 owner queue
 - 如需重启 HTML / P9，只能在新主线明确排期并显式 reopen 后进行，不能隐式借用旧 backlog 口径

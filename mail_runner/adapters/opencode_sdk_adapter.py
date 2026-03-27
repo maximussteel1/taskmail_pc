@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
+from threading import Event as ThreadEvent
+from threading import Lock, Thread
 
+import httpx
 from opencode_ai import Opencode
 
 from ..models import QuestionItem, TaskSnapshot
@@ -24,9 +27,16 @@ from ..opencode_sdk_common import (
 from ..run_result_capsule import parse_run_result_capsule, strip_run_result_capsules
 from ..state_capsule import parse_question_capsules
 from ..status import RUN_STATUS_AWAITING_USER_INPUT, RUN_STATUS_FAILED, RUN_STATUS_KILLED, RUN_STATUS_SUCCESS
-from ..stream_events import STREAM_EVENTS_FILENAME, StreamEvent, write_stream_events
+from ..stream_events import (
+    STREAM_EVENTS_FILENAME,
+    StreamEvent,
+    append_stream_event,
+    load_stream_events,
+    write_stream_events,
+)
 from .base import WorkerAdapter
 from .cli_common import (
+    DEMO_COMMAND,
     _incoming_attachment_payload,
     _runtime_prompt_hint,
     build_run_result,
@@ -43,6 +53,9 @@ from .opencode_adapter import OpenCodeAdapter
 
 _SERVER_STARTUP_TIMEOUT_SECONDS = 30
 _MIN_TURN_TIMEOUT_SECONDS = 180.0
+_EVENT_STREAM_MODE = "event_stream_message_parts_incremental"
+_EVENT_STREAM_READ_TIMEOUT_SECONDS = 2.0
+_EVENT_STREAM_SHUTDOWN_GRACE_SECONDS = 5.0
 
 
 @dataclass(slots=True)
@@ -50,6 +63,14 @@ class _ActiveServerRun:
     server: ServerHandle
     session_id: str | None = None
     kill_requested: bool = False
+
+
+@dataclass(slots=True)
+class _IncrementalStreamCaptureResult:
+    stream_mode: str
+    assistant_parts_records: list[dict[str, object]]
+    stream_event_count: int
+    saw_incremental_evidence: bool
 
 
 def _timestamp() -> str:
@@ -77,8 +98,10 @@ def _part_timestamp(
     *,
     allowed_types: set[str] | None,
     fields: tuple[str, ...],
+    reverse: bool = False,
 ) -> str | None:
-    for record in records:
+    ordered_records = list(reversed(records)) if reverse else records
+    for record in ordered_records:
         if allowed_types is not None and _part_type(record) not in allowed_types:
             continue
         time_payload = record.get("time")
@@ -89,6 +112,12 @@ def _part_timestamp(
             if ts is not None:
                 return ts
     return None
+
+
+def _part_visible_text(record: dict[str, object]) -> str:
+    if _part_type(record) != "text":
+        return ""
+    return strip_run_result_capsules(str(record.get("text") or ""))
 
 
 def _synthesize_stream_events(
@@ -121,12 +150,12 @@ def _synthesize_stream_events(
         or started_at
     )
     assistant_completed_ts = (
-        _part_timestamp(part_records, allowed_types={"text"}, fields=("end", "start"))
-        or _part_timestamp(part_records, allowed_types={"step-finish"}, fields=("end", "start"))
+        _part_timestamp(part_records, allowed_types={"text"}, fields=("end", "start"), reverse=True)
+        or _part_timestamp(part_records, allowed_types={"step-finish"}, fields=("end", "start"), reverse=True)
         or finished_at
     )
     turn_completed_ts = (
-        _part_timestamp(part_records, allowed_types={"step-finish"}, fields=("end", "start"))
+        _part_timestamp(part_records, allowed_types={"step-finish"}, fields=("end", "start"), reverse=True)
         or assistant_completed_ts
         or finished_at
     )
@@ -146,6 +175,33 @@ def _synthesize_stream_events(
         )
     ]
     next_seq = 2
+    text_part_index = 0
+    for record in part_records:
+        delta_text = _part_visible_text(record)
+        if not delta_text:
+            continue
+        text_part_index += 1
+        delta_ts = _part_timestamp([record], allowed_types={"text"}, fields=("start", "end")) or assistant_completed_ts
+        events.append(
+            StreamEvent(
+                ts=delta_ts,
+                seq=next_seq,
+                thread_id=task.thread_id,
+                task_id=task.task_id,
+                backend=task.backend,
+                backend_transport=task.backend_transport or "sdk",
+                kind="assistant.delta",
+                delta=delta_text,
+                item_type="agent_message",
+                status="streaming",
+                payload={
+                    **common_payload,
+                    "event_type": "assistant.delta",
+                    "assistant_text_part_index": text_part_index,
+                },
+            )
+        )
+        next_seq += 1
     if visible_reply:
         events.append(
             StreamEvent(
@@ -180,6 +236,435 @@ def _synthesize_stream_events(
     return events
 
 
+def _event_session_id(event: object) -> str | None:
+    event_type = str(getattr(event, "type", "") or "").strip()
+    properties = getattr(event, "properties", None)
+    if properties is None:
+        return None
+    if event_type == "message.updated":
+        info = getattr(properties, "info", None)
+        return str(getattr(info, "session_id", "") or "").strip() or None
+    if event_type == "message.part.updated":
+        part = getattr(properties, "part", None)
+        return str(getattr(part, "session_id", "") or "").strip() or None
+    if event_type in {"session.idle", "session.error"}:
+        return str(getattr(properties, "session_id", "") or "").strip() or None
+    return None
+
+
+def _event_error_message(event: object) -> str | None:
+    if str(getattr(event, "type", "") or "").strip() != "session.error":
+        return None
+    properties = getattr(event, "properties", None)
+    error = getattr(properties, "error", None) if properties is not None else None
+    if error is None:
+        return None
+    name = str(getattr(error, "name", "") or "").strip()
+    return name or "OpenCode SDK session.error"
+
+
+class _OpenCodeIncrementalStreamRecorder:
+    def __init__(
+        self,
+        *,
+        task: TaskSnapshot,
+        stream_events_path: Path,
+        session_id: str,
+        provider_id: str,
+        model_id: str,
+        started_at: str,
+    ) -> None:
+        self._task = task
+        self._stream_events_path = stream_events_path
+        self._session_id = session_id
+        self._provider_id = provider_id
+        self._model_id = model_id
+        self._started_at = started_at
+        self._lock = Lock()
+        self._next_seq = 1
+        self._message_roles: dict[str, str] = {}
+        self._pending_parts: dict[str, list[object]] = {}
+        self._assistant_parts_by_id: dict[str, object] = {}
+        self._assistant_part_order: list[str] = []
+        self._text_by_part_id: dict[str, str] = {}
+        self._turn_started_emitted = False
+        self._assistant_completed_emitted = False
+        self._terminal_emitted = False
+        self._terminal_kind = "turn.completed"
+        self._terminal_message: str | None = None
+        self._terminal_ts: str | None = None
+        self._saw_incremental_evidence = False
+        self._listener_errors: list[str] = []
+
+    def saw_incremental_evidence(self) -> bool:
+        with self._lock:
+            return self._saw_incremental_evidence
+
+    def is_terminal(self) -> bool:
+        with self._lock:
+            return self._terminal_emitted
+
+    def record_listener_error(self, exc: Exception) -> None:
+        with self._lock:
+            if len(self._listener_errors) >= 4:
+                return
+            self._listener_errors.append(f"{type(exc).__name__}: {exc}")
+
+    def handle_event(self, event: object) -> None:
+        if _event_session_id(event) != self._session_id:
+            return
+
+        event_type = str(getattr(event, "type", "") or "").strip()
+        with self._lock:
+            if event_type == "message.updated":
+                self._handle_message_updated(event)
+                return
+            if event_type == "message.part.updated":
+                self._handle_message_part_updated(event)
+                return
+            if event_type == "session.idle":
+                self._terminal_kind = "turn.completed"
+                self._terminal_message = "Turn completed"
+                self._terminal_ts = self._terminal_ts or _timestamp()
+                return
+            if event_type == "session.error":
+                self._terminal_kind = "turn.failed"
+                self._terminal_message = _event_error_message(event) or "OpenCode SDK turn failed."
+                self._terminal_ts = self._terminal_ts or _timestamp()
+
+    def finalize(
+        self,
+        *,
+        assistant_parts: list[object],
+        visible_reply: str,
+        finished_at: str,
+    ) -> _IncrementalStreamCaptureResult:
+        with self._lock:
+            for part in assistant_parts:
+                self._store_assistant_part(part)
+
+            assistant_parts_records = [part_to_record(part) for part in self._ordered_assistant_parts()]
+            if not self._saw_incremental_evidence:
+                return _IncrementalStreamCaptureResult(
+                    stream_mode=_EVENT_STREAM_MODE,
+                    assistant_parts_records=assistant_parts_records,
+                    stream_event_count=0,
+                    saw_incremental_evidence=False,
+                )
+
+            started_ts = self._started_timestamp() or self._terminal_ts or finished_at
+            self._ensure_turn_started(started_ts)
+
+            completed_ts = self._completed_timestamp() or self._terminal_ts or finished_at
+            if visible_reply and not self._assistant_completed_emitted:
+                self._emit(
+                    StreamEvent(
+                        ts=completed_ts,
+                        seq=self._next_seq,
+                        thread_id=self._task.thread_id,
+                        task_id=self._task.task_id,
+                        backend=self._task.backend,
+                        backend_transport=self._task.backend_transport or "sdk",
+                        kind="assistant.completed",
+                        text=visible_reply,
+                        item_type="agent_message",
+                        status="completed",
+                        payload={**self._common_payload(), "event_type": "assistant.completed"},
+                    )
+                )
+                self._assistant_completed_emitted = True
+
+            if not self._terminal_emitted:
+                terminal_kind = self._terminal_kind or "turn.completed"
+                terminal_message = self._terminal_message or ("Turn completed" if terminal_kind == "turn.completed" else "Turn failed")
+                self._emit(
+                    StreamEvent(
+                        ts=self._terminal_ts or completed_ts,
+                        seq=self._next_seq,
+                        thread_id=self._task.thread_id,
+                        task_id=self._task.task_id,
+                        backend=self._task.backend,
+                        backend_transport=self._task.backend_transport or "sdk",
+                        kind=terminal_kind,
+                        text=terminal_message,
+                        status="completed" if terminal_kind == "turn.completed" else "failed",
+                        payload={**self._common_payload(), "event_type": terminal_kind},
+                    )
+                )
+                self._terminal_emitted = True
+
+            return _IncrementalStreamCaptureResult(
+                stream_mode=_EVENT_STREAM_MODE,
+                assistant_parts_records=assistant_parts_records,
+                stream_event_count=self._next_seq - 1,
+                saw_incremental_evidence=True,
+            )
+
+    def _handle_message_updated(self, event: object) -> None:
+        properties = getattr(event, "properties", None)
+        info = getattr(properties, "info", None) if properties is not None else None
+        if info is None:
+            return
+        message_id = str(getattr(info, "id", "") or "").strip()
+        role = str(getattr(info, "role", "") or "").strip()
+        if not message_id or not role:
+            return
+        self._message_roles[message_id] = role
+        if role != "assistant":
+            self._pending_parts.pop(message_id, None)
+            return
+        pending = self._pending_parts.pop(message_id, [])
+        for part in pending:
+            self._process_assistant_part(part)
+
+    def _handle_message_part_updated(self, event: object) -> None:
+        properties = getattr(event, "properties", None)
+        part = getattr(properties, "part", None) if properties is not None else None
+        message_id = str(getattr(part, "message_id", "") or "").strip() if part is not None else ""
+        if part is None or not message_id:
+            return
+        role = self._message_roles.get(message_id)
+        if role == "assistant":
+            self._process_assistant_part(part)
+            return
+        if role == "user":
+            return
+        self._pending_parts.setdefault(message_id, []).append(part)
+
+    def _process_assistant_part(self, part: object) -> None:
+        self._saw_incremental_evidence = True
+        self._store_assistant_part(part)
+        record = part_to_record(part)
+        part_kind = _part_type(record)
+        if part_kind == "step-start":
+            self._ensure_turn_started(_part_timestamp([record], allowed_types={"step-start"}, fields=("start", "end")) or self._started_at)
+            return
+        if part_kind != "text":
+            return
+        visible_text = _part_visible_text(record)
+        if not visible_text:
+            return
+        part_id = str(record.get("id") or "").strip()
+        previous_text = self._text_by_part_id.get(part_id, "")
+        if visible_text == previous_text:
+            return
+        delta_text = visible_text[len(previous_text) :] if visible_text.startswith(previous_text) else visible_text
+        if not delta_text:
+            return
+        self._text_by_part_id[part_id] = visible_text
+        delta_ts = _part_timestamp([record], allowed_types={"text"}, fields=("end", "start")) or _timestamp()
+        self._ensure_turn_started(_part_timestamp([record], allowed_types={"text"}, fields=("start", "end")) or delta_ts)
+        self._emit(
+            StreamEvent(
+                ts=delta_ts,
+                seq=self._next_seq,
+                thread_id=self._task.thread_id,
+                task_id=self._task.task_id,
+                backend=self._task.backend,
+                backend_transport=self._task.backend_transport or "sdk",
+                kind="assistant.delta",
+                delta=delta_text,
+                item_type="agent_message",
+                status="streaming",
+                payload={
+                    **self._common_payload(),
+                    "event_type": "assistant.delta",
+                    "assistant_text_part_index": self._text_part_index(part_id),
+                },
+            )
+        )
+
+    def _ordered_assistant_parts(self) -> list[object]:
+        return [
+            self._assistant_parts_by_id[part_id]
+            for part_id in self._assistant_part_order
+            if part_id in self._assistant_parts_by_id
+        ]
+
+    def _store_assistant_part(self, part: object) -> None:
+        part_id = str(getattr(part, "id", "") or "").strip()
+        if not part_id:
+            return
+        if part_id not in self._assistant_parts_by_id:
+            self._assistant_part_order.append(part_id)
+        self._assistant_parts_by_id[part_id] = part
+
+    def _common_payload(self) -> dict[str, object]:
+        part_records = [part_to_record(part) for part in self._ordered_assistant_parts()]
+        return {
+            "stream_mode": _EVENT_STREAM_MODE,
+            "sdk_session_id": self._session_id,
+            "provider_id": self._provider_id,
+            "model_id": self._model_id,
+            "assistant_part_count": len(part_records),
+            "text_part_count": sum(
+                1 for record in part_records if _part_type(record) == "text" and str(record.get("text") or "").strip()
+            ),
+            "assistant_part_types": sorted({_part_type(record) for record in part_records if _part_type(record)}),
+        }
+
+    def _started_timestamp(self) -> str | None:
+        return _part_timestamp(
+            [part_to_record(part) for part in self._ordered_assistant_parts()],
+            allowed_types={"step-start", "text"},
+            fields=("start", "end"),
+        )
+
+    def _completed_timestamp(self) -> str | None:
+        return _part_timestamp(
+            [part_to_record(part) for part in self._ordered_assistant_parts()],
+            allowed_types={"text", "step-finish"},
+            fields=("end", "start"),
+            reverse=True,
+        )
+
+    def _text_part_index(self, part_id: str) -> int:
+        text_part_ids = [
+            candidate_id
+            for candidate_id in self._assistant_part_order
+            if _part_type(part_to_record(self._assistant_parts_by_id[candidate_id])) == "text"
+        ]
+        try:
+            return text_part_ids.index(part_id) + 1
+        except ValueError:
+            return len(text_part_ids)
+
+    def _ensure_turn_started(self, ts: str) -> None:
+        if self._turn_started_emitted:
+            return
+        self._emit(
+            StreamEvent(
+                ts=ts,
+                seq=self._next_seq,
+                thread_id=self._task.thread_id,
+                task_id=self._task.task_id,
+                backend=self._task.backend,
+                backend_transport=self._task.backend_transport or "sdk",
+                kind="turn.started",
+                text="OpenCode SDK turn started.",
+                status="started",
+                payload={**self._common_payload(), "event_type": "turn.started"},
+            )
+        )
+        self._turn_started_emitted = True
+
+    def _emit(self, event: StreamEvent) -> None:
+        append_stream_event(self._stream_events_path, event)
+        self._next_seq += 1
+
+
+class _OpenCodeIncrementalStreamCapture:
+    def __init__(
+        self,
+        *,
+        task: TaskSnapshot,
+        stream_events_path: Path,
+        session_id: str,
+        provider_id: str,
+        model_id: str,
+        base_url: str,
+        timeout_seconds: float,
+        started_at: str,
+    ) -> None:
+        self._base_url = base_url
+        self._timeout_seconds = timeout_seconds
+        self._stop_requested = ThreadEvent()
+        self._listener_done = ThreadEvent()
+        self._recorder = _OpenCodeIncrementalStreamRecorder(
+            task=task,
+            stream_events_path=stream_events_path,
+            session_id=session_id,
+            provider_id=provider_id,
+            model_id=model_id,
+            started_at=started_at,
+        )
+        self._listener = Thread(
+            target=self._run_listener,
+            name=f"opencode-stream-{task.task_id}",
+            daemon=True,
+        )
+        self._started = False
+
+    def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        self._listener.start()
+
+    def finish(
+        self,
+        *,
+        assistant_parts: list[object],
+        visible_reply: str,
+        finished_at: str,
+    ) -> _IncrementalStreamCaptureResult:
+        self._listener_done.wait(_EVENT_STREAM_SHUTDOWN_GRACE_SECONDS)
+        self._stop_requested.set()
+        if self._started:
+            self._listener.join(_EVENT_STREAM_SHUTDOWN_GRACE_SECONDS + _EVENT_STREAM_READ_TIMEOUT_SECONDS)
+        return self._recorder.finalize(
+            assistant_parts=assistant_parts,
+            visible_reply=visible_reply,
+            finished_at=finished_at,
+        )
+
+    def abort(self) -> None:
+        self._stop_requested.set()
+        if self._started:
+            self._listener.join(_EVENT_STREAM_SHUTDOWN_GRACE_SECONDS + _EVENT_STREAM_READ_TIMEOUT_SECONDS)
+
+    def _run_listener(self) -> None:
+        timeout = httpx.Timeout(
+            timeout=_EVENT_STREAM_READ_TIMEOUT_SECONDS,
+            connect=min(5.0, _EVENT_STREAM_READ_TIMEOUT_SECONDS),
+            read=_EVENT_STREAM_READ_TIMEOUT_SECONDS,
+            write=min(5.0, _EVENT_STREAM_READ_TIMEOUT_SECONDS),
+        )
+        try:
+            while not self._stop_requested.is_set() and not self._recorder.is_terminal():
+                try:
+                    with Opencode(base_url=self._base_url, timeout=timeout, max_retries=0) as client:
+                        with client.event.list(timeout=timeout) as stream:
+                            for event in stream:
+                                self._recorder.handle_event(event)
+                                if self._stop_requested.is_set() or self._recorder.is_terminal():
+                                    return
+                except httpx.TimeoutException:
+                    if self._stop_requested.is_set() or self._recorder.is_terminal():
+                        return
+                    continue
+                except Exception as exc:
+                    self._recorder.record_listener_error(exc)
+                    if self._stop_requested.is_set() or self._recorder.is_terminal():
+                        return
+                    time.sleep(0.1)
+        finally:
+            self._listener_done.set()
+
+
+def _build_incremental_stream_capture(
+    *,
+    task: TaskSnapshot,
+    stream_events_path: Path,
+    session_id: str,
+    provider_id: str,
+    model_id: str,
+    base_url: str,
+    timeout_seconds: float,
+    started_at: str,
+) -> _OpenCodeIncrementalStreamCapture:
+    return _OpenCodeIncrementalStreamCapture(
+        task=task,
+        stream_events_path=stream_events_path,
+        session_id=session_id,
+        provider_id=provider_id,
+        model_id=model_id,
+        base_url=base_url,
+        timeout_seconds=timeout_seconds,
+        started_at=started_at,
+    )
+
+
 class OpenCodeSdkAdapter(OpenCodeAdapter, WorkerAdapter):
     """Runs one OpenCode SDK turn through a temporary local opencode server."""
 
@@ -205,9 +690,12 @@ class OpenCodeSdkAdapter(OpenCodeAdapter, WorkerAdapter):
 
         server: ServerHandle | None = None
         session_id: str | None = task.backend_session_id
+        stream_capture: _OpenCodeIncrementalStreamCapture | None = None
 
         try:
             resolved = resolve_command_prefix(self._configured_command(), self._default_executable())
+            if resolved.prefix == [DEMO_COMMAND]:
+                return super().run(task, run_dir)
             cwd = prepare_task_cwd(task, auto_create_workdir=self._config.auto_create_workdir)
             incoming_attachments_json.write_text(
                 json.dumps(_incoming_attachment_payload(task), indent=2, ensure_ascii=False) + "\n",
@@ -262,6 +750,18 @@ class OpenCodeSdkAdapter(OpenCodeAdapter, WorkerAdapter):
                     if active is not None:
                         active.session_id = session_id
 
+                stream_capture = _build_incremental_stream_capture(
+                    task=task,
+                    stream_events_path=stream_events_path,
+                    session_id=session_id,
+                    provider_id=provider_id,
+                    model_id=model_id,
+                    base_url=server.base_url,
+                    timeout_seconds=self._turn_timeout_seconds(task),
+                    started_at=started_at,
+                )
+                stream_capture.start()
+
                 chat_kwargs = {
                     "provider_id": provider_id,
                     "model_id": model_id,
@@ -278,17 +778,33 @@ class OpenCodeSdkAdapter(OpenCodeAdapter, WorkerAdapter):
             reply_text = extract_reply_text(assistant_parts)
             server_stderr = self._read_server_stderr(server)
             visible_reply = strip_run_result_capsules(reply_text)
-            stream_events = _synthesize_stream_events(
-                task=task,
-                assistant_parts=assistant_parts,
-                visible_reply=visible_reply,
-                session_id=session_id,
-                provider_id=provider_id,
-                model_id=model_id,
-                started_at=started_at,
-                finished_at=_timestamp(),
+            stream_capture_result = (
+                stream_capture.finish(
+                    assistant_parts=assistant_parts,
+                    visible_reply=visible_reply,
+                    finished_at=_timestamp(),
+                )
+                if stream_capture is not None
+                else None
             )
-            write_stream_events(stream_events_path, stream_events)
+            if stream_capture_result is not None and stream_capture_result.saw_incremental_evidence:
+                stream_events = load_stream_events(stream_events_path)
+                stream_mode = stream_capture_result.stream_mode
+                assistant_part_records = stream_capture_result.assistant_parts_records
+            else:
+                stream_events = _synthesize_stream_events(
+                    task=task,
+                    assistant_parts=assistant_parts,
+                    visible_reply=visible_reply,
+                    session_id=session_id,
+                    provider_id=provider_id,
+                    model_id=model_id,
+                    started_at=started_at,
+                    finished_at=_timestamp(),
+                )
+                write_stream_events(stream_events_path, stream_events)
+                stream_mode = "posthoc_assistant_parts_projection"
+                assistant_part_records = [part_to_record(part) for part in assistant_parts]
             sdk_turn_path.write_text(
                 json.dumps(
                     {
@@ -300,8 +816,8 @@ class OpenCodeSdkAdapter(OpenCodeAdapter, WorkerAdapter):
                         "message_count": len(messages),
                         "stream_path": str(stream_events_path),
                         "stream_event_count": len(stream_events),
-                        "stream_mode": "posthoc_assistant_parts_projection",
-                        "assistant_parts": [part_to_record(part) for part in assistant_parts],
+                        "stream_mode": stream_mode,
+                        "assistant_parts": assistant_part_records,
                         "assistant_reply": reply_text,
                     },
                     indent=2,
@@ -439,6 +955,8 @@ class OpenCodeSdkAdapter(OpenCodeAdapter, WorkerAdapter):
                 backend_transport=task.backend_transport,
             )
         except Exception as exc:
+            if stream_capture is not None:
+                stream_capture.abort()
             active = self._pop_active_run(task.task_id)
             killed = bool(active and active.kill_requested)
             session_id = (active.session_id if active is not None else None) or session_id or task.backend_session_id
@@ -494,6 +1012,8 @@ class OpenCodeSdkAdapter(OpenCodeAdapter, WorkerAdapter):
                 backend_transport=task.backend_transport,
             )
         finally:
+            if stream_capture is not None:
+                stream_capture.abort()
             self._pop_active_run(task.task_id)
             if server is not None:
                 stop_server(server)

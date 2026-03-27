@@ -7,7 +7,16 @@ from typing import Any
 
 
 PC_CONTROL_SCHEMA_VERSION = "v1"
-_SERVER_MESSAGE_TYPES = {"hello_ack", "error", "command_dispatch", "output_resume_request"}
+_SERVER_MESSAGE_TYPES = {
+    "hello_ack",
+    "error",
+    "command_dispatch",
+    "output_resume_request",
+    "mailbox_lease_ack",
+    "ingress_decision",
+    "thread_binding_ack",
+    "terminal_outcome_ack",
+}
 _CLIENT_MESSAGE_TYPES = {
     "pc_hello",
     "heartbeat",
@@ -17,12 +26,23 @@ _CLIENT_MESSAGE_TYPES = {
     "result",
     "output_chunk",
     "artifact_manifest",
+    "mailbox_lease",
+    "ingress_candidate",
+    "thread_binding",
+    "terminal_outcome",
 }
 _ACK_STATUSES = {"accepted", "accepted_but_queued", "rejected"}
 _COMMAND_TYPES = {"new_task", "reply", "status", "pause", "resume", "kill", "sync_project_folders"}
 _EVENT_TYPES = {"queued", "accepted", "running", "awaiting_user_input", "paused", "done", "failed", "killed"}
 _RESULT_FINAL_STATUSES = {"awaiting_user_input", "paused", "done", "failed", "killed"}
 _ARTIFACT_KINDS = {"image", "file"}
+_LEASE_OPERATIONS = {"acquire", "renew", "release"}
+_LEASE_STATUSES = {"active", "released", "denied"}
+_INGRESS_DECISIONS = {"accepted", "duplicate", "stale", "invalid", "ignored", "lease_denied"}
+_INGRESS_CANDIDATE_STATUSES = {"ready", "stale", "invalid", "ignored"}
+_INGRESS_CLASSIFICATIONS = {"new_task", "reply", "sync", "direct_kill", "system_mail", "unsupported"}
+_THREAD_BINDING_STATUSES = {"committed", "duplicate", "denied"}
+_TERMINAL_OUTCOME_STATUSES = {"committed", "denied"}
 
 
 class PcControlProtocolError(ValueError):
@@ -216,6 +236,63 @@ def _validate_artifact_manifest_items(value: Any, field_name: str) -> list[dict[
             }
         )
     return normalized
+
+
+def _validate_lease_operation(value: Any, field_name: str) -> str:
+    operation = _require_text(value, field_name)
+    if operation not in _LEASE_OPERATIONS:
+        raise PcControlProtocolError(f"{field_name} must be one of: {', '.join(sorted(_LEASE_OPERATIONS))}")
+    return operation
+
+
+def _validate_lease_status(value: Any, field_name: str) -> str:
+    status = _require_text(value, field_name)
+    if status not in _LEASE_STATUSES:
+        raise PcControlProtocolError(f"{field_name} must be one of: {', '.join(sorted(_LEASE_STATUSES))}")
+    return status
+
+
+def _validate_ingress_decision(value: Any, field_name: str) -> str:
+    decision = _require_text(value, field_name)
+    if decision not in _INGRESS_DECISIONS:
+        raise PcControlProtocolError(f"{field_name} must be one of: {', '.join(sorted(_INGRESS_DECISIONS))}")
+    return decision
+
+
+def _validate_ingress_candidate_status(value: Any, field_name: str) -> str:
+    status = _require_text(value, field_name)
+    if status not in _INGRESS_CANDIDATE_STATUSES:
+        raise PcControlProtocolError(
+            f"{field_name} must be one of: {', '.join(sorted(_INGRESS_CANDIDATE_STATUSES))}"
+        )
+    return status
+
+
+def _validate_ingress_classification(value: Any, field_name: str) -> str:
+    classification = _require_text(value, field_name)
+    if classification not in _INGRESS_CLASSIFICATIONS:
+        raise PcControlProtocolError(
+            f"{field_name} must be one of: {', '.join(sorted(_INGRESS_CLASSIFICATIONS))}"
+        )
+    return classification
+
+
+def _validate_thread_binding_status(value: Any, field_name: str) -> str:
+    status = _require_text(value, field_name)
+    if status not in _THREAD_BINDING_STATUSES:
+        raise PcControlProtocolError(
+            f"{field_name} must be one of: {', '.join(sorted(_THREAD_BINDING_STATUSES))}"
+        )
+    return status
+
+
+def _validate_terminal_outcome_status(value: Any, field_name: str) -> str:
+    status = _require_text(value, field_name)
+    if status not in _TERMINAL_OUTCOME_STATUSES:
+        raise PcControlProtocolError(
+            f"{field_name} must be one of: {', '.join(sorted(_TERMINAL_OUTCOME_STATUSES))}"
+        )
+    return status
 
 
 def _validate_envelope(data: dict[str, Any], *, expected_type: str, minimum_epoch: int) -> dict[str, Any]:
@@ -597,6 +674,226 @@ class PcArtifactManifestMessage:
         }
 
 
+@dataclass(slots=True)
+class PcMailboxLeaseMessage:
+    schema_version: str
+    type: str
+    message_id: str
+    trace_id: str
+    pc_id: str
+    connection_epoch: int
+    sent_at: str
+    payload: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        envelope = _validate_envelope(
+            {
+                "schema_version": self.schema_version,
+                "type": self.type,
+                "message_id": self.message_id,
+                "trace_id": self.trace_id,
+                "pc_id": self.pc_id,
+                "connection_epoch": self.connection_epoch,
+                "sent_at": self.sent_at,
+                "payload": self.payload,
+            },
+            expected_type="mailbox_lease",
+            minimum_epoch=1,
+        )
+        payload = envelope["payload"]
+        self.schema_version = envelope["schema_version"]
+        self.type = envelope["type"]
+        self.message_id = envelope["message_id"]
+        self.trace_id = envelope["trace_id"]
+        self.pc_id = envelope["pc_id"]
+        self.connection_epoch = envelope["connection_epoch"]
+        self.sent_at = envelope["sent_at"]
+        self.payload = {
+            "request_id": _require_text(payload.get("request_id"), "payload.request_id"),
+            "operation": _validate_lease_operation(payload.get("operation"), "payload.operation"),
+            "mailbox_key": _require_text(payload.get("mailbox_key"), "payload.mailbox_key"),
+            "lease_holder_id": _require_text(payload.get("lease_holder_id"), "payload.lease_holder_id"),
+            "lease_ttl_seconds": _require_int(payload.get("lease_ttl_seconds"), "payload.lease_ttl_seconds", minimum=5),
+            "lease_epoch": _require_optional_int(payload.get("lease_epoch"), "payload.lease_epoch", minimum=1),
+            "config_fingerprint": _require_optional_text(payload.get("config_fingerprint"), "payload.config_fingerprint"),
+            "host_fingerprint": _require_optional_text(payload.get("host_fingerprint"), "payload.host_fingerprint"),
+            "runtime_fingerprint": _require_optional_text(payload.get("runtime_fingerprint"), "payload.runtime_fingerprint"),
+            "last_seen_thread_id": _require_optional_text(payload.get("last_seen_thread_id"), "payload.last_seen_thread_id"),
+            "last_seen_ingress_id": _require_optional_text(payload.get("last_seen_ingress_id"), "payload.last_seen_ingress_id"),
+            "degraded_mode": _require_bool(payload.get("degraded_mode", False), "payload.degraded_mode"),
+        }
+
+
+@dataclass(slots=True)
+class PcIngressCandidateMessage:
+    schema_version: str
+    type: str
+    message_id: str
+    trace_id: str
+    pc_id: str
+    connection_epoch: int
+    sent_at: str
+    payload: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        envelope = _validate_envelope(
+            {
+                "schema_version": self.schema_version,
+                "type": self.type,
+                "message_id": self.message_id,
+                "trace_id": self.trace_id,
+                "pc_id": self.pc_id,
+                "connection_epoch": self.connection_epoch,
+                "sent_at": self.sent_at,
+                "payload": self.payload,
+            },
+            expected_type="ingress_candidate",
+            minimum_epoch=1,
+        )
+        payload = envelope["payload"]
+        self.schema_version = envelope["schema_version"]
+        self.type = envelope["type"]
+        self.message_id = envelope["message_id"]
+        self.trace_id = envelope["trace_id"]
+        self.pc_id = envelope["pc_id"]
+        self.connection_epoch = envelope["connection_epoch"]
+        self.sent_at = envelope["sent_at"]
+        self.payload = {
+            "request_id": _require_text(payload.get("request_id"), "payload.request_id"),
+            "mailbox_key": _require_text(payload.get("mailbox_key"), "payload.mailbox_key"),
+            "lease_holder_id": _require_text(payload.get("lease_holder_id"), "payload.lease_holder_id"),
+            "lease_epoch": _require_int(payload.get("lease_epoch"), "payload.lease_epoch", minimum=1),
+            "folder": _require_text(payload.get("folder"), "payload.folder"),
+            "uid_validity": _require_optional_int(payload.get("uid_validity"), "payload.uid_validity", minimum=1),
+            "uid": _require_optional_int(payload.get("uid"), "payload.uid", minimum=1),
+            "message_id": _require_text(payload.get("message_id"), "payload.message_id"),
+            "in_reply_to": _require_optional_text(payload.get("in_reply_to"), "payload.in_reply_to"),
+            "references_hash": _require_optional_text(payload.get("references_hash"), "payload.references_hash"),
+            "from_addr": _require_text(payload.get("from_addr"), "payload.from_addr"),
+            "subject": _require_text(payload.get("subject"), "payload.subject"),
+            "subject_norm": _require_text(payload.get("subject_norm"), "payload.subject_norm"),
+            "raw_date": _require_optional_text(payload.get("raw_date"), "payload.raw_date"),
+            "classification": _validate_ingress_classification(payload.get("classification"), "payload.classification"),
+            "candidate_status": _validate_ingress_candidate_status(
+                payload.get("candidate_status"),
+                "payload.candidate_status",
+            ),
+            "candidate_reason": _require_optional_text(payload.get("candidate_reason"), "payload.candidate_reason"),
+            "taskmail_request_id": _require_optional_text(payload.get("taskmail_request_id"), "payload.taskmail_request_id"),
+            "packet_id": _require_optional_text(payload.get("packet_id"), "payload.packet_id"),
+            "degraded_mode": _require_bool(payload.get("degraded_mode", False), "payload.degraded_mode"),
+        }
+
+
+@dataclass(slots=True)
+class PcThreadBindingMessage:
+    schema_version: str
+    type: str
+    message_id: str
+    trace_id: str
+    pc_id: str
+    connection_epoch: int
+    sent_at: str
+    payload: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        envelope = _validate_envelope(
+            {
+                "schema_version": self.schema_version,
+                "type": self.type,
+                "message_id": self.message_id,
+                "trace_id": self.trace_id,
+                "pc_id": self.pc_id,
+                "connection_epoch": self.connection_epoch,
+                "sent_at": self.sent_at,
+                "payload": self.payload,
+            },
+            expected_type="thread_binding",
+            minimum_epoch=1,
+        )
+        payload = envelope["payload"]
+        self.schema_version = envelope["schema_version"]
+        self.type = envelope["type"]
+        self.message_id = envelope["message_id"]
+        self.trace_id = envelope["trace_id"]
+        self.pc_id = envelope["pc_id"]
+        self.connection_epoch = envelope["connection_epoch"]
+        self.sent_at = envelope["sent_at"]
+        self.payload = {
+            "request_id": _require_text(payload.get("request_id"), "payload.request_id"),
+            "mailbox_key": _require_text(payload.get("mailbox_key"), "payload.mailbox_key"),
+            "lease_holder_id": _require_text(payload.get("lease_holder_id"), "payload.lease_holder_id"),
+            "lease_epoch": _require_int(payload.get("lease_epoch"), "payload.lease_epoch", minimum=1),
+            "ingress_id": _require_text(payload.get("ingress_id"), "payload.ingress_id"),
+            "root_message_id": _require_text(payload.get("root_message_id"), "payload.root_message_id"),
+            "thread_id": _require_text(payload.get("thread_id"), "payload.thread_id"),
+            "session_id": _require_text(payload.get("session_id"), "payload.session_id"),
+            "repo_path": _require_text(payload.get("repo_path"), "payload.repo_path"),
+            "workdir": _require_optional_text(payload.get("workdir"), "payload.workdir"),
+            "subject_norm": _require_text(payload.get("subject_norm"), "payload.subject_norm"),
+            "degraded_mode": _require_bool(payload.get("degraded_mode", False), "payload.degraded_mode"),
+        }
+
+
+@dataclass(slots=True)
+class PcTerminalOutcomeMessage:
+    schema_version: str
+    type: str
+    message_id: str
+    trace_id: str
+    pc_id: str
+    connection_epoch: int
+    sent_at: str
+    payload: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        envelope = _validate_envelope(
+            {
+                "schema_version": self.schema_version,
+                "type": self.type,
+                "message_id": self.message_id,
+                "trace_id": self.trace_id,
+                "pc_id": self.pc_id,
+                "connection_epoch": self.connection_epoch,
+                "sent_at": self.sent_at,
+                "payload": self.payload,
+            },
+            expected_type="terminal_outcome",
+            minimum_epoch=1,
+        )
+        payload = envelope["payload"]
+        self.schema_version = envelope["schema_version"]
+        self.type = envelope["type"]
+        self.message_id = envelope["message_id"]
+        self.trace_id = envelope["trace_id"]
+        self.pc_id = envelope["pc_id"]
+        self.connection_epoch = envelope["connection_epoch"]
+        self.sent_at = envelope["sent_at"]
+        self.payload = {
+            "request_id": _require_text(payload.get("request_id"), "payload.request_id"),
+            "mailbox_key": _require_text(payload.get("mailbox_key"), "payload.mailbox_key"),
+            "lease_holder_id": _require_text(payload.get("lease_holder_id"), "payload.lease_holder_id"),
+            "lease_epoch": _require_int(payload.get("lease_epoch"), "payload.lease_epoch", minimum=1),
+            "thread_id": _require_text(payload.get("thread_id"), "payload.thread_id"),
+            "task_id": _require_text(payload.get("task_id"), "payload.task_id"),
+            "run_status": _require_text(payload.get("run_status"), "payload.run_status"),
+            "generated_at": _require_text(payload.get("generated_at"), "payload.generated_at"),
+            "last_summary": _require_optional_text(payload.get("last_summary"), "payload.last_summary"),
+            "terminal_mail_message_id": _require_optional_text(
+                payload.get("terminal_mail_message_id"),
+                "payload.terminal_mail_message_id",
+            ),
+            "terminal_mail_subject": _require_optional_text(
+                payload.get("terminal_mail_subject"),
+                "payload.terminal_mail_subject",
+            ),
+            "taskmail_request_id": _require_optional_text(payload.get("taskmail_request_id"), "payload.taskmail_request_id"),
+            "packet_id": _require_optional_text(payload.get("packet_id"), "payload.packet_id"),
+            "source_ingress_id": _require_optional_text(payload.get("source_ingress_id"), "payload.source_ingress_id"),
+            "degraded_mode": _require_bool(payload.get("degraded_mode", False), "payload.degraded_mode"),
+        }
+
+
 PcControlClientMessage = (
     PcHelloMessage
     | PcHeartbeatMessage
@@ -606,6 +903,10 @@ PcControlClientMessage = (
     | PcCommandResultMessage
     | PcOutputChunkMessage
     | PcArtifactManifestMessage
+    | PcMailboxLeaseMessage
+    | PcIngressCandidateMessage
+    | PcThreadBindingMessage
+    | PcTerminalOutcomeMessage
 )
 
 
@@ -769,7 +1070,203 @@ class PcOutputResumeRequestMessage:
         }
 
 
-PcControlServerMessage = PcHelloAckMessage | PcErrorMessage | PcCommandDispatchMessage | PcOutputResumeRequestMessage
+@dataclass(slots=True)
+class PcMailboxLeaseAckMessage:
+    schema_version: str
+    type: str
+    message_id: str
+    trace_id: str
+    pc_id: str
+    connection_epoch: int
+    sent_at: str
+    payload: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        envelope = _validate_envelope(
+            {
+                "schema_version": self.schema_version,
+                "type": self.type,
+                "message_id": self.message_id,
+                "trace_id": self.trace_id,
+                "pc_id": self.pc_id,
+                "connection_epoch": self.connection_epoch,
+                "sent_at": self.sent_at,
+                "payload": self.payload,
+            },
+            expected_type="mailbox_lease_ack",
+            minimum_epoch=1,
+        )
+        payload = envelope["payload"]
+        self.schema_version = envelope["schema_version"]
+        self.type = envelope["type"]
+        self.message_id = envelope["message_id"]
+        self.trace_id = envelope["trace_id"]
+        self.pc_id = envelope["pc_id"]
+        self.connection_epoch = envelope["connection_epoch"]
+        self.sent_at = envelope["sent_at"]
+        self.payload = {
+            "request_id": _require_text(payload.get("request_id"), "payload.request_id"),
+            "operation": _validate_lease_operation(payload.get("operation"), "payload.operation"),
+            "mailbox_key": _require_text(payload.get("mailbox_key"), "payload.mailbox_key"),
+            "lease_status": _validate_lease_status(payload.get("lease_status"), "payload.lease_status"),
+            "lease_holder_id": _require_optional_text(payload.get("lease_holder_id"), "payload.lease_holder_id"),
+            "lease_pc_id": _require_optional_text(payload.get("lease_pc_id"), "payload.lease_pc_id"),
+            "lease_epoch": _require_optional_int(payload.get("lease_epoch"), "payload.lease_epoch", minimum=1),
+            "expires_at": _require_optional_text(payload.get("expires_at"), "payload.expires_at"),
+            "reason": _require_optional_text(payload.get("reason"), "payload.reason"),
+            "degraded_mode": _require_bool(payload.get("degraded_mode", False), "payload.degraded_mode"),
+        }
+
+
+@dataclass(slots=True)
+class PcIngressDecisionMessage:
+    schema_version: str
+    type: str
+    message_id: str
+    trace_id: str
+    pc_id: str
+    connection_epoch: int
+    sent_at: str
+    payload: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        envelope = _validate_envelope(
+            {
+                "schema_version": self.schema_version,
+                "type": self.type,
+                "message_id": self.message_id,
+                "trace_id": self.trace_id,
+                "pc_id": self.pc_id,
+                "connection_epoch": self.connection_epoch,
+                "sent_at": self.sent_at,
+                "payload": self.payload,
+            },
+            expected_type="ingress_decision",
+            minimum_epoch=1,
+        )
+        payload = envelope["payload"]
+        self.schema_version = envelope["schema_version"]
+        self.type = envelope["type"]
+        self.message_id = envelope["message_id"]
+        self.trace_id = envelope["trace_id"]
+        self.pc_id = envelope["pc_id"]
+        self.connection_epoch = envelope["connection_epoch"]
+        self.sent_at = envelope["sent_at"]
+        self.payload = {
+            "request_id": _require_text(payload.get("request_id"), "payload.request_id"),
+            "ingress_id": _require_text(payload.get("ingress_id"), "payload.ingress_id"),
+            "mailbox_key": _require_text(payload.get("mailbox_key"), "payload.mailbox_key"),
+            "decision": _validate_ingress_decision(payload.get("decision"), "payload.decision"),
+            "reason": _require_optional_text(payload.get("reason"), "payload.reason"),
+            "classification": _validate_ingress_classification(payload.get("classification"), "payload.classification"),
+            "lease_holder_id": _require_optional_text(payload.get("lease_holder_id"), "payload.lease_holder_id"),
+            "lease_epoch": _require_optional_int(payload.get("lease_epoch"), "payload.lease_epoch", minimum=1),
+            "thread_id": _require_optional_text(payload.get("thread_id"), "payload.thread_id"),
+            "session_id": _require_optional_text(payload.get("session_id"), "payload.session_id"),
+            "degraded_mode": _require_bool(payload.get("degraded_mode", False), "payload.degraded_mode"),
+        }
+
+
+@dataclass(slots=True)
+class PcThreadBindingAckMessage:
+    schema_version: str
+    type: str
+    message_id: str
+    trace_id: str
+    pc_id: str
+    connection_epoch: int
+    sent_at: str
+    payload: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        envelope = _validate_envelope(
+            {
+                "schema_version": self.schema_version,
+                "type": self.type,
+                "message_id": self.message_id,
+                "trace_id": self.trace_id,
+                "pc_id": self.pc_id,
+                "connection_epoch": self.connection_epoch,
+                "sent_at": self.sent_at,
+                "payload": self.payload,
+            },
+            expected_type="thread_binding_ack",
+            minimum_epoch=1,
+        )
+        payload = envelope["payload"]
+        self.schema_version = envelope["schema_version"]
+        self.type = envelope["type"]
+        self.message_id = envelope["message_id"]
+        self.trace_id = envelope["trace_id"]
+        self.pc_id = envelope["pc_id"]
+        self.connection_epoch = envelope["connection_epoch"]
+        self.sent_at = envelope["sent_at"]
+        self.payload = {
+            "request_id": _require_text(payload.get("request_id"), "payload.request_id"),
+            "ingress_id": _require_text(payload.get("ingress_id"), "payload.ingress_id"),
+            "binding_status": _validate_thread_binding_status(payload.get("binding_status"), "payload.binding_status"),
+            "reason": _require_optional_text(payload.get("reason"), "payload.reason"),
+            "thread_id": _require_optional_text(payload.get("thread_id"), "payload.thread_id"),
+            "session_id": _require_optional_text(payload.get("session_id"), "payload.session_id"),
+            "degraded_mode": _require_bool(payload.get("degraded_mode", False), "payload.degraded_mode"),
+        }
+
+
+@dataclass(slots=True)
+class PcTerminalOutcomeAckMessage:
+    schema_version: str
+    type: str
+    message_id: str
+    trace_id: str
+    pc_id: str
+    connection_epoch: int
+    sent_at: str
+    payload: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        envelope = _validate_envelope(
+            {
+                "schema_version": self.schema_version,
+                "type": self.type,
+                "message_id": self.message_id,
+                "trace_id": self.trace_id,
+                "pc_id": self.pc_id,
+                "connection_epoch": self.connection_epoch,
+                "sent_at": self.sent_at,
+                "payload": self.payload,
+            },
+            expected_type="terminal_outcome_ack",
+            minimum_epoch=1,
+        )
+        payload = envelope["payload"]
+        self.schema_version = envelope["schema_version"]
+        self.type = envelope["type"]
+        self.message_id = envelope["message_id"]
+        self.trace_id = envelope["trace_id"]
+        self.pc_id = envelope["pc_id"]
+        self.connection_epoch = envelope["connection_epoch"]
+        self.sent_at = envelope["sent_at"]
+        self.payload = {
+            "request_id": _require_text(payload.get("request_id"), "payload.request_id"),
+            "thread_id": _require_text(payload.get("thread_id"), "payload.thread_id"),
+            "task_id": _require_text(payload.get("task_id"), "payload.task_id"),
+            "outcome_status": _validate_terminal_outcome_status(payload.get("outcome_status"), "payload.outcome_status"),
+            "reason": _require_optional_text(payload.get("reason"), "payload.reason"),
+            "source_ingress_id": _require_optional_text(payload.get("source_ingress_id"), "payload.source_ingress_id"),
+            "degraded_mode": _require_bool(payload.get("degraded_mode", False), "payload.degraded_mode"),
+        }
+
+
+PcControlServerMessage = (
+    PcHelloAckMessage
+    | PcErrorMessage
+    | PcCommandDispatchMessage
+    | PcOutputResumeRequestMessage
+    | PcMailboxLeaseAckMessage
+    | PcIngressDecisionMessage
+    | PcThreadBindingAckMessage
+    | PcTerminalOutcomeAckMessage
+)
 
 
 def parse_pc_control_client_message(payload: dict[str, Any]) -> PcControlClientMessage:
@@ -791,7 +1288,15 @@ def parse_pc_control_client_message(payload: dict[str, Any]) -> PcControlClientM
         return PcCommandResultMessage(**data)
     if message_type == "output_chunk":
         return PcOutputChunkMessage(**data)
-    return PcArtifactManifestMessage(**data)
+    if message_type == "artifact_manifest":
+        return PcArtifactManifestMessage(**data)
+    if message_type == "mailbox_lease":
+        return PcMailboxLeaseMessage(**data)
+    if message_type == "ingress_candidate":
+        return PcIngressCandidateMessage(**data)
+    if message_type == "thread_binding":
+        return PcThreadBindingMessage(**data)
+    return PcTerminalOutcomeMessage(**data)
 
 
 def parse_pc_control_server_message(payload: dict[str, Any]) -> PcControlServerMessage:
@@ -805,7 +1310,15 @@ def parse_pc_control_server_message(payload: dict[str, Any]) -> PcControlServerM
         return PcErrorMessage(**data)
     if message_type == "command_dispatch":
         return PcCommandDispatchMessage(**data)
-    return PcOutputResumeRequestMessage(**data)
+    if message_type == "output_resume_request":
+        return PcOutputResumeRequestMessage(**data)
+    if message_type == "mailbox_lease_ack":
+        return PcMailboxLeaseAckMessage(**data)
+    if message_type == "ingress_decision":
+        return PcIngressDecisionMessage(**data)
+    if message_type == "thread_binding_ack":
+        return PcThreadBindingAckMessage(**data)
+    return PcTerminalOutcomeAckMessage(**data)
 
 
 def build_pc_hello(
@@ -1179,6 +1692,384 @@ def build_output_resume_request(
         },
     }
     PcOutputResumeRequestMessage(**payload)
+    return payload
+
+
+def build_mailbox_lease(
+    *,
+    message_id: str,
+    trace_id: str,
+    pc_id: str,
+    connection_epoch: int,
+    sent_at: str,
+    request_id: str,
+    operation: str,
+    mailbox_key: str,
+    lease_holder_id: str,
+    lease_ttl_seconds: int,
+    lease_epoch: int | None = None,
+    config_fingerprint: str | None = None,
+    host_fingerprint: str | None = None,
+    runtime_fingerprint: str | None = None,
+    last_seen_thread_id: str | None = None,
+    last_seen_ingress_id: str | None = None,
+    degraded_mode: bool = False,
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": PC_CONTROL_SCHEMA_VERSION,
+        "type": "mailbox_lease",
+        "message_id": _require_text(message_id, "message_id"),
+        "trace_id": _require_text(trace_id, "trace_id"),
+        "pc_id": _require_text(pc_id, "pc_id"),
+        "connection_epoch": _require_int(connection_epoch, "connection_epoch", minimum=1),
+        "sent_at": _require_text(sent_at, "sent_at"),
+        "payload": {
+            "request_id": _require_text(request_id, "payload.request_id"),
+            "operation": _validate_lease_operation(operation, "payload.operation"),
+            "mailbox_key": _require_text(mailbox_key, "payload.mailbox_key"),
+            "lease_holder_id": _require_text(lease_holder_id, "payload.lease_holder_id"),
+            "lease_ttl_seconds": _require_int(lease_ttl_seconds, "payload.lease_ttl_seconds", minimum=5),
+            "lease_epoch": _require_optional_int(lease_epoch, "payload.lease_epoch", minimum=1),
+            "config_fingerprint": _require_optional_text(config_fingerprint, "payload.config_fingerprint"),
+            "host_fingerprint": _require_optional_text(host_fingerprint, "payload.host_fingerprint"),
+            "runtime_fingerprint": _require_optional_text(runtime_fingerprint, "payload.runtime_fingerprint"),
+            "last_seen_thread_id": _require_optional_text(last_seen_thread_id, "payload.last_seen_thread_id"),
+            "last_seen_ingress_id": _require_optional_text(last_seen_ingress_id, "payload.last_seen_ingress_id"),
+            "degraded_mode": _require_bool(degraded_mode, "payload.degraded_mode"),
+        },
+    }
+    PcMailboxLeaseMessage(**payload)
+    return payload
+
+
+def build_ingress_candidate(
+    *,
+    message_id: str,
+    trace_id: str,
+    pc_id: str,
+    connection_epoch: int,
+    sent_at: str,
+    request_id: str,
+    mailbox_key: str,
+    lease_holder_id: str,
+    lease_epoch: int,
+    folder: str,
+    uid_validity: int | None,
+    uid: int | None,
+    ingress_message_id: str,
+    in_reply_to: str | None,
+    references_hash: str | None,
+    from_addr: str,
+    subject: str,
+    subject_norm: str,
+    raw_date: str | None,
+    classification: str,
+    candidate_status: str,
+    candidate_reason: str | None = None,
+    taskmail_request_id: str | None = None,
+    packet_id: str | None = None,
+    degraded_mode: bool = False,
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": PC_CONTROL_SCHEMA_VERSION,
+        "type": "ingress_candidate",
+        "message_id": _require_text(message_id, "message_id"),
+        "trace_id": _require_text(trace_id, "trace_id"),
+        "pc_id": _require_text(pc_id, "pc_id"),
+        "connection_epoch": _require_int(connection_epoch, "connection_epoch", minimum=1),
+        "sent_at": _require_text(sent_at, "sent_at"),
+        "payload": {
+            "request_id": _require_text(request_id, "payload.request_id"),
+            "mailbox_key": _require_text(mailbox_key, "payload.mailbox_key"),
+            "lease_holder_id": _require_text(lease_holder_id, "payload.lease_holder_id"),
+            "lease_epoch": _require_int(lease_epoch, "payload.lease_epoch", minimum=1),
+            "folder": _require_text(folder, "payload.folder"),
+            "uid_validity": _require_optional_int(uid_validity, "payload.uid_validity", minimum=1),
+            "uid": _require_optional_int(uid, "payload.uid", minimum=1),
+            "message_id": _require_text(ingress_message_id, "payload.message_id"),
+            "in_reply_to": _require_optional_text(in_reply_to, "payload.in_reply_to"),
+            "references_hash": _require_optional_text(references_hash, "payload.references_hash"),
+            "from_addr": _require_text(from_addr, "payload.from_addr"),
+            "subject": _require_text(subject, "payload.subject"),
+            "subject_norm": _require_text(subject_norm, "payload.subject_norm"),
+            "raw_date": _require_optional_text(raw_date, "payload.raw_date"),
+            "classification": _validate_ingress_classification(classification, "payload.classification"),
+            "candidate_status": _validate_ingress_candidate_status(candidate_status, "payload.candidate_status"),
+            "candidate_reason": _require_optional_text(candidate_reason, "payload.candidate_reason"),
+            "taskmail_request_id": _require_optional_text(taskmail_request_id, "payload.taskmail_request_id"),
+            "packet_id": _require_optional_text(packet_id, "payload.packet_id"),
+            "degraded_mode": _require_bool(degraded_mode, "payload.degraded_mode"),
+        },
+    }
+    PcIngressCandidateMessage(**payload)
+    return payload
+
+
+def build_thread_binding(
+    *,
+    message_id: str,
+    trace_id: str,
+    pc_id: str,
+    connection_epoch: int,
+    sent_at: str,
+    request_id: str,
+    mailbox_key: str,
+    lease_holder_id: str,
+    lease_epoch: int,
+    ingress_id: str,
+    root_message_id: str,
+    thread_id: str,
+    session_id: str,
+    repo_path: str,
+    workdir: str | None,
+    subject_norm: str,
+    degraded_mode: bool = False,
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": PC_CONTROL_SCHEMA_VERSION,
+        "type": "thread_binding",
+        "message_id": _require_text(message_id, "message_id"),
+        "trace_id": _require_text(trace_id, "trace_id"),
+        "pc_id": _require_text(pc_id, "pc_id"),
+        "connection_epoch": _require_int(connection_epoch, "connection_epoch", minimum=1),
+        "sent_at": _require_text(sent_at, "sent_at"),
+        "payload": {
+            "request_id": _require_text(request_id, "payload.request_id"),
+            "mailbox_key": _require_text(mailbox_key, "payload.mailbox_key"),
+            "lease_holder_id": _require_text(lease_holder_id, "payload.lease_holder_id"),
+            "lease_epoch": _require_int(lease_epoch, "payload.lease_epoch", minimum=1),
+            "ingress_id": _require_text(ingress_id, "payload.ingress_id"),
+            "root_message_id": _require_text(root_message_id, "payload.root_message_id"),
+            "thread_id": _require_text(thread_id, "payload.thread_id"),
+            "session_id": _require_text(session_id, "payload.session_id"),
+            "repo_path": _require_text(repo_path, "payload.repo_path"),
+            "workdir": _require_optional_text(workdir, "payload.workdir"),
+            "subject_norm": _require_text(subject_norm, "payload.subject_norm"),
+            "degraded_mode": _require_bool(degraded_mode, "payload.degraded_mode"),
+        },
+    }
+    PcThreadBindingMessage(**payload)
+    return payload
+
+
+def build_terminal_outcome(
+    *,
+    message_id: str,
+    trace_id: str,
+    pc_id: str,
+    connection_epoch: int,
+    sent_at: str,
+    request_id: str,
+    mailbox_key: str,
+    lease_holder_id: str,
+    lease_epoch: int,
+    thread_id: str,
+    task_id: str,
+    run_status: str,
+    generated_at: str,
+    last_summary: str | None = None,
+    terminal_mail_message_id: str | None = None,
+    terminal_mail_subject: str | None = None,
+    taskmail_request_id: str | None = None,
+    packet_id: str | None = None,
+    source_ingress_id: str | None = None,
+    degraded_mode: bool = False,
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": PC_CONTROL_SCHEMA_VERSION,
+        "type": "terminal_outcome",
+        "message_id": _require_text(message_id, "message_id"),
+        "trace_id": _require_text(trace_id, "trace_id"),
+        "pc_id": _require_text(pc_id, "pc_id"),
+        "connection_epoch": _require_int(connection_epoch, "connection_epoch", minimum=1),
+        "sent_at": _require_text(sent_at, "sent_at"),
+        "payload": {
+            "request_id": _require_text(request_id, "payload.request_id"),
+            "mailbox_key": _require_text(mailbox_key, "payload.mailbox_key"),
+            "lease_holder_id": _require_text(lease_holder_id, "payload.lease_holder_id"),
+            "lease_epoch": _require_int(lease_epoch, "payload.lease_epoch", minimum=1),
+            "thread_id": _require_text(thread_id, "payload.thread_id"),
+            "task_id": _require_text(task_id, "payload.task_id"),
+            "run_status": _require_text(run_status, "payload.run_status"),
+            "generated_at": _require_text(generated_at, "payload.generated_at"),
+            "last_summary": _require_optional_text(last_summary, "payload.last_summary"),
+            "terminal_mail_message_id": _require_optional_text(
+                terminal_mail_message_id,
+                "payload.terminal_mail_message_id",
+            ),
+            "terminal_mail_subject": _require_optional_text(
+                terminal_mail_subject,
+                "payload.terminal_mail_subject",
+            ),
+            "taskmail_request_id": _require_optional_text(taskmail_request_id, "payload.taskmail_request_id"),
+            "packet_id": _require_optional_text(packet_id, "payload.packet_id"),
+            "source_ingress_id": _require_optional_text(source_ingress_id, "payload.source_ingress_id"),
+            "degraded_mode": _require_bool(degraded_mode, "payload.degraded_mode"),
+        },
+    }
+    PcTerminalOutcomeMessage(**payload)
+    return payload
+
+
+def build_mailbox_lease_ack(
+    *,
+    message_id: str,
+    trace_id: str,
+    pc_id: str,
+    connection_epoch: int,
+    sent_at: str,
+    request_id: str,
+    operation: str,
+    mailbox_key: str,
+    lease_status: str,
+    lease_holder_id: str | None,
+    lease_pc_id: str | None,
+    lease_epoch: int | None,
+    expires_at: str | None,
+    reason: str | None = None,
+    degraded_mode: bool = False,
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": PC_CONTROL_SCHEMA_VERSION,
+        "type": "mailbox_lease_ack",
+        "message_id": _require_text(message_id, "message_id"),
+        "trace_id": _require_text(trace_id, "trace_id"),
+        "pc_id": _require_text(pc_id, "pc_id"),
+        "connection_epoch": _require_int(connection_epoch, "connection_epoch", minimum=1),
+        "sent_at": _require_text(sent_at, "sent_at"),
+        "payload": {
+            "request_id": _require_text(request_id, "payload.request_id"),
+            "operation": _validate_lease_operation(operation, "payload.operation"),
+            "mailbox_key": _require_text(mailbox_key, "payload.mailbox_key"),
+            "lease_status": _validate_lease_status(lease_status, "payload.lease_status"),
+            "lease_holder_id": _require_optional_text(lease_holder_id, "payload.lease_holder_id"),
+            "lease_pc_id": _require_optional_text(lease_pc_id, "payload.lease_pc_id"),
+            "lease_epoch": _require_optional_int(lease_epoch, "payload.lease_epoch", minimum=1),
+            "expires_at": _require_optional_text(expires_at, "payload.expires_at"),
+            "reason": _require_optional_text(reason, "payload.reason"),
+            "degraded_mode": _require_bool(degraded_mode, "payload.degraded_mode"),
+        },
+    }
+    PcMailboxLeaseAckMessage(**payload)
+    return payload
+
+
+def build_ingress_decision(
+    *,
+    message_id: str,
+    trace_id: str,
+    pc_id: str,
+    connection_epoch: int,
+    sent_at: str,
+    request_id: str,
+    ingress_id: str,
+    mailbox_key: str,
+    decision: str,
+    classification: str,
+    lease_holder_id: str | None,
+    lease_epoch: int | None,
+    reason: str | None = None,
+    thread_id: str | None = None,
+    session_id: str | None = None,
+    degraded_mode: bool = False,
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": PC_CONTROL_SCHEMA_VERSION,
+        "type": "ingress_decision",
+        "message_id": _require_text(message_id, "message_id"),
+        "trace_id": _require_text(trace_id, "trace_id"),
+        "pc_id": _require_text(pc_id, "pc_id"),
+        "connection_epoch": _require_int(connection_epoch, "connection_epoch", minimum=1),
+        "sent_at": _require_text(sent_at, "sent_at"),
+        "payload": {
+            "request_id": _require_text(request_id, "payload.request_id"),
+            "ingress_id": _require_text(ingress_id, "payload.ingress_id"),
+            "mailbox_key": _require_text(mailbox_key, "payload.mailbox_key"),
+            "decision": _validate_ingress_decision(decision, "payload.decision"),
+            "reason": _require_optional_text(reason, "payload.reason"),
+            "classification": _validate_ingress_classification(classification, "payload.classification"),
+            "lease_holder_id": _require_optional_text(lease_holder_id, "payload.lease_holder_id"),
+            "lease_epoch": _require_optional_int(lease_epoch, "payload.lease_epoch", minimum=1),
+            "thread_id": _require_optional_text(thread_id, "payload.thread_id"),
+            "session_id": _require_optional_text(session_id, "payload.session_id"),
+            "degraded_mode": _require_bool(degraded_mode, "payload.degraded_mode"),
+        },
+    }
+    PcIngressDecisionMessage(**payload)
+    return payload
+
+
+def build_thread_binding_ack(
+    *,
+    message_id: str,
+    trace_id: str,
+    pc_id: str,
+    connection_epoch: int,
+    sent_at: str,
+    request_id: str,
+    ingress_id: str,
+    binding_status: str,
+    reason: str | None = None,
+    thread_id: str | None = None,
+    session_id: str | None = None,
+    degraded_mode: bool = False,
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": PC_CONTROL_SCHEMA_VERSION,
+        "type": "thread_binding_ack",
+        "message_id": _require_text(message_id, "message_id"),
+        "trace_id": _require_text(trace_id, "trace_id"),
+        "pc_id": _require_text(pc_id, "pc_id"),
+        "connection_epoch": _require_int(connection_epoch, "connection_epoch", minimum=1),
+        "sent_at": _require_text(sent_at, "sent_at"),
+        "payload": {
+            "request_id": _require_text(request_id, "payload.request_id"),
+            "ingress_id": _require_text(ingress_id, "payload.ingress_id"),
+            "binding_status": _validate_thread_binding_status(binding_status, "payload.binding_status"),
+            "reason": _require_optional_text(reason, "payload.reason"),
+            "thread_id": _require_optional_text(thread_id, "payload.thread_id"),
+            "session_id": _require_optional_text(session_id, "payload.session_id"),
+            "degraded_mode": _require_bool(degraded_mode, "payload.degraded_mode"),
+        },
+    }
+    PcThreadBindingAckMessage(**payload)
+    return payload
+
+
+def build_terminal_outcome_ack(
+    *,
+    message_id: str,
+    trace_id: str,
+    pc_id: str,
+    connection_epoch: int,
+    sent_at: str,
+    request_id: str,
+    thread_id: str,
+    task_id: str,
+    outcome_status: str,
+    reason: str | None = None,
+    source_ingress_id: str | None = None,
+    degraded_mode: bool = False,
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": PC_CONTROL_SCHEMA_VERSION,
+        "type": "terminal_outcome_ack",
+        "message_id": _require_text(message_id, "message_id"),
+        "trace_id": _require_text(trace_id, "trace_id"),
+        "pc_id": _require_text(pc_id, "pc_id"),
+        "connection_epoch": _require_int(connection_epoch, "connection_epoch", minimum=1),
+        "sent_at": _require_text(sent_at, "sent_at"),
+        "payload": {
+            "request_id": _require_text(request_id, "payload.request_id"),
+            "thread_id": _require_text(thread_id, "payload.thread_id"),
+            "task_id": _require_text(task_id, "payload.task_id"),
+            "outcome_status": _validate_terminal_outcome_status(outcome_status, "payload.outcome_status"),
+            "reason": _require_optional_text(reason, "payload.reason"),
+            "source_ingress_id": _require_optional_text(source_ingress_id, "payload.source_ingress_id"),
+            "degraded_mode": _require_bool(degraded_mode, "payload.degraded_mode"),
+        },
+    }
+    PcTerminalOutcomeAckMessage(**payload)
     return payload
 
 

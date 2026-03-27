@@ -325,6 +325,150 @@ def test_prepare_external_deliveries_externalizes_oversized_artifact_to_relay_fi
         thread.join(timeout=5)
 
 
+def test_prepare_external_deliveries_prefers_file_surface_by_default_when_relay_and_cos_are_both_available(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact_path = tmp_path / "preview.png"
+    artifact_path.write_bytes(b"\x89PNG\r\n\x1a\ndefault-file-surface")
+    artifact = RunArtifact(
+        artifact_id="artifact-preview",
+        path=str(artifact_path),
+        name="preview.png",
+        kind="image",
+        content_type="image/png",
+        source="directory_fallback",
+        attach=True,
+        inline_preview=True,
+        caption="Preview image",
+    )
+    attachment = OutgoingAttachment(
+        path=str(artifact_path),
+        name="preview.png",
+        content_type="image/png",
+        attach=True,
+        inline=True,
+        caption="Preview image",
+    )
+    config = RelayServerConfig(
+        host="127.0.0.1",
+        port=0,
+        transport_token="relay-secret",
+        state_dir=str(tmp_path / "relay_state"),
+    )
+    server = build_http_server(config, session_store=InMemorySessionStore())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    client = FakeCosClient()
+    try:
+        monkeypatch.setattr("mail_runner.external_delivery._load_local_cos_config", lambda: {})
+        host, port = server.server_address[:2]
+        effective_artifacts, remaining_attachments, deliveries, notices = prepare_external_deliveries(
+            AppConfig(
+                outbound_transport="relay",
+                relay_url=f"ws://{host}:{port}/relay",
+                relay_transport_token="relay-secret",
+                relay_timeout_seconds=5,
+                external_delivery_threshold_mb=0,
+                cos_region="ap-shanghai",
+                cos_bucket="mailbot-1412015279",
+                cos_secret_id="secret-id",
+                cos_secret_key="secret-key",
+                cos_object_prefix="mail-runner",
+            ),
+            artifacts=[artifact],
+            attachments=[attachment],
+            result=_result(),
+            task_root=tmp_path / "tasks",
+            cos_client_factory=lambda settings: client,
+        )
+
+        assert remaining_attachments == []
+        assert notices == []
+        assert len(deliveries) == 1
+        assert deliveries[0].provider == "file_surface"
+        assert deliveries[0].url.startswith(f"http://{host}:{port}/v1/files/")
+        assert effective_artifacts[0].inline_preview is False
+        assert client.upload_calls == []
+        assert client.download_calls == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_prepare_external_deliveries_keeps_legacy_cos_first_when_auto_is_explicit(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    artifact_path = tmp_path / "preview.png"
+    artifact_path.write_bytes(b"\x89PNG\r\n\x1a\nauto-prefers-cos")
+    artifact = RunArtifact(
+        artifact_id="artifact-preview",
+        path=str(artifact_path),
+        name="preview.png",
+        kind="image",
+        content_type="image/png",
+        source="directory_fallback",
+        attach=True,
+        inline_preview=True,
+        caption="Preview image",
+    )
+    attachment = OutgoingAttachment(
+        path=str(artifact_path),
+        name="preview.png",
+        content_type="image/png",
+        attach=True,
+        inline=True,
+        caption="Preview image",
+    )
+    config = RelayServerConfig(
+        host="127.0.0.1",
+        port=0,
+        transport_token="relay-secret",
+        state_dir=str(tmp_path / "relay_state"),
+    )
+    server = build_http_server(config, session_store=InMemorySessionStore())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    client = FakeCosClient()
+    try:
+        monkeypatch.setattr("mail_runner.external_delivery._load_local_cos_config", lambda: {})
+        host, port = server.server_address[:2]
+        effective_artifacts, remaining_attachments, deliveries, notices = prepare_external_deliveries(
+            AppConfig(
+                outbound_transport="relay",
+                relay_url=f"ws://{host}:{port}/relay",
+                relay_transport_token="relay-secret",
+                relay_timeout_seconds=5,
+                external_delivery_threshold_mb=0,
+                external_delivery_backend_preference="auto",
+                cos_region="ap-shanghai",
+                cos_bucket="mailbot-1412015279",
+                cos_secret_id="secret-id",
+                cos_secret_key="secret-key",
+                cos_object_prefix="mail-runner",
+            ),
+            artifacts=[artifact],
+            attachments=[attachment],
+            result=_result(),
+            task_root=tmp_path / "tasks",
+            cos_client_factory=lambda settings: client,
+        )
+
+        assert remaining_attachments == []
+        assert notices == []
+        assert len(deliveries) == 1
+        assert deliveries[0].provider == "cos"
+        assert effective_artifacts[0].inline_preview is False
+        assert client.upload_calls != []
+        assert client.download_calls != []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_prepare_external_deliveries_prefers_file_surface_when_configured_for_cutover(
     tmp_path: Path,
     monkeypatch,

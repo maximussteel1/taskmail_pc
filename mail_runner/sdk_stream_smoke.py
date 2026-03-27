@@ -85,6 +85,7 @@ def _opencode_stream_contract(run_dir: Path, failures: list[str]) -> dict[str, A
     stream_path = run_dir / STREAM_EVENTS_FILENAME
     sdk_turn_path = run_dir / "sdk_turn.json"
     sdk_turn_payload = json.loads(sdk_turn_path.read_text(encoding="utf-8")) if sdk_turn_path.exists() else None
+    stream_mode = str((sdk_turn_payload or {}).get("stream_mode") or "").strip() if isinstance(sdk_turn_payload, dict) else ""
     if not sdk_turn_payload:
         failures.append("OpenCode stream smoke is missing sdk_turn.json.")
     if not stream_path.exists():
@@ -111,6 +112,8 @@ def _opencode_stream_contract(run_dir: Path, failures: list[str]) -> dict[str, A
     expected_seqs = list(range(1, len(seqs) + 1))
     if seqs != expected_seqs:
         failures.append(f"OpenCode stream seq contract mismatch: observed {seqs}, expected {expected_seqs}.")
+    if not any(event.kind == "assistant.delta" for event in events):
+        failures.append("OpenCode stream is missing assistant.delta events.")
     if not any(event.kind == "assistant.completed" for event in events):
         failures.append("OpenCode stream is missing assistant.completed events.")
     if not any(event.kind == "turn.completed" for event in events):
@@ -134,21 +137,32 @@ def _opencode_stream_contract(run_dir: Path, failures: list[str]) -> dict[str, A
     if not candidate_output_chunks:
         failures.append("OpenCode stream did not produce any candidate output_chunk payloads.")
 
+    supports_incremental_stream = stream_mode == "event_stream_message_parts_incremental"
     return {
         "stream_path": str(stream_path),
         "stream_exists": True,
         "supports_persisted_stream": True,
-        "supports_incremental_stream": False,
+        "supports_incremental_stream": supports_incremental_stream,
         "sdk_turn_path": str(sdk_turn_path),
+        "stream_mode": stream_mode or None,
         "event_count": len(events),
         "seqs": seqs,
         "kinds": [event.kind for event in events],
         "candidate_output_chunks": candidate_output_chunks,
-        "residual_gap": {
-            "kind": "incremental_stream_not_proven",
-            "summary": "OpenCode SDK currently persists a minimal post-turn stream projection; true incremental streaming is not yet validated by this smoke.",
-            "recorded": True,
-        },
+        **(
+            {}
+            if supports_incremental_stream
+            else {
+                "residual_gap": {
+                    "kind": "incremental_stream_not_proven",
+                    "summary": (
+                        "OpenCode SDK currently persists a stream file but the recorded stream_mode is not "
+                        "incremental; true event-stream message-part capture is not yet validated by this smoke."
+                    ),
+                    "recorded": True,
+                }
+            }
+        ),
     }
 
 

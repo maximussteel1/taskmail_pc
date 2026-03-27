@@ -8,7 +8,7 @@ from mail_runner.artifact_resolver import write_artifact_index
 from mail_runner.config import AppConfig
 from mail_runner.file_surface import write_artifact_upload_success_binding
 from mail_runner.models import RunArtifact, RunResult, TaskSnapshot, ThreadState
-from mail_runner.pc_control_plane_client import PcControlPlaneClient
+from mail_runner.pc_control_plane_client import PcControlPlaneClient, build_pc_control_plane_client
 from mail_runner.relay_server.app import build_runtime_relay, start_relay_server
 from mail_runner.relay_server.config import RelayServerConfig
 from mail_runner.relay_server.packet_store import PersistentAcceptedPacketStore
@@ -25,6 +25,20 @@ from mail_runner.relay_server.pc_control_runtime import build_pc_control_runtime
 from mail_runner.relay_server.session_store import PersistentSessionStore
 from mail_runner.stream_events import STREAM_EVENTS_FILENAME
 from mail_runner.workspace import WorkspaceManager
+
+
+def test_build_pc_control_plane_client_is_disabled_in_mail_first_mode() -> None:
+    client = build_pc_control_plane_client(
+        AppConfig(
+            control_plane_mode="mail_first",
+            relay_url="ws://relay.example.com/relay",
+            relay_transport_token="relay-secret",
+            relay_client_id="pc_home",
+            relay_client_version="0.1.0",
+        )
+    )
+
+    assert client is None
 
 
 class _ImmediateSuccessRunner:
@@ -247,6 +261,82 @@ class _RecordingWebSocket:
 
     async def send(self, payload: str) -> None:
         self.sent_frames.append(json.loads(payload))
+
+
+def test_pc_control_plane_client_strict_lease_blocks_mailbox_without_active_lease(tmp_path) -> None:
+    client = PcControlPlaneClient(
+        relay_url="ws://127.0.0.1:8787/relay",
+        transport_token="relay-secret",
+        pc_id="pc_home",
+        client_version="0.1.0",
+        display_name="pc_home",
+        config=AppConfig(
+            relay_mailbox_lease_mode="strict",
+            relay_mailbox_lease_ttl_seconds=45,
+            imap_host="imap.example.com",
+            imap_user="bot@example.com",
+        ),
+        runner=_ImmediateSuccessRunner(tmp_path / "task_root"),
+    )
+
+    assert client.can_consume_mailbox() is False
+
+    client._update_lease_state_from_ack(
+        {
+            "lease_status": "active",
+            "lease_epoch": 2,
+            "lease_holder_id": client.mailbox_lease_state()["runner_id"],
+            "lease_pc_id": "pc_home",
+            "expires_at": "2026-03-25T10:01:13",
+            "reason": None,
+            "degraded_mode": False,
+        }
+    )
+
+    assert client.can_consume_mailbox() is True
+    client._set_connection_state(connected=False)
+    assert client.can_consume_mailbox() is False
+
+
+def test_pc_control_plane_client_degraded_mode_falls_back_locally_when_disconnected(tmp_path) -> None:
+    client = PcControlPlaneClient(
+        relay_url="ws://127.0.0.1:8787/relay",
+        transport_token="relay-secret",
+        pc_id="pc_home",
+        client_version="0.1.0",
+        display_name="pc_home",
+        config=AppConfig(
+            relay_mailbox_lease_mode="degraded",
+            relay_mailbox_lease_ttl_seconds=45,
+            imap_host="imap.example.com",
+            imap_user="bot@example.com",
+        ),
+        runner=_ImmediateSuccessRunner(tmp_path / "task_root"),
+    )
+
+    decision = client.register_ingress_candidate(
+        envelope=type(
+            "Envelope",
+            (),
+            {
+                "message_id": "<ingress@example.com>",
+                "subject": "[OC] Demo",
+                "from_addr": "user@example.com",
+                "date": "2026-03-25T10:00:00",
+                "in_reply_to": None,
+                "references": [],
+                "imap_uid": 101,
+                "imap_uid_validity": 777,
+            },
+        )(),
+        classification="new_task",
+        subject_norm="demo",
+        candidate_status="ready",
+    )
+
+    assert client.can_consume_mailbox() is True
+    assert decision["decision"] == "accepted"
+    assert decision["degraded_mode"] is True
 
 
 def test_pc_control_plane_client_registers_and_reports_workspace_snapshot(tmp_path) -> None:

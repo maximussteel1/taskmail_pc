@@ -185,11 +185,11 @@ When an outgoing artifact exceeds the configured
 `external_delivery_threshold_mb`, the runtime uses one of these external
 delivery backends:
 
-- COS, when COS delivery is configured and the backend preference still follows the compatibility-default `auto`
 - relay file surface, when `outbound_transport=relay` is enabled with
-  `relay_url + relay_transport_token` and COS delivery isn't configured
-- relay file surface, when `external_delivery_backend_preference=file_surface`
-  explicitly prefers `/v1/files` during cutover even if COS is still configured
+  `relay_url + relay_transport_token`; this is now the repo-side default owner lane
+- COS, when `external_delivery_backend_preference=auto` explicitly keeps the
+  legacy compatibility-default `COS`-first selection and COS delivery is configured
+- COS, when `external_delivery_backend_preference=cos` explicitly forces that lane
 - during that cutover, if a concrete artifact exceeds the live `/v1/files` upload limit and COS is still available,
   only that oversize artifact may keep using COS as a compatibility lane
 
@@ -211,7 +211,9 @@ Current default policy:
 - COS upload uses a direct HTTPS client session and does not inherit ambient `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` environment variables
 - relay file-surface upload derives `http(s)://<relay-host>/v1/files` from the configured `ws(s)://<relay-host>/relay`
 - relay file-surface upload uses the same Bearer transport token as the relay websocket bootstrap
-- `external_delivery_backend_preference` currently accepts `auto`, `cos`, or `file_surface`; `auto` keeps the compatibility-default COS-first selection when COS is configured
+- `external_delivery_backend_preference` currently accepts `auto`, `cos`, or `file_surface`
+- repo-side default is now `file_surface`
+- `auto` is retained only as an explicit legacy compatibility value; when COS is configured it keeps the older COS-first selection
 - small files still remain normal mail attachments
 - for `apk` / `ipa` payloads on the COS default domain, the runtime rewrites the
   uploaded object name to `<original_name>.bin` and emits a user-facing notice,

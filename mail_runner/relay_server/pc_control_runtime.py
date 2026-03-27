@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -25,16 +26,26 @@ from .pc_control_protocol import (
     PcCommandDispatchMessage,
     PcCommandEventMessage,
     PcCommandResultMessage,
+    PcIngressCandidateMessage,
+    PcMailboxLeaseMessage,
+    PcTerminalOutcomeMessage,
+    PcThreadBindingMessage,
     PcOutputChunkMessage,
     PcHeartbeatMessage,
     PcHelloMessage,
     PcWorkspaceSnapshotMessage,
     build_command_dispatch,
+    build_ingress_decision,
+    build_mailbox_lease_ack,
     build_output_resume_request,
     build_pc_error,
     build_pc_hello_ack,
+    build_terminal_outcome_ack,
+    build_thread_binding_ack,
 )
 from .pc_credential_registry import InMemoryPcCredentialRegistry, PersistentPcCredentialRegistry
+from .pc_execution_policy import compute_effective_capabilities, validate_execution_policy
+from .pc_ingress_store import InMemoryPcIngressStore, PersistentPcIngressStore
 from .pc_node_store import InMemoryPcNodeStore, PcNodeFenceError, PcNodeRecord, PersistentPcNodeStore
 from .workspace_inventory_store import (
     InMemoryWorkspaceInventoryStore,
@@ -55,33 +66,6 @@ class PcCommandDispatchValidationError(ValueError):
         super().__init__(self.message)
 
 
-def _normalized_capabilities(capabilities: dict[str, Any] | None) -> dict[str, Any]:
-    data = dict(capabilities or {})
-    return {
-        "supported_backends": [str(item).strip().lower() for item in data.get("supported_backends", []) if str(item).strip()],
-        "profile_catalogs": {
-            str(key).strip().lower(): [str(item).strip().lower() for item in value if str(item).strip()]
-            for key, value in dict(data.get("profile_catalogs") or {}).items()
-            if str(key).strip()
-        },
-        "permission_modes": [str(item).strip().lower() for item in data.get("permission_modes", []) if str(item).strip()],
-        "backend_transport_modes": {
-            str(key).strip().lower(): [str(item).strip().lower() for item in value if str(item).strip()]
-            for key, value in dict(data.get("backend_transport_modes") or {}).items()
-            if str(key).strip()
-        },
-    }
-
-
-def _intersect_lists(left: list[str], right: list[str]) -> list[str]:
-    if not left:
-        return list(right)
-    if not right:
-        return list(left)
-    right_set = set(right)
-    return [item for item in left if item in right_set]
-
-
 class PcControlRuntime:
     def __init__(
         self,
@@ -90,6 +74,7 @@ class PcControlRuntime:
         node_store: InMemoryPcNodeStore,
         workspace_store: InMemoryWorkspaceInventoryStore,
         command_store: InMemoryPcCommandStore,
+        ingress_store: InMemoryPcIngressStore | None = None,
         keepalive_seconds: int = 15,
         connection_id_factory=None,
         message_id_factory=None,
@@ -101,6 +86,7 @@ class PcControlRuntime:
         self._node_store = node_store
         self._workspace_store = workspace_store
         self._command_store = command_store
+        self._ingress_store = ingress_store or InMemoryPcIngressStore()
         self._keepalive_seconds = keepalive_seconds
         self._connection_id_factory = connection_id_factory or (lambda pc_id: f"pc-ctrl:{pc_id}:{secrets.token_hex(4)}")
         self._message_id_factory = message_id_factory or (lambda prefix: f"{prefix}:{secrets.token_hex(4)}")
@@ -121,6 +107,10 @@ class PcControlRuntime:
     @property
     def command_store(self) -> InMemoryPcCommandStore:
         return self._command_store
+
+    @property
+    def ingress_store(self) -> InMemoryPcIngressStore:
+        return self._ingress_store
 
     def handle_hello(
         self,
@@ -376,6 +366,221 @@ class PcControlRuntime:
             return self._build_error(message, code=exc.code, error_message=exc.message)
         return None
 
+    def handle_mailbox_lease(
+        self,
+        message: PcMailboxLeaseMessage,
+        *,
+        connection_id: str,
+    ) -> dict[str, Any]:
+        try:
+            self._node_store.touch_connection(
+                pc_id=message.pc_id,
+                connection_id=connection_id,
+                connection_epoch=message.connection_epoch,
+                last_seen_at=message.sent_at,
+            )
+            operation = message.payload["operation"]
+            if operation == "acquire":
+                lease_status, record, reason = self._ingress_store.acquire_mailbox_lease(
+                    mailbox_key=message.payload["mailbox_key"],
+                    lease_holder_id=message.payload["lease_holder_id"],
+                    pc_id=message.pc_id,
+                    acquired_at=message.sent_at,
+                    lease_ttl_seconds=message.payload["lease_ttl_seconds"],
+                    config_fingerprint=message.payload["config_fingerprint"],
+                    host_fingerprint=message.payload["host_fingerprint"],
+                    runtime_fingerprint=message.payload["runtime_fingerprint"],
+                    last_seen_thread_id=message.payload["last_seen_thread_id"],
+                    last_seen_ingress_id=message.payload["last_seen_ingress_id"],
+                )
+            elif operation == "renew":
+                lease_status, record, reason = self._ingress_store.renew_mailbox_lease(
+                    mailbox_key=message.payload["mailbox_key"],
+                    lease_holder_id=message.payload["lease_holder_id"],
+                    pc_id=message.pc_id,
+                    lease_epoch=int(message.payload["lease_epoch"] or 0),
+                    renewed_at=message.sent_at,
+                    lease_ttl_seconds=message.payload["lease_ttl_seconds"],
+                    last_seen_thread_id=message.payload["last_seen_thread_id"],
+                    last_seen_ingress_id=message.payload["last_seen_ingress_id"],
+                )
+            else:
+                lease_status, record, reason = self._ingress_store.release_mailbox_lease(
+                    mailbox_key=message.payload["mailbox_key"],
+                    lease_holder_id=message.payload["lease_holder_id"],
+                    pc_id=message.pc_id,
+                    lease_epoch=int(message.payload["lease_epoch"] or 0),
+                    released_at=message.sent_at,
+                )
+            return build_mailbox_lease_ack(
+                message_id=self._message_id_factory("mailbox_lease_ack"),
+                trace_id=message.trace_id,
+                pc_id=message.pc_id,
+                connection_epoch=message.connection_epoch,
+                sent_at=self._clock(),
+                request_id=message.payload["request_id"],
+                operation=operation,
+                mailbox_key=message.payload["mailbox_key"],
+                lease_status=lease_status,
+                lease_holder_id=(None if record is None else record.lease_holder_id),
+                lease_pc_id=(None if record is None else record.pc_id),
+                lease_epoch=(None if record is None else record.lease_epoch),
+                expires_at=(None if record is None else record.expires_at),
+                reason=reason,
+                degraded_mode=message.payload["degraded_mode"],
+            )
+        except PcNodeFenceError as exc:
+            return self._build_error(message, code=exc.code, error_message=exc.message)
+
+    def handle_ingress_candidate(
+        self,
+        message: PcIngressCandidateMessage,
+        *,
+        connection_id: str,
+    ) -> dict[str, Any]:
+        try:
+            self._node_store.touch_connection(
+                pc_id=message.pc_id,
+                connection_id=connection_id,
+                connection_epoch=message.connection_epoch,
+                last_seen_at=message.sent_at,
+            )
+            record = self._ingress_store.register_ingress_candidate(
+                mailbox_key=message.payload["mailbox_key"],
+                lease_holder_id=message.payload["lease_holder_id"],
+                pc_id=message.pc_id,
+                lease_epoch=message.payload["lease_epoch"],
+                folder=message.payload["folder"],
+                uid_validity=message.payload["uid_validity"],
+                uid=message.payload["uid"],
+                message_id=message.payload["message_id"],
+                in_reply_to=message.payload["in_reply_to"],
+                references_hash=message.payload["references_hash"],
+                from_addr=message.payload["from_addr"],
+                subject=message.payload["subject"],
+                subject_norm=message.payload["subject_norm"],
+                raw_date=message.payload["raw_date"],
+                observed_at=message.sent_at,
+                classification=message.payload["classification"],
+                candidate_status=message.payload["candidate_status"],
+                candidate_reason=message.payload["candidate_reason"],
+                taskmail_request_id=message.payload["taskmail_request_id"],
+                packet_id=message.payload["packet_id"],
+                degraded_mode=message.payload["degraded_mode"],
+            )
+            return build_ingress_decision(
+                message_id=self._message_id_factory("ingress_decision"),
+                trace_id=message.trace_id,
+                pc_id=message.pc_id,
+                connection_epoch=message.connection_epoch,
+                sent_at=self._clock(),
+                request_id=message.payload["request_id"],
+                ingress_id=record.ingress_id,
+                mailbox_key=record.mailbox_key,
+                decision=record.decision,
+                reason=record.decision_reason,
+                classification=record.classification,
+                lease_holder_id=record.lease_holder_id,
+                lease_epoch=record.lease_epoch,
+                thread_id=record.thread_id,
+                session_id=record.session_id,
+                degraded_mode=record.degraded_mode,
+            )
+        except PcNodeFenceError as exc:
+            return self._build_error(message, code=exc.code, error_message=exc.message)
+
+    def handle_thread_binding(
+        self,
+        message: PcThreadBindingMessage,
+        *,
+        connection_id: str,
+    ) -> dict[str, Any]:
+        try:
+            self._node_store.touch_connection(
+                pc_id=message.pc_id,
+                connection_id=connection_id,
+                connection_epoch=message.connection_epoch,
+                last_seen_at=message.sent_at,
+            )
+            binding_status, record, reason = self._ingress_store.commit_thread_binding(
+                mailbox_key=message.payload["mailbox_key"],
+                lease_holder_id=message.payload["lease_holder_id"],
+                pc_id=message.pc_id,
+                lease_epoch=message.payload["lease_epoch"],
+                ingress_id=message.payload["ingress_id"],
+                root_message_id=message.payload["root_message_id"],
+                thread_id=message.payload["thread_id"],
+                session_id=message.payload["session_id"],
+                repo_path=message.payload["repo_path"],
+                workdir=message.payload["workdir"],
+                subject_norm=message.payload["subject_norm"],
+                binding_created_at=message.sent_at,
+                degraded_mode=message.payload["degraded_mode"],
+            )
+            return build_thread_binding_ack(
+                message_id=self._message_id_factory("thread_binding_ack"),
+                trace_id=message.trace_id,
+                pc_id=message.pc_id,
+                connection_epoch=message.connection_epoch,
+                sent_at=self._clock(),
+                request_id=message.payload["request_id"],
+                ingress_id=message.payload["ingress_id"],
+                binding_status=binding_status,
+                reason=reason,
+                thread_id=(None if record is None else record.thread_id),
+                session_id=(None if record is None else record.session_id),
+                degraded_mode=message.payload["degraded_mode"],
+            )
+        except PcNodeFenceError as exc:
+            return self._build_error(message, code=exc.code, error_message=exc.message)
+
+    def handle_terminal_outcome(
+        self,
+        message: PcTerminalOutcomeMessage,
+        *,
+        connection_id: str,
+    ) -> dict[str, Any]:
+        try:
+            self._node_store.touch_connection(
+                pc_id=message.pc_id,
+                connection_id=connection_id,
+                connection_epoch=message.connection_epoch,
+                last_seen_at=message.sent_at,
+            )
+            outcome_status, record, reason = self._ingress_store.commit_terminal_outcome(
+                mailbox_key=message.payload["mailbox_key"],
+                lease_holder_id=message.payload["lease_holder_id"],
+                pc_id=message.pc_id,
+                lease_epoch=message.payload["lease_epoch"],
+                thread_id=message.payload["thread_id"],
+                task_id=message.payload["task_id"],
+                run_status=message.payload["run_status"],
+                generated_at=message.payload["generated_at"],
+                last_summary=message.payload["last_summary"],
+                terminal_mail_message_id=message.payload["terminal_mail_message_id"],
+                terminal_mail_subject=message.payload["terminal_mail_subject"],
+                taskmail_request_id=message.payload["taskmail_request_id"],
+                packet_id=message.payload["packet_id"],
+                source_ingress_id=message.payload["source_ingress_id"],
+                degraded_mode=message.payload["degraded_mode"],
+            )
+            return build_terminal_outcome_ack(
+                message_id=self._message_id_factory("terminal_outcome_ack"),
+                trace_id=message.trace_id,
+                pc_id=message.pc_id,
+                connection_epoch=message.connection_epoch,
+                sent_at=self._clock(),
+                request_id=message.payload["request_id"],
+                thread_id=message.payload["thread_id"],
+                task_id=message.payload["task_id"],
+                outcome_status=outcome_status,
+                reason=reason,
+                source_ingress_id=(None if record is None else record.source_ingress_id),
+                degraded_mode=message.payload["degraded_mode"],
+            )
+        except PcNodeFenceError as exc:
+            return self._build_error(message, code=exc.code, error_message=exc.message)
+
     def enqueue_command(self, message: PcCommandDispatchMessage) -> PcCommandRecord:
         node = self._require_online_node(message.pc_id)
         workspace = self._workspace_store.get_workspace(message.pc_id, message.payload["workspace_id"])
@@ -506,6 +711,57 @@ class PcControlRuntime:
             closed_at=self._clock(),
         )
 
+    def get_mailbox_lease(self, *, mailbox_key: str) -> dict[str, Any] | None:
+        record = self._ingress_store.get_mailbox_lease(mailbox_key, now=self._clock())
+        return None if record is None else asdict(record)
+
+    def get_node(self, *, pc_id: str) -> dict[str, Any] | None:
+        record = self._node_store.get_node(pc_id, now=self._clock())
+        return None if record is None else asdict(record)
+
+    def list_nodes(self) -> list[dict[str, Any]]:
+        return [asdict(item) for item in self._node_store.list_nodes(now=self._clock())]
+
+    def list_workspaces(self, *, pc_id: str | None = None) -> list[dict[str, Any]]:
+        return [asdict(item) for item in self._workspace_store.list_workspaces(pc_id=pc_id)]
+
+    def get_command(self, *, pc_id: str, command_id: str) -> dict[str, Any] | None:
+        record = self._command_store.get_command(pc_id, command_id)
+        return None if record is None else asdict(record)
+
+    def list_commands(self, *, pc_id: str | None = None) -> list[dict[str, Any]]:
+        return [asdict(item) for item in self._command_store.list_commands(pc_id=pc_id)]
+
+    def list_thread_bindings(self, *, pc_id: str | None = None) -> list[dict[str, Any]]:
+        return [asdict(item) for item in self._ingress_store.list_thread_bindings(pc_id=pc_id)]
+
+    def list_mailbox_lease_events(self, *, mailbox_key: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        return [asdict(item) for item in self._ingress_store.list_lease_events(mailbox_key=mailbox_key, limit=limit)]
+
+    def find_ingress(
+        self,
+        *,
+        ingress_id: str | None = None,
+        mailbox_key: str | None = None,
+        message_id: str | None = None,
+        uid: int | None = None,
+        folder: str = "INBOX",
+        uid_validity: int | None = None,
+    ) -> dict[str, Any] | None:
+        record = self._ingress_store.find_ingress(
+            ingress_id=ingress_id,
+            mailbox_key=mailbox_key,
+            message_id=message_id,
+            uid=uid,
+            folder=folder,
+            uid_validity=uid_validity,
+        )
+        return None if record is None else asdict(record)
+
+    def find_terminal_outcome(self, *, thread_id: str) -> dict[str, Any] | None:
+        record = self._ingress_store.find_terminal_outcome(thread_id=thread_id)
+        return None if record is None else asdict(record)
+
     def _require_online_node(self, pc_id: str) -> PcNodeRecord:
         node = self._node_store.get_node(pc_id, now=self._clock())
         if node is None:
@@ -532,72 +788,21 @@ class PcControlRuntime:
         workspace: PcWorkspaceRecord,
     ) -> None:
         effective_capabilities = self._effective_capabilities(node=node, workspace=workspace)
-        policy = dict(message.payload["execution_policy"])
-        command_type = str(message.payload["command_type"]).strip().lower()
-        backend = str(policy.get("backend") or "").strip().lower()
-        if not backend:
-            if command_type == "new_task":
-                raise PcCommandDispatchValidationError(
-                    "unsupported_backend",
-                    "new_task requires execution_policy.backend",
-                )
-            return
-        if backend not in effective_capabilities["supported_backends"]:
-            raise PcCommandDispatchValidationError(
-                "unsupported_backend",
-                f"backend is not supported by target pc/workspace: {backend}",
-            )
-
-        profile = str(policy.get("profile") or "").strip().lower()
-        if profile:
-            profile_catalog = effective_capabilities["profile_catalogs"].get(backend, [])
-            if profile not in profile_catalog:
-                raise PcCommandDispatchValidationError(
-                    "unsupported_profile",
-                    f"profile is not supported by target pc/workspace: {backend}/{profile}",
-                )
-
-        permission = str(policy.get("permission") or "").strip().lower()
-        if permission and permission not in effective_capabilities["permission_modes"]:
-            raise PcCommandDispatchValidationError(
-                "unsupported_permission",
-                f"permission is not supported by target pc/workspace: {permission}",
-            )
-
-        backend_transport = str(policy.get("backend_transport") or "").strip().lower()
-        if backend_transport:
-            supported_transports = effective_capabilities["backend_transport_modes"].get(backend, [])
-            if backend_transport not in supported_transports:
-                raise PcCommandDispatchValidationError(
-                    "unsupported_backend_transport",
-                    f"backend_transport is not supported by target pc/workspace: {backend}/{backend_transport}",
-                )
+        validation_error = validate_execution_policy(
+            command_type=message.payload["command_type"],
+            execution_policy=message.payload["execution_policy"],
+            effective_capabilities=effective_capabilities,
+        )
+        if validation_error is not None:
+            code, error_message = validation_error
+            raise PcCommandDispatchValidationError(code, error_message)
 
     @staticmethod
     def _effective_capabilities(*, node: PcNodeRecord, workspace: PcWorkspaceRecord) -> dict[str, Any]:
-        node_caps = _normalized_capabilities(node.capabilities)
-        workspace_caps = _normalized_capabilities(workspace.capabilities)
-        supported_backends = _intersect_lists(node_caps["supported_backends"], workspace_caps["supported_backends"])
-        profile_catalogs: dict[str, list[str]] = {}
-        backend_transport_modes: dict[str, list[str]] = {}
-        for backend in supported_backends:
-            profile_catalogs[backend] = _intersect_lists(
-                node_caps["profile_catalogs"].get(backend, []),
-                workspace_caps["profile_catalogs"].get(backend, []),
-            )
-            backend_transport_modes[backend] = _intersect_lists(
-                node_caps["backend_transport_modes"].get(backend, []),
-                workspace_caps["backend_transport_modes"].get(backend, []),
-            )
-        return {
-            "supported_backends": supported_backends,
-            "profile_catalogs": profile_catalogs,
-            "permission_modes": _intersect_lists(
-                node_caps["permission_modes"],
-                workspace_caps["permission_modes"],
-            ),
-            "backend_transport_modes": backend_transport_modes,
-        }
+        return compute_effective_capabilities(
+            pc_capabilities=node.capabilities,
+            workspace_capabilities=workspace.capabilities,
+        )
 
     def _build_error(self, message, *, code: str, error_message: str) -> dict[str, Any]:
         return build_pc_error(
@@ -618,6 +823,7 @@ def build_pc_control_runtime(
     node_store: InMemoryPcNodeStore | None = None,
     workspace_store: InMemoryWorkspaceInventoryStore | None = None,
     command_store: InMemoryPcCommandStore | None = None,
+    ingress_store: InMemoryPcIngressStore | None = None,
     keepalive_seconds: int = 15,
     clock=None,
 ) -> PcControlRuntime:
@@ -631,11 +837,13 @@ def build_pc_control_runtime(
     resolved_node_store = node_store or PersistentPcNodeStore(state_root / "pc_nodes.json")
     resolved_workspace_store = workspace_store or PersistentWorkspaceInventoryStore(state_root / "workspaces.json")
     resolved_command_store = command_store or PersistentPcCommandStore(state_root / "commands.json")
+    resolved_ingress_store = ingress_store or PersistentPcIngressStore(state_root / "ingress_truth.json")
     return PcControlRuntime(
         credential_registry=resolved_credential_registry,
         node_store=resolved_node_store,
         workspace_store=resolved_workspace_store,
         command_store=resolved_command_store,
+        ingress_store=resolved_ingress_store,
         keepalive_seconds=keepalive_seconds,
         clock=clock,
     )

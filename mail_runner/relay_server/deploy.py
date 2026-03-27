@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 _ALLOWED_LOG_LEVELS = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}
+_ALLOWED_CONTROL_PLANE_MODES = {"mail_first", "hybrid", "vps_only"}
 
 
 def _require_text(value: str, field_name: str) -> str:
@@ -32,6 +33,7 @@ class RelayDeploymentConfig:
     smtp_password: str = ""
     from_name: str = "Mail Runner Relay"
     from_addr: str = ""
+    control_plane_mode: str = "hybrid"
     taskmail_bot_mailbox_addr: str = ""
     taskmail_direct_from_name: str = "TaskMail User"
     taskmail_direct_from_addr: str = ""
@@ -66,6 +68,10 @@ class RelayDeploymentConfig:
         self.smtp_password = _require_text(self.smtp_password, "smtp_password")
         self.from_name = _require_text(self.from_name, "from_name")
         self.from_addr = _require_text(self.from_addr, "from_addr")
+        self.control_plane_mode = _require_text(self.control_plane_mode, "control_plane_mode").lower()
+        if self.control_plane_mode not in _ALLOWED_CONTROL_PLANE_MODES:
+            allowed = ", ".join(sorted(_ALLOWED_CONTROL_PLANE_MODES))
+            raise ValueError(f"control_plane_mode must be one of: {allowed}")
         if self.taskmail_bot_mailbox_addr:
             self.taskmail_bot_mailbox_addr = _require_text(
                 self.taskmail_bot_mailbox_addr,
@@ -151,6 +157,7 @@ def render_env_file(
         f"MAIL_RELAY_SMTP_PASSWORD={config.smtp_password}",
         f"MAIL_RELAY_FROM_NAME={config.from_name}",
         f"MAIL_RELAY_FROM_ADDR={config.from_addr}",
+        f"MAIL_RUNNER_CONTROL_PLANE_MODE={config.control_plane_mode}",
         f"MAIL_RELAY_TASKMAIL_DIRECT_FROM_NAME={config.taskmail_direct_from_name}",
         f"MAIL_RELAY_LOG_LEVEL={config.log_level}",
         f"MAIL_RELAY_SERVER_NAME={config.server_name}",

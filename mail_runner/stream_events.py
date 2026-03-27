@@ -53,9 +53,17 @@ def load_stream_events(path: str | Path) -> list[StreamEvent]:
 def write_stream_events(path: str | Path, events: Iterable[StreamEvent]) -> None:
     file_path = Path(path)
     file_path.parent.mkdir(parents=True, exist_ok=True)
-    rendered = [json.dumps(asdict(event), ensure_ascii=False) for event in events]
+    rendered = [_render_stream_event(event) for event in events]
     payload = ("\n".join(rendered) + "\n") if rendered else ""
     file_path.write_text(payload, encoding="utf-8")
+
+
+def append_stream_event(path: str | Path, event: StreamEvent) -> None:
+    file_path = Path(path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    with file_path.open("a", encoding="utf-8") as handle:
+        handle.write(_render_stream_event(event))
+        handle.write("\n")
 
 
 def _coerce_stream_event(payload: dict[str, object], line_no: int) -> StreamEvent:
@@ -75,6 +83,10 @@ def _coerce_stream_event(payload: dict[str, object], line_no: int) -> StreamEven
         status=_optional_text(payload.get("status")),
         payload={str(key): value for key, value in normalized_payload.items()},
     )
+
+
+def _render_stream_event(event: StreamEvent) -> str:
+    return json.dumps(asdict(event), ensure_ascii=False)
 
 
 def _required_text(value: object, field_name: str, line_no: int) -> str:

@@ -47,6 +47,7 @@ Current direct exceptions:
 - when the relay operator provisions the current Phase 3 direct inbound wire, Android may subscribe the current active session detail on `/relay`
 - this Phase 3 path is read-side only and is limited to `session_snapshot` / `session_delta` freshness for one active session detail view
 - oversized relay-hosted artifacts may now surface to Android as `/v1/files` download links inside normal task mail, but `/v1/files` is not a general Android control API
+- current `/v1/files` download links are still transport-token-protected, not anonymous public URLs; Android should only consume them inside explicitly provisioned direct/debug scopes that already own the transport token
 - current `POST /v1/android/create-session` is a thin app-facing facade, not a `/pc-control` or `/debug/pc-control/dispatch` rebranding; it accepts `pc_id / workspace_id / prompt / execution_policy` plus optional `repo_path / workdir`
 - current facade success returns `command_id + submit_ack`; when `submit_ack.ack_status=accepted|accepted_but_queued`, the same submit window also returns `session_binding(session_id/pc_id/workspace_id)`
 - current facade-facing rejected `submit_ack.error_code` is fixed to: `unsupported_backend`, `unsupported_profile`, `unsupported_permission`, `profile_model_unresolved`, `workspace_unavailable`, `pc_offline`

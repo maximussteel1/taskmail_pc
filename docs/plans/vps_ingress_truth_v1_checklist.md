@@ -12,6 +12,62 @@
   - `docs/plans/vps_relay_deploy_runbook.md`
   - `docs/plans/android_pc_vps_coordinated_execution_plan.md`
 
+## Repo-side Freeze
+
+- Date: 2026-03-26
+- Decision: 本仓库的 V1 实现统一挂在当前 `/pc-control` websocket 上，不新增一条临时 repo-internal HTTP 面
+
+本轮冻结的 repo-side 口径如下：
+
+- wire type 固定为：
+  - client -> server:
+    - `mailbox_lease`
+    - `ingress_candidate`
+    - `thread_binding`
+    - `terminal_outcome`
+  - server -> client:
+    - `mailbox_lease_ack`
+    - `ingress_decision`
+    - `thread_binding_ack`
+    - `terminal_outcome_ack`
+- `mailbox_lease.payload.operation` 固定为：
+  - `acquire`
+  - `renew`
+  - `release`
+- PC 侧新增配置：
+  - `relay_mailbox_lease_mode = disabled | strict | degraded`
+  - `relay_mailbox_lease_ttl_seconds`
+- repo 默认保持 `relay_mailbox_lease_mode=disabled`，避免未部署 relay V1 时静默切换当前 mail-first 行为
+- 当 operator 显式开启 `strict|degraded` 时：
+  - host 只在 sidecar 已拿到 active lease 时才允许 consume mailbox
+  - `strict` 下，sidecar 未连上或 lease 丢失时，host 不消费新邮件
+  - `degraded` 下，sidecar 未连上或 lease 丢失时，host 允许继续本地消费，但 ingress / closeout 都要带 `degraded_mode=true`
+- `mailbox_key` 统一由当前 bot mailbox receive identity 派生：
+  - `imap_host`
+  - `imap_user`
+  - mailbox 固定 `INBOX`
+- 首封新任务的 canonical accept path 固定为：
+  1. PC fetch 到候选首封新任务 mail
+  2. PC 通过 `ingress_candidate` 先拿 VPS decision
+  3. 只有 `decision=accepted` 才允许本地创建 thread/session
+  4. 本地 thread 创建成功后，再提交 `thread_binding`
+  5. terminal closeout 时，再提交 `terminal_outcome`
+- 远端持久化层固定收敛为一套 `ingress_truth` store，内部至少保存：
+  - mailbox lease
+  - lease history / transfer timeline
+  - ingress ledger
+  - canonical thread binding
+  - terminal outcome journal
+- fencing 规则固定为：
+  - `ingress_candidate` / `thread_binding` 必须命中当前 active lease，且 `lease_epoch` 必须等于 VPS current epoch
+  - `terminal_outcome` 也必须带 `lease_epoch`
+  - 如果当前 lease 已被更高 epoch holder 接管，旧 holder 的后续 ingress / binding / outcome 写入一律返回 `lease_denied`
+- 为了保证去重和 operator 可解释性，PC 在 fetch 邮件时会把 IMAP `uid` 带入 `MailEnvelope`；`uid_validity` 保持 best-effort，可为空
+- 最小 operator read-side 固定包含：
+  - 当前 `mailbox_key` 的 lease holder / epoch / expires_at
+  - 通过 `message_id` 或 `uid` 查询 ingress decision
+  - 通过 `thread_id` 查询 terminal outcome
+
 ## 1. 目标
 
 本设计要解决的不是“把整个系统唯一真相迁去 VPS”，而是把**最容易在切机时出错的 ingress / 接管协调真相**迁去 VPS。

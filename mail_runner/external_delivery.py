@@ -148,7 +148,7 @@ def _select_external_delivery_backend(
     file_surface_url: str | None,
     task_root: Path | None,
 ) -> str | None:
-    preference = str(config.external_delivery_backend_preference or "").strip().lower() or "auto"
+    preference = str(config.external_delivery_backend_preference or "").strip().lower() or "file_surface"
     file_surface_available = file_surface_url is not None and task_root is not None
     if preference == "file_surface":
         if file_surface_available:

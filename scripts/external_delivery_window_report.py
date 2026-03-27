@@ -30,6 +30,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         choices=("auto", "cos", "file_surface"),
         help="Optional explicit owner preference. Defaults to config value when --config is passed.",
     )
+    parser.add_argument(
+        "--require-clean-window",
+        action="store_true",
+        help="Exit with a non-zero code when the computed observation window is not ready.",
+    )
+    parser.add_argument(
+        "--require-cos-decommission-candidate",
+        action="store_true",
+        help="Exit with a non-zero code when the observation window is not yet a COS decommission candidate.",
+    )
     parser.add_argument("--output", help="Optional JSON output path.")
     return parser
 
@@ -61,6 +71,10 @@ def main() -> int:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(rendered, encoding="utf-8")
     print(rendered, end="")
+    if args.require_clean_window and report.get("window_ready") is not True:
+        return 1
+    if args.require_cos_decommission_candidate and report.get("cos_decommission_candidate") is not True:
+        return 1
     return 0
 
 

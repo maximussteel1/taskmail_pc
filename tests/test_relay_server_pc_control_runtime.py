@@ -11,9 +11,13 @@ from mail_runner.relay_server.pc_control_protocol import (
     build_command_dispatch,
     build_command_event,
     build_command_result,
+    build_ingress_candidate,
+    build_mailbox_lease,
     build_output_chunk,
     build_heartbeat,
     build_pc_hello,
+    build_terminal_outcome,
+    build_thread_binding,
     build_workspace_snapshot,
     parse_pc_control_client_message,
     parse_pc_control_server_message,
@@ -24,6 +28,7 @@ from mail_runner.relay_server.pc_control_runtime import PcCommandDispatchValidat
 from mail_runner.relay_server.pc_credential_registry import InMemoryPcCredentialRegistry
 from mail_runner.relay_server.pc_node_store import InMemoryPcNodeStore
 from mail_runner.relay_server.workspace_inventory_store import InMemoryWorkspaceInventoryStore
+from mail_runner.thread_store import build_workspace_id
 
 
 def _capabilities() -> dict[str, object]:
@@ -599,3 +604,135 @@ def test_pc_control_runtime_collects_output_resume_requests_from_cursor() -> Non
     assert parsed.payload["command_id"] == "cmd_030"
     assert parsed.payload["stream_id"] == "thread_cmd_030:task_cmd_030"
     assert parsed.payload["after_seq"] == 1
+
+
+def test_pc_control_runtime_manages_mailbox_lease_and_ingress_truth() -> None:
+    runtime = _runtime()
+    connection_id, connection_epoch = _register_online_pc(runtime)
+
+    lease = parse_pc_control_client_message(
+        build_mailbox_lease(
+            message_id="msg_lease_001",
+            trace_id="trace_lease_001",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:07",
+            request_id="request_lease_001",
+            operation="acquire",
+            mailbox_key="imap://bot@example.com@imap.example.com/INBOX",
+            lease_holder_id="runner:pc_home:abc123",
+            lease_ttl_seconds=45,
+            config_fingerprint="cfg_001",
+            host_fingerprint="host_001",
+            runtime_fingerprint="runtime_001",
+        )
+    )
+    lease_response = parse_pc_control_server_message(runtime.handle_mailbox_lease(lease, connection_id=connection_id))
+
+    assert lease_response.type == "mailbox_lease_ack"
+    assert lease_response.payload["lease_status"] == "active"
+    assert lease_response.payload["lease_epoch"] == 1
+
+    ingress = parse_pc_control_client_message(
+        build_ingress_candidate(
+            message_id="msg_ingress_001",
+            trace_id="trace_ingress_001",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:08",
+            request_id="request_ingress_001",
+            mailbox_key="imap://bot@example.com@imap.example.com/INBOX",
+            lease_holder_id="runner:pc_home:abc123",
+            lease_epoch=1,
+            folder="INBOX",
+            uid_validity=777,
+            uid=101,
+            ingress_message_id="<ingress@example.com>",
+            in_reply_to=None,
+            references_hash="refs_hash_001",
+            from_addr="user@example.com",
+            subject="[OC] Demo",
+            subject_norm="demo",
+            raw_date="Wed, 25 Mar 2026 10:00:00 +0800",
+            classification="new_task",
+            candidate_status="ready",
+        )
+    )
+    ingress_response = parse_pc_control_server_message(
+        runtime.handle_ingress_candidate(ingress, connection_id=connection_id)
+    )
+
+    assert ingress_response.type == "ingress_decision"
+    assert ingress_response.payload["decision"] == "accepted"
+
+    binding = parse_pc_control_client_message(
+        build_thread_binding(
+            message_id="msg_binding_001",
+            trace_id="trace_binding_001",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:09",
+            request_id="request_binding_001",
+            mailbox_key="imap://bot@example.com@imap.example.com/INBOX",
+            lease_holder_id="runner:pc_home:abc123",
+            lease_epoch=1,
+            ingress_id=ingress_response.payload["ingress_id"],
+            root_message_id="<ingress@example.com>",
+            thread_id="thread_001",
+            session_id="thread_001",
+            repo_path="E:\\projects\\repo_a",
+            workdir=None,
+            subject_norm="demo",
+        )
+    )
+    binding_response = parse_pc_control_server_message(runtime.handle_thread_binding(binding, connection_id=connection_id))
+
+    assert binding_response.type == "thread_binding_ack"
+    assert binding_response.payload["binding_status"] == "committed"
+    assert runtime.list_thread_bindings() == [
+        {
+            "ingress_id": ingress_response.payload["ingress_id"],
+            "mailbox_key": "imap://bot@example.com@imap.example.com/INBOX",
+            "root_message_id": "<ingress@example.com>",
+            "thread_id": "thread_001",
+            "session_id": "thread_001",
+            "repo_path": "E:\\projects\\repo_a",
+            "workdir": None,
+            "workspace_id": build_workspace_id("E:\\projects\\repo_a", None),
+            "workspace_norm": "e:/projects/repo_a",
+            "subject_norm": "demo",
+            "binding_created_at": "2026-03-25T10:00:09",
+            "lease_holder_id": "runner:pc_home:abc123",
+            "pc_id": "pc_home",
+            "lease_epoch": 1,
+            "degraded_mode": False,
+        }
+    ]
+
+    outcome = parse_pc_control_client_message(
+        build_terminal_outcome(
+            message_id="msg_outcome_001",
+            trace_id="trace_outcome_001",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:10",
+            request_id="request_outcome_001",
+            mailbox_key="imap://bot@example.com@imap.example.com/INBOX",
+            lease_holder_id="runner:pc_home:abc123",
+            lease_epoch=1,
+            thread_id="thread_001",
+            task_id="task_001",
+            run_status="success",
+            generated_at="2026-03-25T10:00:10",
+            last_summary="done",
+            terminal_mail_message_id="<done@example.com>",
+            terminal_mail_subject="[DONE][S:thread_001] Demo",
+        )
+    )
+    outcome_response = parse_pc_control_server_message(
+        runtime.handle_terminal_outcome(outcome, connection_id=connection_id)
+    )
+
+    assert outcome_response.type == "terminal_outcome_ack"
+    assert outcome_response.payload["outcome_status"] == "committed"
+    assert runtime.find_terminal_outcome(thread_id="thread_001")["source_ingress_id"] == ingress_response.payload["ingress_id"]

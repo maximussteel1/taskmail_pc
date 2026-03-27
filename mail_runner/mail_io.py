@@ -526,7 +526,32 @@ class _ProcessedMessageIndex:
         self._dirty = False
 
 
-def message_bytes_to_envelope(message_bytes: bytes, fallback_id: str) -> MailEnvelope:
+def _read_uid_validity(client: Any) -> int | None:
+    response_fn = getattr(client, "response", None)
+    if not callable(response_fn):
+        return None
+    try:
+        _status, data = response_fn("UIDVALIDITY")
+    except Exception:
+        return None
+    if not data:
+        return None
+    if isinstance(data, (list, tuple)):
+        for item in data:
+            normalized = _normalize_uid(item)
+            if normalized is not None:
+                return normalized
+        return None
+    return _normalize_uid(data)
+
+
+def message_bytes_to_envelope(
+    message_bytes: bytes,
+    fallback_id: str,
+    *,
+    imap_uid: int | None = None,
+    imap_uid_validity: int | None = None,
+) -> MailEnvelope:
     message = message_from_bytes(message_bytes, policy=policy.default)
     raw_headers = {key: _decode_header_value(value) for key, value in message.items()}
     subject = _decode_header_value(message.get("Subject"))
@@ -544,6 +569,8 @@ def message_bytes_to_envelope(message_bytes: bytes, fallback_id: str) -> MailEnv
         from_addr=from_addr or "",
         to_addr=to_addr or "",
         date=date or "",
+        imap_uid=imap_uid,
+        imap_uid_validity=imap_uid_validity,
         in_reply_to=in_reply_to,
         references=references,
         body_text=body_text,
@@ -654,6 +681,7 @@ class MailClient:
             status, _ = client.select("INBOX")
             if status != "OK":
                 raise RuntimeError("Unable to select INBOX.")
+            uid_validity = _read_uid_validity(client)
             status, data = client.uid("SEARCH", None, "ALL")
             if status != "OK":
                 raise RuntimeError("Unable to search mailbox by UID.")
@@ -675,7 +703,12 @@ class MailClient:
                     LOGGER.warning("Mailbox message payload was empty for uid=%s", uid_text)
                     break
 
-                envelope = message_bytes_to_envelope(message_bytes, uid_text)
+                envelope = message_bytes_to_envelope(
+                    message_bytes,
+                    uid_text,
+                    imap_uid=uid,
+                    imap_uid_validity=uid_validity,
+                )
                 try:
                     client.uid("STORE", uid_text, "+FLAGS", "(\\Seen)")
                 except Exception:

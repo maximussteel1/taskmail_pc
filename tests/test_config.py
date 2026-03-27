@@ -32,7 +32,10 @@ def test_load_config_uses_defaults_when_file_is_missing(tmp_path: Path) -> None:
     assert config.relay_timeout_seconds == 15
     assert config.relay_verify_tls is True
     assert config.relay_auto_fallback_email is False
-    assert config.external_delivery_backend_preference == "auto"
+    assert config.control_plane_mode == "hybrid"
+    assert config.relay_mailbox_lease_mode == "disabled"
+    assert config.relay_mailbox_lease_ttl_seconds == 45
+    assert config.external_delivery_backend_preference == "file_surface"
 
 
 def test_load_config_reads_yaml_values_and_ignores_removed_keys(tmp_path: Path) -> None:
@@ -63,6 +66,9 @@ def test_load_config_reads_yaml_values_and_ignores_removed_keys(tmp_path: Path) 
                 "relay_timeout_seconds: 22",
                 "relay_verify_tls: false",
                 "relay_auto_fallback_email: true",
+                "control_plane_mode: vps_only",
+                "relay_mailbox_lease_mode: strict",
+                "relay_mailbox_lease_ttl_seconds: 75",
                 "external_delivery_backend_preference: file_surface",
                 "prune_old_status_mails: true",
                 "project_sync_roots:",
@@ -98,6 +104,9 @@ def test_load_config_reads_yaml_values_and_ignores_removed_keys(tmp_path: Path) 
     assert config.relay_timeout_seconds == 22
     assert config.relay_verify_tls is False
     assert config.relay_auto_fallback_email is True
+    assert config.control_plane_mode == "vps_only"
+    assert config.relay_mailbox_lease_mode == "strict"
+    assert config.relay_mailbox_lease_ttl_seconds == 75
     assert config.external_delivery_backend_preference == "file_surface"
     assert not hasattr(config, "prune_old_status_mails")
     assert config.project_sync_roots == ["D:\\custom_projects", "E:\\more_projects"]
@@ -124,6 +133,9 @@ def test_environment_variables_override_yaml(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.setenv("MAIL_RUNNER_PROJECT_SYNC_ROOTS", "D:\\alpha;E:\\beta")
     monkeypatch.setenv("MAIL_RUNNER_OPENCODE_TRANSPORT_DEFAULT", "cli")
     monkeypatch.setenv("MAIL_RUNNER_CODEX_TRANSPORT_DEFAULT", "cli")
+    monkeypatch.setenv("MAIL_RUNNER_CONTROL_PLANE_MODE", "mail_first")
+    monkeypatch.setenv("MAIL_RUNNER_RELAY_MAILBOX_LEASE_MODE", "degraded")
+    monkeypatch.setenv("MAIL_RUNNER_RELAY_MAILBOX_LEASE_TTL_SECONDS", "90")
 
     config = load_config(str(config_path))
 
@@ -141,6 +153,9 @@ def test_environment_variables_override_yaml(tmp_path: Path, monkeypatch) -> Non
     assert config.monitor_window_history_limit == 18
     assert config.opencode_transport_default == "cli"
     assert config.codex_transport_default == "cli"
+    assert config.control_plane_mode == "mail_first"
+    assert config.relay_mailbox_lease_mode == "degraded"
+    assert config.relay_mailbox_lease_ttl_seconds == 90
     assert not hasattr(config, "prune_old_status_mails")
     assert config.project_sync_roots == ["D:\\alpha", "E:\\beta"]
 
@@ -213,3 +228,15 @@ def test_load_config_rejects_unknown_external_delivery_backend_preference(tmp_pa
         assert "external_delivery_backend_preference" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("load_config should reject unknown external_delivery_backend_preference")
+
+
+def test_load_config_rejects_unknown_control_plane_mode(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("control_plane_mode: relay_only\n", encoding="utf-8")
+
+    try:
+        load_config(str(config_path))
+    except ValueError as exc:
+        assert "control_plane_mode" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("load_config should reject unknown control_plane_mode")

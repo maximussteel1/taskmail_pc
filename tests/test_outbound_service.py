@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 
 from mail_runner.config import AppConfig
-from mail_runner.models import TaskSnapshot, ThreadState
+from mail_runner.mail_io import SYSTEM_MESSAGE_HEADER, SYSTEM_MESSAGE_HEADER_VALUE
+from mail_runner.models import RunResult, TaskSnapshot, ThreadState
 from mail_runner.outbound.journal import delivery_attempts_path
 from mail_runner.outbound.service import build_references, send_status_update
 from mail_runner.reporter import MAIL_STATUS_STATUS
-from mail_runner.status import THREAD_STATUS_DONE
+from mail_runner.status import RUN_STATUS_SUCCESS, THREAD_STATUS_DONE
 
 
 class FakeMailClient:
@@ -26,6 +29,29 @@ class FailingMailClient:
     def send_mail(self, **kwargs):
         self.sent_messages.append(kwargs)
         raise RuntimeError("smtp down")
+
+
+class RecordingPcControlClient:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def commit_terminal_outcome(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"outcome_status": "committed", **kwargs}
+
+
+class BlockingDeleteMailClient(FakeMailClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.delete_started = threading.Event()
+        self.delete_allowed = threading.Event()
+        self.deleted_batches: list[list[str]] = []
+
+    def delete_messages_by_message_ids(self, message_ids, mailbox="INBOX"):
+        self.delete_started.set()
+        self.deleted_batches.append(list(message_ids))
+        self.delete_allowed.wait(timeout=2)
+        return list(message_ids)
 
 
 def _state() -> ThreadState:
@@ -61,6 +87,47 @@ def _snapshot() -> TaskSnapshot:
         attachments=[],
         created_at="2026-03-12T12:00:00",
         updated_at="2026-03-12T12:00:00",
+    )
+
+
+def _result() -> RunResult:
+    return RunResult(
+        task_id="task_001",
+        thread_id="thread_001",
+        backend="opencode",
+        status=RUN_STATUS_SUCCESS,
+        exit_code=0,
+        started_at="2026-03-12T12:00:01",
+        finished_at="2026-03-12T12:00:05",
+        stdout_file="runs/task_001/stdout.log",
+        stderr_file="runs/task_001/stderr.log",
+        summary_file="runs/task_001/summary.md",
+        artifacts_dir="runs/task_001/artifacts",
+        changed_files=[],
+        tests_passed=True,
+        backend_session_id=None,
+        backend_session_resumable=False,
+    )
+
+
+def _write_raw_mail(task_root, *, message_id: str, subject: str) -> None:
+    mail_dir = task_root / "thread_001" / "mail"
+    mail_dir.mkdir(parents=True, exist_ok=True)
+    (mail_dir / "raw_001.json").write_text(
+        json.dumps(
+            {
+                "message_id": message_id,
+                "subject": subject,
+                "raw_headers": {
+                    "Subject": subject,
+                    SYSTEM_MESSAGE_HEADER: SYSTEM_MESSAGE_HEADER_VALUE,
+                    "Message-ID": message_id,
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
     )
 
 
@@ -205,3 +272,66 @@ def test_send_status_update_falls_back_to_email_when_relay_fails(tmp_path) -> No
     assert [item["transport_name"] for item in attempts] == ["relay", "email"]
     assert attempts[0]["success"] is False
     assert attempts[1]["success"] is True
+
+
+def test_send_status_update_mirrors_terminal_outcome_to_pc_control(tmp_path) -> None:
+    client = FakeMailClient()
+    pc_control_client = RecordingPcControlClient()
+    config = AppConfig(from_addr="bot@example.com", from_name="Mail Runner", task_root="tasks")
+    state = _state()
+    snapshot = _snapshot()
+    result = _result()
+    task_root = tmp_path / "tasks"
+
+    message_id = send_status_update(
+        client,
+        config,
+        task_root,
+        to_addr="user@example.com",
+        subject_text="Demo task",
+        status_label=MAIL_STATUS_STATUS,
+        state=state,
+        task_snapshot=snapshot,
+        result=result,
+        pc_control_client=pc_control_client,
+    )
+
+    assert message_id == "<sent-1@example.com>"
+    assert len(pc_control_client.calls) == 1
+    assert pc_control_client.calls[0]["thread_id"] == "thread_001"
+    assert pc_control_client.calls[0]["task_id"] == "task_001"
+    assert pc_control_client.calls[0]["run_status"] == RUN_STATUS_SUCCESS
+
+
+def test_send_status_update_does_not_block_on_status_mail_prune(tmp_path) -> None:
+    client = BlockingDeleteMailClient()
+    config = AppConfig(from_addr="bot@example.com", from_name="Mail Runner", task_root="tasks")
+    state = _state()
+    snapshot = _snapshot()
+    task_root = tmp_path / "tasks"
+    _write_raw_mail(
+        task_root,
+        message_id="<old-running@example.com>",
+        subject="[RUNNING][S:thread_001] Demo task",
+    )
+
+    started_at = time.perf_counter()
+    message_id = send_status_update(
+        client,
+        config,
+        task_root,
+        to_addr="user@example.com",
+        subject_text="Demo task",
+        status_label=MAIL_STATUS_STATUS,
+        state=state,
+        task_snapshot=snapshot,
+        summary_override="Current local status only.",
+    )
+    elapsed = time.perf_counter() - started_at
+
+    assert message_id == "<sent-1@example.com>"
+    assert elapsed < 0.5
+    assert client.delete_started.wait(timeout=1)
+    assert client.deleted_batches == [["<old-running@example.com>"]]
+
+    client.delete_allowed.set()

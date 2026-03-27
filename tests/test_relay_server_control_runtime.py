@@ -66,6 +66,18 @@ def test_control_runtime_exposes_current_session_reply_result_and_replay(tmp_pat
     asyncio.run(_run_control_post_creation_reply_runtime_test(tmp_path))
 
 
+def test_control_runtime_in_vps_only_mode_only_exposes_bootstrap_v2_and_rejects_mail_bridge_commands(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    sync_root = tmp_path / "sync_root"
+    monkeypatch.setattr(
+        "mail_runner.relay_server.app.load_config",
+        lambda: AppConfig(control_plane_mode="vps_only", project_sync_roots=[str(sync_root)]),
+    )
+    asyncio.run(_run_control_vps_only_active_mode_boundary_runtime_test(tmp_path, sync_root=sync_root))
+
+
 class _FakeMailClient:
     def __init__(self) -> None:
         self.sent_messages: list[dict[str, object]] = []
@@ -84,6 +96,125 @@ class _FakeMonotonic:
 
     def sleep(self, seconds: float) -> None:
         self.value += seconds
+
+
+async def _run_control_vps_only_active_mode_boundary_runtime_test(tmp_path, *, sync_root) -> None:
+    state_dir = tmp_path / "relay_state"
+    task_root = tmp_path / "tasks"
+    (task_root / "_scheduler").mkdir(parents=True)
+    (sync_root / "alpha").mkdir(parents=True)
+
+    config = RelayServerConfig(
+        host="127.0.0.1",
+        port=0,
+        transport_token="relay-secret",
+        state_dir=str(state_dir),
+        task_root=str(task_root),
+        smtp_host="smtp.example.com",
+        smtp_user="relay@example.com",
+        smtp_password="secret",
+        from_addr="relay@example.com",
+        taskmail_bot_mailbox_addr="bot@example.com",
+        taskmail_direct_from_addr="taskmail-user@example.com",
+    )
+    session_store = PersistentSessionStore(state_dir)
+    packet_store = PersistentAcceptedPacketStore(state_dir)
+    relay = build_runtime_relay(
+        config,
+        session_store=session_store,
+        packet_store=packet_store,
+    )
+    server = await start_relay_server(
+        config,
+        relay=relay,
+        session_store=session_store,
+        packet_store=packet_store,
+    )
+    try:
+        host, port = server.sockets[0].getsockname()[:2]
+        async with websockets.connect(
+            f"ws://{host}:{port}/control",
+            open_timeout=15,
+            close_timeout=15,
+            extra_headers={"Authorization": "Bearer relay-secret"},
+            max_size=32 * 1024 * 1024,
+        ) as websocket:
+            await websocket.send(
+                json.dumps(
+                    _control_hello_payload(
+                        supported_payload_schemas=[
+                            CONTROL_POST_CREATION_PAYLOAD_SCHEMA,
+                            CONTROL_BOOTSTRAP_PAYLOAD_SCHEMA,
+                            CONTROL_TRANSPORT_PROBE_PAYLOAD_SCHEMA,
+                        ]
+                    ),
+                    ensure_ascii=False,
+                )
+            )
+            hello_ack = parse_control_server_message(json.loads(await websocket.recv()))
+            assert isinstance(hello_ack, ControlHelloAckMessage)
+            assert hello_ack.accepted_payload_schemas == [CONTROL_BOOTSTRAP_PAYLOAD_SCHEMA]
+
+            bootstrap_payload = _control_sync_project_folders_command(
+                packet_id="android-control:sync-project-folders:req_vps_only_bootstrap",
+                request_id="req_vps_only_bootstrap",
+            )
+            await websocket.send(json.dumps(bootstrap_payload, ensure_ascii=False))
+            bootstrap_ack = parse_control_server_message(json.loads(await websocket.recv()))
+            bootstrap_result = parse_control_server_message(json.loads(await websocket.recv()))
+            bootstrap_packet = packet_store.get_packet("android-control:sync-project-folders:req_vps_only_bootstrap")
+
+            assert isinstance(bootstrap_ack, ControlCommandAckMessage)
+            assert bootstrap_ack.accepted is True
+            assert isinstance(bootstrap_result, ControlResultMessage)
+            assert bootstrap_result.result_type == "sync_project_folders_result"
+            assert bootstrap_result.payload["sync_project_folders_result"]["roots"][0]["entries"] == [
+                {
+                    "name": "alpha",
+                    "path": str(sync_root / "alpha"),
+                }
+            ]
+            assert bootstrap_packet is not None
+            assert bootstrap_packet.delivery_status == "delivered"
+
+            await websocket.send(
+                json.dumps(
+                    _control_post_creation_status_command(
+                        workspace_id="workspace_001",
+                        session_id="session_001",
+                        thread_id="thread_001",
+                    ),
+                    ensure_ascii=False,
+                )
+            )
+            status_error = parse_control_server_message(json.loads(await websocket.recv()))
+            assert isinstance(status_error, RelayErrorMessage)
+            assert status_error.code == "unsupported_action"
+            assert packet_store.get_packet("android-control:session-action:req_status_001") is None
+
+            await websocket.send(
+                json.dumps(
+                    _control_post_creation_reply_command(
+                        workspace_id="workspace_001",
+                        session_id="session_001",
+                        thread_id="thread_001",
+                    ),
+                    ensure_ascii=False,
+                )
+            )
+            reply_error = parse_control_server_message(json.loads(await websocket.recv()))
+            assert isinstance(reply_error, RelayErrorMessage)
+            assert reply_error.code == "unsupported_action"
+            assert packet_store.get_packet("android-control:session-action:req_reply_001") is None
+
+            await websocket.send(json.dumps(_control_transport_probe_command(), ensure_ascii=False))
+            probe_error = parse_control_server_message(json.loads(await websocket.recv()))
+            assert isinstance(probe_error, RelayErrorMessage)
+            assert probe_error.code == "unsupported_action"
+            assert packet_store.get_packet("android-control:transport-probe:probe_req_001") is None
+    finally:
+        server.close()
+        await server.wait_closed()
 
 
 async def _run_control_bootstrap_runtime_test(tmp_path) -> None:

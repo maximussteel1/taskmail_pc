@@ -31,6 +31,10 @@
   - relay-side `transport_probe`
 - 其中 current-session direct `/status` / plain `reply` 的 `session_action_result` 只表示 canonical mail ingress 提交与 closeout anchor snapshot，不表示 direct terminal business result
 - 任何未在本文件中列出的 direct surface，都不应视为当前行为
+- 当 runner config 显式设置 `control_plane_mode=vps_only` 时，依赖 bot mailbox ingress 的旧 mail-bridge surface 不再应读成被 provision
+- 在该模式下，relay 侧不再 provision direct `new_task` mail bridge、current-session direct `status|reply` mail bridge、bootstrap `[SYNC]` `v1` mail bridge，以及 relay-side `transport_probe` mail harness
+- 在该模式下，relay `/healthz` 的 `taskmail_direct_ingress_enabled` 也应读成 `false`，即便 bridge 凭据仍保留在 env 中
+- 在该模式下，仍可保留不依赖 bot mailbox ingress 的 direct surface，例如 bootstrap `[SYNC]` `v2` direct result、`pc-control`、`/v1/files`，以及 Android-facing `POST /v1/android/create-session`
 
 ## 2. 当前已支持的 Direct Surface
 
@@ -167,13 +171,15 @@ plain `reply` 当前边界：
 
 ### 2.6 Relay `/v1/files` File Surface
 
-- 当 `outbound_transport=relay`、存在 `relay_url + relay_transport_token`，且没有使用 COS external delivery 时，PC runtime 当前可把超阈值 artifact 上传到 relay host 的 `/v1/files`
-- 当部署显式设置 `external_delivery_backend_preference=file_surface` 时，即使 COS 仍保留配置，PC runtime 当前也会优先把可接受的超阈值 artifact 上传到 relay host 的 `/v1/files`
+- 当 `outbound_transport=relay` 且存在 `relay_url + relay_transport_token` 时，repo-side 默认 owner lane 当前就是 relay host 的 `/v1/files`
+- `external_delivery_backend_preference=auto` 当前只保留为显式 legacy 兼容语义；如果 COS 仍保留配置，它会继续维持旧的 `COS`-first 选择
+- `external_delivery_backend_preference=cos` 当前表示显式固定走 `COS`
 - 如果 artifact 超过当前 live `/v1/files` 单文件上限，且 COS 仍可用，cutover 期间 runtime 当前会只对这类 oversize artifact 保留 `COS` 兼容交付，而不是让整条 owner lane 退回 `COS`
 - file-surface URL 当前由 `ws(s)://<relay-host>/relay` 派生为 `http(s)://<relay-host>/v1/files`
 - 当前 schema version 是 `taskmail-control-artifact-contract-v1`
 - 当前单文件上传上限是 `32 MiB`
 - `/v1/files` 上传当前复用同一个 Bearer transport token
+- `/v1/files/{file_id}` 与 `/v1/files/{file_id}/content` 当前也继续要求同一个 Bearer transport token；当前 `download_ref` 不应误读成匿名公开 URL
 - 当前 live runtime 对 upload metadata 的 `kind` 只接受：
   - `image`
   - `file`
@@ -190,6 +196,9 @@ plain `reply` 当前边界：
   - `GET /v1/files/{file_id}`
   - `GET /v1/files/{file_id}/content`
   - 本地 `sha256` 与回读内容一致
+- repo-side `2026-03-27` authenticated consumer smoke 也已补齐当前 `download_ref` 读法：
+  - 携带 transport token 的 `GET download_ref` 返回 `200`
+  - 缺 token 或错 token 的 `GET download_ref` 返回 `401 unauthorized`
 - 当前这份 Android 真机正向样本仍只覆盖 debug-only 单样本文本文件：
   - 首次 `kind=text` 被 live runtime 以 `invalid_metadata` 拒绝
   - 调整为 `kind=file` + `mime_type=text/plain; charset=utf-8` 后闭环

@@ -12,19 +12,35 @@ from mail_runner.relay_server.pc_control_protocol import (
     PcErrorMessage,
     PcHelloAckMessage,
     PcHelloMessage,
+    PcIngressCandidateMessage,
+    PcIngressDecisionMessage,
+    PcMailboxLeaseAckMessage,
+    PcMailboxLeaseMessage,
     PcOutputResumeRequestMessage,
     PcOutputChunkMessage,
+    PcTerminalOutcomeAckMessage,
+    PcTerminalOutcomeMessage,
+    PcThreadBindingAckMessage,
+    PcThreadBindingMessage,
     PcWorkspaceSnapshotMessage,
     build_artifact_manifest,
     build_command_ack,
     build_command_dispatch,
     build_command_event,
     build_command_result,
+    build_ingress_candidate,
+    build_ingress_decision,
+    build_mailbox_lease,
+    build_mailbox_lease_ack,
     build_output_chunk,
     build_output_resume_request,
     build_pc_error,
     build_pc_hello,
     build_pc_hello_ack,
+    build_terminal_outcome,
+    build_terminal_outcome_ack,
+    build_thread_binding,
+    build_thread_binding_ack,
     build_workspace_snapshot,
     parse_pc_control_client_message,
     parse_pc_control_server_message,
@@ -324,3 +340,172 @@ def test_output_resume_request_roundtrip() -> None:
     assert request.payload["command_id"] == "cmd_001"
     assert request.payload["stream_id"] == "thread_001:task_001"
     assert request.payload["after_seq"] == 1
+
+
+def test_mailbox_lease_and_ingress_roundtrip() -> None:
+    lease = parse_pc_control_client_message(
+        build_mailbox_lease(
+            message_id="msg_lease_001",
+            trace_id="trace_lease_001",
+            pc_id="pc_home",
+            connection_epoch=7,
+            sent_at="2026-03-25T10:00:27",
+            request_id="request_lease_001",
+            operation="acquire",
+            mailbox_key="imap://bot@example.com@imap.example.com/INBOX",
+            lease_holder_id="runner:pc_home:abc123",
+            lease_ttl_seconds=45,
+            config_fingerprint="cfg_001",
+            host_fingerprint="host_001",
+            runtime_fingerprint="runtime_001",
+            degraded_mode=False,
+        )
+    )
+    lease_ack = parse_pc_control_server_message(
+        build_mailbox_lease_ack(
+            message_id="msg_lease_ack_001",
+            trace_id="trace_lease_001",
+            pc_id="pc_home",
+            connection_epoch=7,
+            sent_at="2026-03-25T10:00:28",
+            request_id="request_lease_001",
+            operation="acquire",
+            mailbox_key="imap://bot@example.com@imap.example.com/INBOX",
+            lease_status="active",
+            lease_holder_id="runner:pc_home:abc123",
+            lease_pc_id="pc_home",
+            lease_epoch=3,
+            expires_at="2026-03-25T10:01:13",
+        )
+    )
+    ingress = parse_pc_control_client_message(
+        build_ingress_candidate(
+            message_id="msg_ingress_001",
+            trace_id="trace_ingress_001",
+            pc_id="pc_home",
+            connection_epoch=7,
+            sent_at="2026-03-25T10:00:29",
+            request_id="request_ingress_001",
+            mailbox_key="imap://bot@example.com@imap.example.com/INBOX",
+            lease_holder_id="runner:pc_home:abc123",
+            lease_epoch=3,
+            folder="INBOX",
+            uid_validity=777,
+            uid=101,
+            ingress_message_id="<ingress@example.com>",
+            in_reply_to=None,
+            references_hash="refs_hash_001",
+            from_addr="user@example.com",
+            subject="[OC] Demo",
+            subject_norm="demo",
+            raw_date="Wed, 25 Mar 2026 10:00:00 +0800",
+            classification="new_task",
+            candidate_status="ready",
+        )
+    )
+    ingress_decision = parse_pc_control_server_message(
+        build_ingress_decision(
+            message_id="msg_ingress_decision_001",
+            trace_id="trace_ingress_001",
+            pc_id="pc_home",
+            connection_epoch=7,
+            sent_at="2026-03-25T10:00:30",
+            request_id="request_ingress_001",
+            ingress_id="ingress_001",
+            mailbox_key="imap://bot@example.com@imap.example.com/INBOX",
+            decision="accepted",
+            classification="new_task",
+            lease_holder_id="runner:pc_home:abc123",
+            lease_epoch=3,
+        )
+    )
+
+    assert isinstance(lease, PcMailboxLeaseMessage)
+    assert lease.payload["operation"] == "acquire"
+    assert isinstance(lease_ack, PcMailboxLeaseAckMessage)
+    assert lease_ack.payload["lease_epoch"] == 3
+    assert isinstance(ingress, PcIngressCandidateMessage)
+    assert ingress.payload["uid"] == 101
+    assert isinstance(ingress_decision, PcIngressDecisionMessage)
+    assert ingress_decision.payload["decision"] == "accepted"
+
+
+def test_thread_binding_and_terminal_outcome_roundtrip() -> None:
+    binding = parse_pc_control_client_message(
+        build_thread_binding(
+            message_id="msg_binding_001",
+            trace_id="trace_binding_001",
+            pc_id="pc_home",
+            connection_epoch=7,
+            sent_at="2026-03-25T10:00:31",
+            request_id="request_binding_001",
+            mailbox_key="imap://bot@example.com@imap.example.com/INBOX",
+            lease_holder_id="runner:pc_home:abc123",
+            lease_epoch=3,
+            ingress_id="ingress_001",
+            root_message_id="<ingress@example.com>",
+            thread_id="thread_001",
+            session_id="thread_001",
+            repo_path="E:\\projects\\repo_a",
+            workdir=None,
+            subject_norm="demo",
+        )
+    )
+    binding_ack = parse_pc_control_server_message(
+        build_thread_binding_ack(
+            message_id="msg_binding_ack_001",
+            trace_id="trace_binding_001",
+            pc_id="pc_home",
+            connection_epoch=7,
+            sent_at="2026-03-25T10:00:32",
+            request_id="request_binding_001",
+            ingress_id="ingress_001",
+            binding_status="committed",
+            thread_id="thread_001",
+            session_id="thread_001",
+        )
+    )
+    outcome = parse_pc_control_client_message(
+        build_terminal_outcome(
+            message_id="msg_outcome_001",
+            trace_id="trace_outcome_001",
+            pc_id="pc_home",
+            connection_epoch=7,
+            sent_at="2026-03-25T10:00:33",
+            request_id="request_outcome_001",
+            mailbox_key="imap://bot@example.com@imap.example.com/INBOX",
+            lease_holder_id="runner:pc_home:abc123",
+            lease_epoch=3,
+            thread_id="thread_001",
+            task_id="task_001",
+            run_status="success",
+            generated_at="2026-03-25T10:00:33",
+            last_summary="done",
+            terminal_mail_message_id="<done@example.com>",
+            terminal_mail_subject="[DONE][S:thread_001] Demo",
+            source_ingress_id="ingress_001",
+        )
+    )
+    outcome_ack = parse_pc_control_server_message(
+        build_terminal_outcome_ack(
+            message_id="msg_outcome_ack_001",
+            trace_id="trace_outcome_001",
+            pc_id="pc_home",
+            connection_epoch=7,
+            sent_at="2026-03-25T10:00:34",
+            request_id="request_outcome_001",
+            thread_id="thread_001",
+            task_id="task_001",
+            outcome_status="committed",
+            source_ingress_id="ingress_001",
+        )
+    )
+
+    assert isinstance(binding, PcThreadBindingMessage)
+    assert binding.payload["ingress_id"] == "ingress_001"
+    assert isinstance(binding_ack, PcThreadBindingAckMessage)
+    assert binding_ack.payload["binding_status"] == "committed"
+    assert isinstance(outcome, PcTerminalOutcomeMessage)
+    assert outcome.payload["terminal_mail_message_id"] == "<done@example.com>"
+    assert isinstance(outcome_ack, PcTerminalOutcomeAckMessage)
+    assert outcome_ack.payload["outcome_status"] == "committed"

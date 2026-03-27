@@ -52,13 +52,19 @@ Current relay boundary:
 - the Android-facing mail contract does not change when relay is enabled
 - when relay delivery fails and `relay_auto_fallback_email` is enabled, the PC may automatically fall back to direct `email` delivery in the same outbound flow
 
+Current control-plane mode switch:
+
+- `control_plane_mode=mail_first`: PC host keeps the legacy mailbox-driven control plane and does not start the `pc-control` sidecar
+- `control_plane_mode=hybrid`: current default; PC host keeps mailbox ingress while also running the `pc-control` sidecar
+- `control_plane_mode=vps_only`: PC host stops consuming the bot mailbox for control-plane ingress; mail may still remain as a user-visible notification/result transport, but old mailbox ingress is no longer the host-side control-plane entry
+
 Current optional direct TaskMail boundary:
 
 - relay 当前可接受窄范围 direct `new_task`
 - relay 当前可接受 bootstrap `[SYNC]` `v1` / `v2`
 - relay 当前还暴露 shared `/control` websocket；当前已落地 bootstrap `sync_project_folders` `v2`、current-session direct `/status` / plain `reply`，以及 relay-side `transport_probe`
 - `/control` 与 `/relay`、`/v1/files` 当前复用同一 `Authorization: Bearer <transport_token>` 认证路径
-- repo-side 还存在 operator-only debug `POST /debug/pc-control/dispatch`，当前也复用同一 bearer token admission；它只负责向 live `pc_control_runtime` 注入一条 `command_dispatch`，不是新的 app-facing / user-facing API
+- repo-side 还存在 operator-only debug `POST /debug/pc-control/dispatch`，以及 `GET /debug/pc-control/nodes`、`GET /debug/pc-control/workspaces`、`GET /debug/pc-control/commands` 等 read-side 入口；这些路径当前都复用同一 bearer token admission，只负责向 live `pc_control_runtime` 做 operator 级 dispatch / observe，不是新的 app-facing / user-facing API
 - 对这条 `pc_control` dispatch 路径，当前显式 `execution_policy.profile=default` 与省略 profile 的语义等价；它不会再在本地 adapter bootstrap 阶段因为“缺少 default profile mapping”而被额外打断
 - `/control` 首刀保留 `hello / hello_ack`，并在 `hello_ack` 里回告 `accepted_payload_schemas`
 - `/control` 当前支持四类 frame 流：
@@ -81,6 +87,13 @@ Current optional direct TaskMail boundary:
 - direct `new_task` 与 current-session direct action 当前都走 bridge-to-mail；`/control` bootstrap `v2`、current-session direct `session_action_result` 与 relay-side `transport_probe` 是当前三类 direct result surface
 - `/relay` 当前仍是 direct `new_task`、current-session direct `/status` / `reply` 与 Phase 3 detail sidecar 的 carrier；`/control` 现在也可承载 current-session direct `/status` / `reply`，但它仍不是这些能力的通用替代
 - 具体 schema、限制条件、closeout/evidence 与 `/v1/files` file surface 规则，以 [taskmail_direct_control_file_contract.md](taskmail_direct_control_file_contract.md) 为准
+- 当 `control_plane_mode=vps_only` 时，旧 mail-bridge control-plane surface 不再应读成被 provision：PC host 不再 consume bot mailbox，relay 侧依赖 bot mailbox ingress 的 direct `new_task` / current-session `status|reply` / bootstrap `[SYNC] v1` / `transport_probe` 也不再是 active lane
+- 对 repo-internal `pc_control` sidecar，当前还存在一条可选的 VPS ingress-truth V1 能力：
+  - PC 可在同一条 `/pc-control` websocket 上申请 bot mailbox lease，并把首封新任务 accept/reject 与 terminal closeout 镜像到 relay
+  - 这条能力由 `relay_mailbox_lease_mode` 显式开启；repo 默认仍保持 `disabled`
+  - `relay_mailbox_lease_mode=strict` 时，没有 active lease 就不 consume 新邮件
+  - `relay_mailbox_lease_mode=degraded` 时，host 允许在 relay 不可达时继续本地 consume，但相关 ingress / closeout 会标记 `degraded_mode=true`
+  - 这条能力只迁移 ingress / cutover coordination truth，不迁移执行真相；task execution truth 仍留在 PC
 
 Current optional direct TaskMail active-detail sidecar boundary:
 

@@ -299,6 +299,8 @@ class MailEnvelope:
     from_addr: str
     to_addr: str
     date: datetime | str
+    imap_uid: int | None = None
+    imap_uid_validity: int | None = None
     in_reply_to: str | None = None
     references: list[str] = field(default_factory=list)
     body_text: str = ""
@@ -312,6 +314,12 @@ class MailEnvelope:
         _require_text(self.to_addr, "to_addr")
         if not isinstance(self.date, (datetime, str)):
             raise ModelValidationError("date must be a datetime or string")
+        if self.imap_uid is not None and (not isinstance(self.imap_uid, int) or self.imap_uid <= 0):
+            raise ModelValidationError("imap_uid must be a positive integer when provided")
+        if self.imap_uid_validity is not None and (
+            not isinstance(self.imap_uid_validity, int) or self.imap_uid_validity <= 0
+        ):
+            raise ModelValidationError("imap_uid_validity must be a positive integer when provided")
         _require_optional_text(self.in_reply_to, "in_reply_to")
         _require_string_list(self.references, "references")
         if not isinstance(self.body_text, str):

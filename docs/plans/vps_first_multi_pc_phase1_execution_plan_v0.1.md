@@ -2,7 +2,7 @@
 
 ## Status
 
-- Date: 2026-03-25
+- Date: 2026-03-27
 - Scope: repository-side Phase 1 execution plan under the `VPS-first multi-PC control plane` mainline
 - Source of truth:
   - `docs/plans/android_pc_vps_evolution_authority.md`
@@ -67,7 +67,7 @@ Phase 1 明确不做：
 - handler 边界
 - 验证层次
 
-当前 repo-side 落地快照（`2026-03-25`）：
+当前 repo-side 落地快照（`2026-03-27`）：
 
 - Slice A：已落地最小 `pc_hello / hello_ack / heartbeat / connection_epoch` 协议、store、runtime 与测试骨架
 - Slice B：已落地 `workspace_snapshot`、workspace inventory store、PC 侧 snapshot 上报与 fixture 骨架
@@ -75,12 +75,13 @@ Phase 1 明确不做：
 - Slice D：已落地最小 `command_dispatch -> command_ack` 骨架，已覆盖 `accepted`、`accepted_but_queued` 与首批 `unsupported_*` 拒绝语义
 - Slice E：已落地 canonical `event`、`event_id` 去重、`running/accepted/queued/done` 首批时间线，以及 `effective_execution` 回填
 - Slice F：已落地 canonical `result`、`result_id` 去重、`command_id` 单一 canonical result 与最小 `structured_payload`
-- Slice G：已落地 first-pass canonical `output_chunk` packet、`stream_id + seq` 去重、最小 client/runtime/store/test/fixture 闭环、基于已落盘 `stream.events.jsonl` 的 reconnect resend、显式 `output_resume_request` / server-driven resume、fixture loopback selective replay，以及 websocket roundtrip 回归；`OpenCode SDK` 也已补上最小 same-layer persisted stream evidence。当前剩余 gap 主要收窄到更高层多 `PC` 路由/订阅证据，以及 `OpenCode` true incremental streaming 的后续增强验证
-- Slice H：已落地 first-pass canonical `artifact_manifest` packet、最小 artifact metadata 回填，以及基于真实 `artifact_index.json + artifact_file_binding_index.json` 的本地 truth-projection evidence；successful external delivery 现在还会下落 `external_delivery_index.json`，并已补上 live local relay `/v1/files` roundtrip evidence、真实 VPS relay `/v1/files` upload + metadata/content roundtrip evidence，以及 live deployment 下 `22 MiB -> file_surface` / `34 MiB -> cos` 的真实业务样本。当前 planning 读法应改成：`VPS /v1/files` 是 artifact external-delivery owner lane，`COS` 只暂时保留为 cutover 前兼容线；repo-side 现在也已补上 `external_delivery_backend_preference=file_surface`，因此 owner-lane cutover 不再要求先移除 `COS` 配置。当前剩余 gap 已不再是“有没有 live COS 样本”，而是 cutover 观察窗口与退场门槛是否收硬
+- Slice G：已落地 first-pass canonical `output_chunk` packet、`stream_id + seq` 去重、最小 client/runtime/store/test/fixture 闭环、基于已落盘 `stream.events.jsonl` 的 reconnect resend、显式 `output_resume_request` / server-driven resume、fixture loopback selective replay，以及 websocket roundtrip 回归；`OpenCode SDK` 现在也已把基于 OpenCode `event` SSE 的 same-layer incremental message-part stream 留证到真实 `sdk_stream_smoke`。当前剩余 gap 主要收窄到更高层多 `PC` observer / subscription 证据，而不再是 `OpenCode` true incremental streaming 本身
+- Slice H：已落地 first-pass canonical `artifact_manifest` packet、最小 artifact metadata 回填，以及基于真实 `artifact_index.json + artifact_file_binding_index.json` 的本地 truth-projection evidence；successful external delivery 现在还会下落 `external_delivery_index.json`，并已补上 live local relay `/v1/files` roundtrip evidence、真实 VPS relay `/v1/files` upload + metadata/content roundtrip evidence，以及 live deployment 下 `22 MiB -> file_surface` / `34 MiB -> cos` 的真实业务样本。当前 planning 读法应改成：`VPS /v1/files` 是 artifact external-delivery owner lane，`COS` 只暂时保留为 cutover 前兼容线；repo-side 默认 owner preference 现在已经切到 `file_surface`，`auto` 只保留为显式 legacy `COS`-first 兼容值，因此 owner-lane cutover 不再要求先移除 `COS` 配置。repo-side 观察窗口与退场门槛现在也已收成 `window_ready + cos_decommission_candidate` gate；当前剩余 gap 已不再是“有没有 live COS 样本”，而是 live consumer/cutover 验证是否收硬
 - single-PC live bring-up：已新增真实 `pc_control_live_smoke`，当前 public relay `/pc-control` 已补到 `pc_hello -> hello_ack`、`workspace_snapshot` 进入 `/healthz.pc_control` 视图，以及 reconnect 后 `stale_connection_epoch` fencing
 - repo-side / live dispatch injection：已新增 operator-only `POST /debug/pc-control/dispatch` 与 `scripts/pc_control_operator_dispatch.py`，并已把这条入口真实部署到 VPS relay。当前 live `pc-home / workspace_969e9b323b70` 已补到 `command_dispatch -> command_ack(accepted) -> event(accepted/running/done) -> result(done) -> output_chunk(seq=1..5)`。联调过程中还显式暴露并修复了一个实现缺口：`Codex SDK` adapter 曾把显式 `profile=default` 错当成“必须查 profile 映射”；repo-side 已改成 `default -> unset profile` 语义，并已在真实链路上重新验证通过
 - single-PC live roundtrip：已新增 `scripts/pc_control_live_roundtrip_smoke.py`。当前 public relay `/pc-control` 已补到 `output_resume_request(after_seq=1)`、reconnect selective replay、以及 `artifact_manifest(download_ref_source=external_delivery_index.file_surface)` 的真实 store-level evidence
 - multi-PC live routing：已新增 `scripts/pc_control_live_multi_pc_smoke.py`。当前 public relay `/pc-control` 已补到双 probe `pc_id` 并发在线、双独立 `workspace_id` 注册、以及定向 dispatch A/B 只命中目标连接的真实 store-level evidence；远端 `commands.json` 已可同时保留两条命令的正确 `pc_id / workspace_id / ack / event / result`
+- `vps_only` cutover checkpoint：本机 live host config 与 VPS relay deploy env 都已显式切到 `control_plane_mode=vps_only`；当前 public relay `/healthz` 已明确回 `taskmail_direct_ingress_enabled=false`，旧 direct `new_task` 也已稳定返回 `unsupported_action`，而 `pc-control` read-side 与 relay `/v1/files` 仍保持健康。当前若不要求服务持续在线，推荐先把 runbook/checklist 收硬，再在下一次集中 bring-up 时按单一入口做恢复验证
 
 ## 4. Phase 1 切片顺序
 
@@ -283,14 +284,14 @@ Phase 1 明确不做：
 结合当前 repo-side 进度，更准确的下一刀应读作：
 
 - A-H 都已有 first-pass 骨架
-- 下一次真正继续编码时，优先转向 `/v1/files` owner lane 的 cutover/decommission 观察窗口；如果还要继续扩 `pc-control` live 联调，应把更高层多 `PC` observer / subscription 侧需求单列。当前 live deployment 的 `22 MiB -> file_surface` 与 `34 MiB -> cos` 真实样本已经收齐，single-PC live `dispatch -> ack -> event -> result -> output_chunk`、live `output_resume_request` / selective replay、live `artifact_manifest`，以及 multi-PC live routing 也已收齐，不必再默认把 live `COS` compatibility evidence、single-PC roundtrip，或多 `PC` routing 当成主缺口。`OpenCode` true incremental streaming 可作为后续增强项单列，而不是继续扩旧 direct 兼容层
+- 下一次真正继续编码时，优先转向 `/v1/files` owner lane 的 live cutover/decommission 观察窗口与 consumer 验证；如果还要继续扩 `pc-control` live 联调，应把更高层多 `PC` observer / subscription 侧需求单列。当前 live deployment 的 `22 MiB -> file_surface` 与 `34 MiB -> cos` 真实样本已经收齐，repo-side 默认 owner preference 也已切到 `file_surface`，single-PC live `dispatch -> ack -> event -> result -> output_chunk`、live `output_resume_request` / selective replay、live `artifact_manifest`，以及 multi-PC live routing 也已收齐，不必再默认把 live `COS` compatibility evidence、single-PC roundtrip，或多 `PC` routing 当成主缺口。`OpenCode` incremental streaming 已完成 first-pass 留证，repo-side 现在更该把 observer/subscription 与真实 cutover gate 收硬，而不是继续扩旧 direct 兼容层
   - `/v1/files` / `COS` 的具体执行清单见 `docs/plans/vps_file_surface_cutover_and_cos_decommission_checklist_v0.1.md`
 
 ## 6. 与当前代码线的关系
 
 Phase 1 推进时，当前代码线应这样处理：
 
-- `docs/current/*` 继续描述今天已经存在的 mail-first 行为
+- `docs/current/*` 继续描述今天已经存在的 current behavior，包括 `hybrid / vps_only` control-plane mode、旧 mail-bridge surface 的 active/inactive 边界，以及 relay `/v1/files` owner lane
 - 旧 direct relay/control/file 文档继续保留为 compatibility / closeout / migration reference
 - 不要求在 Phase 1 一开始就删除 mail、`session_action_closeout` 或旧 closeout bundle
 
@@ -313,6 +314,7 @@ Phase 1 推进时，当前代码线应这样处理：
   - target deployment 已把 `VPS /v1/files` 作为默认 artifact external-delivery lane
   - `artifact_manifest` / `external_delivery_index.json` 已足以承载 consumer 所需的 provider/url 证据，不再需要暴露 `COS`-specific contract
   - live `/v1/files` roundtrip、过期下载、以及当前目标文件规模所需的稳定性证据已经收齐
+  - repo-side `scripts/external_delivery_window_report.py --require-cos-decommission-candidate` 已能对该 deployment 给出稳定通过
 - 进入实际退场时的动作：
   - 停止把 live `COS` evidence 当成主线 merge/cutover gate
   - 停止在新的 planning / config 示例里把 `COS` 写成默认 external-delivery lane
@@ -329,12 +331,12 @@ Phase 1 推进时，当前代码线应这样处理：
 - [x] `event` 可持久化并支持去重（repo-side runtime/store/tests/fixture）
 - [x] `result` 可作为 session/run 最小收口（repo-side runtime/store/client/tests/fixture）
 - [x] `result` 可回传实际生效的模型与权限摘要（`effective_execution` 已进入 protocol/runtime/client/result）
-- [x] `output_chunk` 可按 `stream_id + seq` 连续显示（repo-side packet/runtime/store/client/tests、persisted-output reconnect resend、显式 `output_resume_request`、fixture loopback selective replay、websocket roundtrip，以及 `OpenCode SDK` same-layer persisted stream evidence 已落地；多 `PC` 更高层证据与 `OpenCode` true incremental streaming 增强验证仍待补）
-- [x] `artifact_manifest` 可回填最小 artifact metadata（first-pass packet/runtime/store/client/tests 已落地，并已补到真实 `artifact_index.json + artifact_file_binding_index.json` 本地 truth-projection、`external_delivery_index.json`、live local relay `/v1/files` external-delivery evidence、真实 VPS relay `/v1/files` upload + metadata/content evidence，以及 live deployment 下 `22 MiB -> file_surface` / `34 MiB -> cos` 的真实业务样本；`COS` 当前只按临时兼容 lane 读取）
+- [x] `output_chunk` 可按 `stream_id + seq` 连续显示（repo-side packet/runtime/store/client/tests、persisted-output reconnect resend、显式 `output_resume_request`、fixture loopback selective replay、websocket roundtrip，以及 `OpenCode SDK` same-layer incremental message-part stream evidence 已落地；多 `PC` 更高层 observer / subscription 证据仍待补）
+- [x] `artifact_manifest` 可回填最小 artifact metadata（first-pass packet/runtime/store/client/tests 已落地，并已补到真实 `artifact_index.json + artifact_file_binding_index.json` 本地 truth-projection、`external_delivery_index.json`、live local relay `/v1/files` external-delivery evidence、真实 VPS relay `/v1/files` upload + metadata/content evidence，以及 live deployment 下 `22 MiB -> file_surface` / `34 MiB -> cos` 的真实业务样本；`COS` 当前只按临时兼容 lane 读取，repo-side `window_ready / cos_decommission_candidate` gate 也已落地）
 - [x] single-PC live `command_dispatch -> command_ack -> event -> result -> output_chunk` 已在真实 VPS relay 上留证（其中显式 `profile=default` 语义也已在修复后重新验证通过）
 - [x] single-PC live `output_resume_request` / selective replay 与 live `artifact_manifest` 已在真实 VPS relay 上留证
 - [x] multi-PC live routing 已在真实 VPS relay 上留证（双 probe `pc_id` 并发在线时，定向 dispatch 已可稳定只命中目标连接，不再串投到另一条 websocket）
-- [ ] 不破坏当前 `docs/current/*` 所描述的 mail-first 现状
+- [ ] 不破坏当前 `docs/current/*` 所描述的 active-mode boundary（当前应按 `hybrid / vps_only` 双模式读取，而不是仅按 mail-first 读取）
 
 ## 8. 一句话结论
 

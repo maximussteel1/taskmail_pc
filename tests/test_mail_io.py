@@ -213,6 +213,10 @@ def test_fetch_unseen_messages_uses_uid_scan_and_skips_system_mail(monkeypatch, 
                 return "OK", [b""]
             raise AssertionError(f"unexpected uid command: {command}")
 
+        def response(self, name: str):
+            assert name == "UIDVALIDITY"
+            return "OK", [b"777"]
+
         def close(self) -> None:
             return None
 
@@ -239,6 +243,8 @@ def test_fetch_unseen_messages_uses_uid_scan_and_skips_system_mail(monkeypatch, 
     second_fetch = client.fetch_unseen_messages()
 
     assert [item.message_id for item in first_fetch] == ["<normal@example.com>"]
+    assert first_fetch[0].imap_uid == 101
+    assert first_fetch[0].imap_uid_validity == 777
     assert second_fetch == []
     assert captured["uid_search"] == [(None, "ALL"), (None, "ALL")]
     assert captured["uid_fetch"] == ["101", "102"]
@@ -313,6 +319,10 @@ def test_fetch_unseen_messages_passthroughs_transport_probe_system_mail(monkeypa
                 return "OK", [b""]
             raise AssertionError(f"unexpected uid command: {command}")
 
+        def response(self, name: str):
+            assert name == "UIDVALIDITY"
+            return "OK", [b"777"]
+
         def close(self) -> None:
             return None
 
@@ -339,6 +349,7 @@ def test_fetch_unseen_messages_passthroughs_transport_probe_system_mail(monkeypa
     second_fetch = client.fetch_unseen_messages()
 
     assert [item.message_id for item in first_fetch] == ["<normal@example.com>", "<probe@example.com>"]
+    assert [item.imap_uid for item in first_fetch] == [101, 102]
     assert second_fetch == []
 
     state_path = tmp_path / "tasks" / "_mailbox" / "processed_messages.json"

@@ -25,12 +25,16 @@ def test_mail_envelope_accepts_valid_input() -> None:
         from_addr="user@example.com",
         to_addr="runner@example.com",
         date=datetime.utcnow(),
+        imap_uid=101,
+        imap_uid_validity=777,
         references=["<root@example.com>"],
         body_text="hello",
         raw_headers={"Subject": "[OC] Example task"},
     )
 
     assert envelope.subject == "[OC] Example task"
+    assert envelope.imap_uid == 101
+    assert envelope.imap_uid_validity == 777
 
 
 def test_parsed_mail_action_rejects_invalid_confidence() -> None:

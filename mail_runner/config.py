@@ -30,6 +30,7 @@ _INT_FIELDS = {
     "external_delivery_threshold_mb",
     "cos_presign_expire_seconds",
     "relay_timeout_seconds",
+    "relay_mailbox_lease_ttl_seconds",
 }
 
 _FLOAT_FIELDS = {
@@ -93,7 +94,10 @@ class AppConfig:
     relay_verify_tls: bool = True
     relay_ca_file: str = ""
     relay_auto_fallback_email: bool = False
-    external_delivery_backend_preference: str = "auto"
+    control_plane_mode: str = "hybrid"
+    relay_mailbox_lease_mode: str = "disabled"
+    relay_mailbox_lease_ttl_seconds: int = 45
+    external_delivery_backend_preference: str = "file_surface"
     from_name: str = "Mail Runner"
     from_addr: str = ""
     mock_sleep_seconds: float = 1.0
@@ -119,6 +123,14 @@ class AppConfig:
         if backend == BACKEND_CODEX:
             return self.codex_transport_default
         return BACKEND_TRANSPORT_CLI
+
+    @property
+    def mail_ingress_enabled(self) -> bool:
+        return self.control_plane_mode != "vps_only"
+
+    @property
+    def pc_control_sidecar_enabled(self) -> bool:
+        return self.control_plane_mode != "mail_first"
 
 
 def _coerce_value(field_name: str, value: Any) -> Any:
@@ -168,6 +180,16 @@ def _coerce_value(field_name: str, value: Any) -> Any:
         normalized = str(value).strip().lower()
         if normalized not in {"email", "relay"}:
             raise ValueError("outbound_transport must be either 'email' or 'relay'")
+        return normalized
+    if field_name == "control_plane_mode":
+        normalized = str(value).strip().lower()
+        if normalized not in {"mail_first", "hybrid", "vps_only"}:
+            raise ValueError("control_plane_mode must be one of 'mail_first', 'hybrid', or 'vps_only'")
+        return normalized
+    if field_name == "relay_mailbox_lease_mode":
+        normalized = str(value).strip().lower()
+        if normalized not in {"disabled", "strict", "degraded"}:
+            raise ValueError("relay_mailbox_lease_mode must be one of 'disabled', 'strict', or 'degraded'")
         return normalized
     if field_name == "external_delivery_backend_preference":
         normalized = str(value).strip().lower()
