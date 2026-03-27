@@ -8,8 +8,9 @@ import json
 import logging
 import ssl
 import threading
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
 from datetime import datetime
-from dataclasses import replace
 from email.parser import BytesParser
 from email.policy import default as email_policy
 from http import HTTPStatus
@@ -17,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from weakref import WeakKeyDictionary
 
 import websockets
 
@@ -104,6 +106,93 @@ _PC_CONTROL_OPERATOR_COMMANDS_PATH = "/debug/pc-control/commands"
 _PC_CONTROL_OPERATOR_LEASE_PATH = "/debug/pc-control/lease"
 _PC_CONTROL_OPERATOR_INGRESS_PATH = "/debug/pc-control/ingress"
 _PC_CONTROL_OPERATOR_OUTCOME_PATH = "/debug/pc-control/terminal-outcome"
+_PC_CONTROL_PUSH_BROKERS: WeakKeyDictionary[PcControlRuntime, "_PcControlPushBroker"] = WeakKeyDictionary()
+_PC_CONTROL_PUSH_BROKERS_LOCK = threading.Lock()
+
+
+@dataclass(slots=True)
+class _PcControlConnectionHandle:
+    pc_id: str
+    connection_id: str
+    connection_epoch: int
+    loop: asyncio.AbstractEventLoop
+    push_pending_dispatches: Callable[[], Awaitable[None]]
+
+
+class _PcControlPushBroker:
+    def __init__(self, runtime: PcControlRuntime) -> None:
+        self._runtime = runtime
+        self._lock = threading.Lock()
+        self._connections: dict[str, _PcControlConnectionHandle] = {}
+        self._runtime.set_command_enqueue_callback(self._handle_command_enqueued)
+
+    def register_connection(
+        self,
+        *,
+        pc_id: str,
+        connection_id: str,
+        connection_epoch: int,
+        loop: asyncio.AbstractEventLoop,
+        push_pending_dispatches: Callable[[], Awaitable[None]],
+    ) -> None:
+        handle = _PcControlConnectionHandle(
+            pc_id=pc_id,
+            connection_id=connection_id,
+            connection_epoch=connection_epoch,
+            loop=loop,
+            push_pending_dispatches=push_pending_dispatches,
+        )
+        with self._lock:
+            self._connections[pc_id] = handle
+
+    def unregister_connection(self, *, pc_id: str, connection_id: str, connection_epoch: int) -> None:
+        with self._lock:
+            existing = self._connections.get(pc_id)
+            if existing is None:
+                return
+            if existing.connection_id != connection_id or existing.connection_epoch != connection_epoch:
+                return
+            self._connections.pop(pc_id, None)
+
+    def _handle_command_enqueued(self, record) -> None:
+        self.dispatch_pending_dispatches(pc_id=record.pc_id, command_id=record.command_id)
+
+    def dispatch_pending_dispatches(self, *, pc_id: str, command_id: str | None = None) -> bool:
+        with self._lock:
+            handle = self._connections.get(pc_id)
+        if handle is None:
+            return False
+        future = asyncio.run_coroutine_threadsafe(handle.push_pending_dispatches(), handle.loop)
+        future.add_done_callback(
+            lambda completed, scheduled_pc_id=pc_id, scheduled_command_id=command_id: self._log_dispatch_result(
+                completed,
+                pc_id=scheduled_pc_id,
+                command_id=scheduled_command_id,
+            )
+        )
+        return True
+
+    @staticmethod
+    def _log_dispatch_result(future, *, pc_id: str, command_id: str | None) -> None:
+        if future.cancelled():
+            return
+        try:
+            future.result()
+        except Exception:
+            LOGGER.exception(
+                "pc-control immediate dispatch scheduling failed pc_id=%s command_id=%s",
+                pc_id,
+                command_id,
+            )
+
+
+def _ensure_pc_control_push_broker(pc_control_runtime: PcControlRuntime) -> _PcControlPushBroker:
+    with _PC_CONTROL_PUSH_BROKERS_LOCK:
+        broker = _PC_CONTROL_PUSH_BROKERS.get(pc_control_runtime)
+        if broker is None:
+            broker = _PcControlPushBroker(pc_control_runtime)
+            _PC_CONTROL_PUSH_BROKERS[pc_control_runtime] = broker
+        return broker
 
 
 def _timestamp() -> str:
@@ -257,6 +346,8 @@ def build_http_server(
     store = session_store or InMemorySessionStore()
     packets = packet_store or InMemoryAcceptedPacketStore()
     effective_runner_config = runner_config or load_config()
+    if pc_control_runtime is not None:
+        _ensure_pc_control_push_broker(pc_control_runtime)
     file_store = FileSurfaceStore(
         config.state_dir,
         upload_limit_bytes=file_upload_limit_bytes if file_upload_limit_bytes is not None else 32 * 1024 * 1024,
@@ -1635,11 +1726,14 @@ async def _control_websocket_handler(websocket, *, relay: LoopbackRelayServer) -
 
 
 async def _pc_control_websocket_handler(websocket, *, pc_control_runtime: PcControlRuntime) -> None:
+    broker = _ensure_pc_control_push_broker(pc_control_runtime)
     provided_token = _extract_bearer_token(getattr(websocket, "request_headers", {}))
     server_connection_id: str | None = None
     pc_id: str | None = None
     connection_epoch: int | None = None
     send_lock = asyncio.Lock()
+    dispatch_lock = asyncio.Lock()
+    output_resume_lock = asyncio.Lock()
 
     async def _send_payload(payload: dict[str, Any]) -> None:
         async with send_lock:
@@ -1656,10 +1750,57 @@ async def _pc_control_websocket_handler(websocket, *, pc_control_runtime: PcCont
             message=message,
         )
 
+    async def _send_pending_dispatches() -> None:
+        if server_connection_id is None or pc_id is None or connection_epoch is None:
+            return
+        async with dispatch_lock:
+            try:
+                responses = pc_control_runtime.collect_pending_dispatches(
+                    pc_id=pc_id,
+                    connection_id=server_connection_id,
+                    connection_epoch=connection_epoch,
+                )
+            except PcCommandDispatchValidationError as exc:
+                responses = [
+                    _protocol_error(
+                        code=exc.code,
+                        message=exc.message,
+                        trace_id=f"trace:pc-control:dispatch:{pc_id}",
+                        payload_pc_id=pc_id,
+                        payload_epoch=connection_epoch,
+                    )
+                ]
+            for response in responses:
+                await _send_payload(response)
+
+    async def _send_output_resume_requests() -> None:
+        if server_connection_id is None or pc_id is None or connection_epoch is None:
+            return
+        async with output_resume_lock:
+            try:
+                responses = pc_control_runtime.collect_output_resume_requests(
+                    pc_id=pc_id,
+                    connection_id=server_connection_id,
+                    connection_epoch=connection_epoch,
+                )
+            except PcCommandDispatchValidationError as exc:
+                responses = [
+                    _protocol_error(
+                        code=exc.code,
+                        message=exc.message,
+                        trace_id=f"trace:pc-control:resume:{pc_id}",
+                        payload_pc_id=pc_id,
+                        payload_epoch=connection_epoch,
+                    )
+                ]
+            for response in responses:
+                await _send_payload(response)
+
     try:
         async for raw_message in websocket:
             allow_pending_dispatches = False
             allow_output_resume_requests = False
+            register_connection = False
             try:
                 payload = json.loads(raw_message)
                 if not isinstance(payload, dict):
@@ -1698,6 +1839,7 @@ async def _pc_control_websocket_handler(websocket, *, pc_control_runtime: PcCont
                             server_connection_id = next_connection_id
                             pc_id = message.pc_id
                             connection_epoch = next_epoch
+                            register_connection = True
                             allow_pending_dispatches = True
                             allow_output_resume_requests = True
                     else:
@@ -1775,54 +1917,31 @@ async def _pc_control_websocket_handler(websocket, *, pc_control_runtime: PcCont
                                 )
                             ]
 
-            if allow_pending_dispatches and server_connection_id is not None and pc_id is not None and connection_epoch is not None:
-                try:
-                    responses.extend(
-                        pc_control_runtime.collect_pending_dispatches(
-                            pc_id=pc_id,
-                            connection_id=server_connection_id,
-                            connection_epoch=connection_epoch,
-                        )
-                    )
-                except PcCommandDispatchValidationError as exc:
-                    responses = [
-                        _protocol_error(
-                            code=exc.code,
-                            message=exc.message,
-                            trace_id=f"trace:pc-control:dispatch:{pc_id}",
-                            payload_pc_id=pc_id,
-                            payload_epoch=connection_epoch,
-                        )
-                    ]
-
-            if allow_output_resume_requests and server_connection_id is not None and pc_id is not None and connection_epoch is not None:
-                try:
-                    responses.extend(
-                        pc_control_runtime.collect_output_resume_requests(
-                            pc_id=pc_id,
-                            connection_id=server_connection_id,
-                            connection_epoch=connection_epoch,
-                        )
-                    )
-                except PcCommandDispatchValidationError as exc:
-                    responses = [
-                        _protocol_error(
-                            code=exc.code,
-                            message=exc.message,
-                            trace_id=f"trace:pc-control:resume:{pc_id}",
-                            payload_pc_id=pc_id,
-                            payload_epoch=connection_epoch,
-                        )
-                    ]
-
             first_response = responses[0] if responses else None
             for response in responses:
                 await _send_payload(response)
             if first_response is not None and first_response.get("type") == "error" and server_connection_id is None:
                 await websocket.close(code=1008, reason=str(first_response.get("payload", {}).get("code") or "error"))
                 return
+            if register_connection and server_connection_id is not None and pc_id is not None and connection_epoch is not None:
+                broker.register_connection(
+                    pc_id=pc_id,
+                    connection_id=server_connection_id,
+                    connection_epoch=connection_epoch,
+                    loop=asyncio.get_running_loop(),
+                    push_pending_dispatches=_send_pending_dispatches,
+                )
+            if allow_pending_dispatches:
+                await _send_pending_dispatches()
+            if allow_output_resume_requests:
+                await _send_output_resume_requests()
     finally:
         if server_connection_id is not None and pc_id is not None and connection_epoch is not None:
+            broker.unregister_connection(
+                pc_id=pc_id,
+                connection_id=server_connection_id,
+                connection_epoch=connection_epoch,
+            )
             pc_control_runtime.close_connection(
                 pc_id=pc_id,
                 connection_id=server_connection_id,
@@ -1913,6 +2032,7 @@ async def start_relay_server(
     http_server = None
     http_thread = None
     pc_runtime = pc_control_runtime or build_pc_control_runtime(config)
+    _ensure_pc_control_push_broker(pc_runtime)
     try:
         websocket_server = await _start_internal_websocket_server(
             internal_config,

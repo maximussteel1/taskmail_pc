@@ -105,6 +105,8 @@ async def _run_create_session_roundtrip_test(
     attachments: list[dict[str, object]] | None = None,
     workspace_provider=None,
     codex_profile_models: dict[str, str] | None = None,
+    heartbeat_interval_seconds: int = 1,
+    snapshot_interval_seconds: int | None = None,
 ) -> dict[str, object]:
     state_dir = tmp_path / "relay_state"
     sync_root = tmp_path / "sync_root"
@@ -158,8 +160,10 @@ async def _run_create_session_roundtrip_test(
             display_name="pc_home",
             config=app_config,
             runner=runner,
-            heartbeat_interval_seconds=1,
-            snapshot_interval_seconds=1,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
+            snapshot_interval_seconds=(
+                heartbeat_interval_seconds if snapshot_interval_seconds is None else snapshot_interval_seconds
+            ),
             workspace_provider=workspace_provider,
         )
         client.start()
@@ -411,6 +415,32 @@ def test_android_create_session_roundtrip_returns_submit_ack_and_session_binding
     assert runner.snapshots[0].task_text == "Refactor floor_shear.py"
     assert runner.snapshots[0].timeout_minutes == 4
     assert runner.snapshots[0].backend_transport == "sdk"
+
+
+def test_android_create_session_roundtrip_does_not_wait_for_heartbeat(tmp_path) -> None:
+    result = asyncio.run(
+        _run_create_session_roundtrip_test(
+            tmp_path,
+            runner=_StubRunner(),
+            execution_policy={
+                "backend": "codex",
+                "profile": "default",
+                "permission": "default",
+                "backend_transport": "sdk",
+            },
+            heartbeat_interval_seconds=60,
+            snapshot_interval_seconds=60,
+        )
+    )
+    response = result["response"]
+    payload = result["payload"]
+    runtime = result["runtime"]
+
+    assert response.status_code == 200
+    assert payload["status"] == "accepted"
+    assert payload["submit_ack"]["ack_status"] == "accepted"
+    assert payload["session_binding"]["pc_id"] == "pc_home"
+    assert runtime.command_store.get_command("pc_home", payload["command_id"]) is not None
 
 
 def test_android_create_session_roundtrip_remains_available_in_vps_only_mode(tmp_path, monkeypatch) -> None:

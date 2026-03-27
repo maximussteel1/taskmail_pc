@@ -561,8 +561,8 @@ async def _run_pc_control_plane_client_test(tmp_path) -> None:
             display_name="pc_home",
             config=app_config,
             runner=runner,
-            heartbeat_interval_seconds=1,
-            snapshot_interval_seconds=1,
+            heartbeat_interval_seconds=60,
+            snapshot_interval_seconds=60,
         )
         client.start()
         await asyncio.sleep(2.5)

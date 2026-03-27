@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -54,6 +56,8 @@ from .workspace_inventory_store import (
     WorkspaceInventoryConflictError,
 )
 
+LOGGER = logging.getLogger(__name__)
+
 
 def _timestamp() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
@@ -79,6 +83,7 @@ class PcControlRuntime:
         connection_id_factory=None,
         message_id_factory=None,
         clock=None,
+        command_enqueue_callback: Callable[[PcCommandRecord], None] | None = None,
     ) -> None:
         if not isinstance(keepalive_seconds, int) or keepalive_seconds <= 0:
             raise ValueError("keepalive_seconds must be a positive integer")
@@ -91,6 +96,7 @@ class PcControlRuntime:
         self._connection_id_factory = connection_id_factory or (lambda pc_id: f"pc-ctrl:{pc_id}:{secrets.token_hex(4)}")
         self._message_id_factory = message_id_factory or (lambda prefix: f"{prefix}:{secrets.token_hex(4)}")
         self._clock = clock or _timestamp
+        self._command_enqueue_callback = command_enqueue_callback
 
     @property
     def credential_registry(self) -> InMemoryPcCredentialRegistry:
@@ -111,6 +117,13 @@ class PcControlRuntime:
     @property
     def ingress_store(self) -> InMemoryPcIngressStore:
         return self._ingress_store
+
+    @property
+    def keepalive_seconds(self) -> int:
+        return self._keepalive_seconds
+
+    def set_command_enqueue_callback(self, callback: Callable[[PcCommandRecord], None] | None) -> None:
+        self._command_enqueue_callback = callback
 
     def handle_hello(
         self,
@@ -604,6 +617,7 @@ class PcControlRuntime:
                 command_payload=message.payload["payload"],
             )
         )
+        self._notify_command_enqueued(record)
         return record
 
     def collect_pending_dispatches(
@@ -815,6 +829,19 @@ class PcControlRuntime:
             message=error_message,
         )
 
+    def _notify_command_enqueued(self, record: PcCommandRecord) -> None:
+        callback = self._command_enqueue_callback
+        if callback is None:
+            return
+        try:
+            callback(record)
+        except Exception:
+            LOGGER.exception(
+                "pc-control enqueue callback failed pc_id=%s command_id=%s",
+                record.pc_id,
+                record.command_id,
+            )
+
 
 def build_pc_control_runtime(
     config: RelayServerConfig,
@@ -826,6 +853,7 @@ def build_pc_control_runtime(
     ingress_store: InMemoryPcIngressStore | None = None,
     keepalive_seconds: int = 15,
     clock=None,
+    command_enqueue_callback: Callable[[PcCommandRecord], None] | None = None,
 ) -> PcControlRuntime:
     state_root = Path(config.state_dir) / "pc_control"
     resolved_credential_registry = credential_registry or PersistentPcCredentialRegistry(
@@ -846,4 +874,5 @@ def build_pc_control_runtime(
         ingress_store=resolved_ingress_store,
         keepalive_seconds=keepalive_seconds,
         clock=clock,
+        command_enqueue_callback=command_enqueue_callback,
     )

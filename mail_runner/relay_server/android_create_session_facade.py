@@ -16,6 +16,7 @@ from .pc_control_runtime import PcCommandDispatchValidationError, PcControlRunti
 ANDROID_CREATE_SESSION_PATH = "/v1/android/create-session"
 ANDROID_CREATE_SESSION_SCHEMA_VERSION = "taskmail-android-create-session-facade-v1"
 _ACK_WAIT_SECONDS = 5.0
+_ACK_WAIT_KEEPALIVE_PADDING_SECONDS = 5.0
 _ACK_POLL_SECONDS = 0.05
 _ALLOWED_REJECT_ERROR_CODES = {
     "unsupported_backend",
@@ -292,11 +293,15 @@ def submit_android_create_session_command(
         )
         return _build_submit_response(command_id=command_id, submit_ack=submit_ack)
 
+    effective_ack_wait_seconds = max(
+        float(ack_wait_seconds),
+        float(pc_control_runtime.keepalive_seconds) + _ACK_WAIT_KEEPALIVE_PADDING_SECONDS,
+    )
     record = _wait_for_command_ack(
         runtime=pc_control_runtime,
         pc_id=request.pc_id,
         command_id=record.command_id,
-        timeout_seconds=ack_wait_seconds,
+        timeout_seconds=effective_ack_wait_seconds,
         poll_seconds=ack_poll_seconds,
     )
     if record is None or record.ack_status is None:

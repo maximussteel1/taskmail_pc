@@ -27,7 +27,6 @@ from mail_runner.relay_server.pc_control_protocol import (
     build_command_ack,
     build_command_event,
     build_command_result,
-    build_heartbeat,
     build_pc_hello,
     build_workspace_snapshot,
     parse_pc_control_client_message,
@@ -372,22 +371,7 @@ async def _run_pc_control_operator_dispatch_runtime_test(tmp_path) -> None:
             )
             assert response.status_code == 200
 
-            await websocket.send(
-                json.dumps(
-                    build_heartbeat(
-                        message_id="heartbeat_001",
-                        trace_id="trace_heartbeat_001",
-                        pc_id="pc-home",
-                        connection_epoch=connection_epoch,
-                        sent_at=now,
-                        active_run_count=0,
-                        workspace_count=1,
-                        load_hint="normal",
-                    ),
-                    ensure_ascii=False,
-                )
-            )
-            dispatch = parse_pc_control_server_message(json.loads(await websocket.recv()))
+            dispatch = parse_pc_control_server_message(json.loads(await asyncio.wait_for(websocket.recv(), timeout=2.0)))
             assert dispatch.payload["command_id"] == "cmd_live_001"
 
             await websocket.send(
