@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import threading
+from datetime import datetime
+from pathlib import Path
 
 import requests
 
@@ -63,7 +66,7 @@ def _register_online_pc(runtime) -> None:
             message_id="msg_hello_001",
             trace_id="trace_hello_001",
             pc_id="pc_home",
-            sent_at="2026-03-26T10:00:00",
+            sent_at=datetime.now().replace(microsecond=0).isoformat(),
             display_name="Home PC",
             client_version="0.1.0",
             host_fingerprint="host_001",
@@ -99,6 +102,7 @@ async def _run_create_session_roundtrip_test(
     *,
     runner: _StubRunner,
     execution_policy: dict[str, object],
+    attachments: list[dict[str, object]] | None = None,
     workspace_provider=None,
     codex_profile_models: dict[str, str] | None = None,
 ) -> dict[str, object]:
@@ -179,6 +183,7 @@ async def _run_create_session_roundtrip_test(
                 "mode": "modify",
                 "timeout_seconds": 181,
                 "acceptance": ["pytest passes", "brief summary"],
+                "attachments": attachments,
                 "repo_path": workspace.repo_path,
                 "source": "android-ui",
             },
@@ -408,6 +413,40 @@ def test_android_create_session_roundtrip_returns_submit_ack_and_session_binding
     assert runner.snapshots[0].backend_transport == "sdk"
 
 
+def test_android_create_session_roundtrip_remains_available_in_vps_only_mode(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("mail_runner.relay_server.app.load_config", lambda: AppConfig(control_plane_mode="vps_only"))
+
+    result = asyncio.run(
+        _run_create_session_roundtrip_test(
+            tmp_path,
+            runner=_StubRunner(),
+            execution_policy={
+                "backend": "codex",
+                "profile": "default",
+                "permission": "default",
+                "backend_transport": "sdk",
+            },
+        )
+    )
+    response = result["response"]
+    payload = result["payload"]
+    runtime = result["runtime"]
+    workspace = result["workspace"]
+    runner = result["runner"]
+
+    assert response.status_code == 200
+    assert payload["status"] == "accepted"
+    assert payload["submit_ack"]["ack_status"] == "accepted"
+    assert payload["session_binding"]["pc_id"] == "pc_home"
+    assert payload["session_binding"]["workspace_id"] == workspace.workspace_id
+    record = runtime.command_store.get_command("pc_home", payload["command_id"])
+    assert record is not None
+    assert record.command_type == "new_task"
+    assert record.session_id == payload["session_binding"]["session_id"]
+    assert len(runner.snapshots) == 1
+    assert runner.snapshots[0].thread_id == payload["session_binding"]["session_id"]
+
+
 def test_android_create_session_roundtrip_returns_accepted_but_queued_with_binding(tmp_path) -> None:
     result = asyncio.run(
         _run_create_session_roundtrip_test(
@@ -543,3 +582,46 @@ def test_android_create_session_maps_unsupported_backend_transport_to_unsupporte
     assert payload["submit_ack"]["ack_status"] == "rejected"
     assert payload["submit_ack"]["error_code"] == "unsupported_backend"
     assert "session_binding" not in payload
+
+
+def test_android_create_session_roundtrip_materializes_initial_attachments_into_workspace(tmp_path) -> None:
+    attachment_bytes = b"diagram:v1"
+    result = asyncio.run(
+        _run_create_session_roundtrip_test(
+            tmp_path,
+            runner=_StubRunner(),
+            execution_policy={
+                "backend": "codex",
+                "profile": "default",
+                "permission": "default",
+                "backend_transport": "sdk",
+            },
+            attachments=[
+                {
+                    "name": "wireframe.png",
+                    "content_type": "image/png",
+                    "size_bytes": len(attachment_bytes),
+                    "content_bytes_b64": base64.b64encode(attachment_bytes).decode("ascii"),
+                },
+            ],
+        )
+    )
+    response = result["response"]
+    payload = result["payload"]
+    runtime = result["runtime"]
+    runner = result["runner"]
+
+    assert response.status_code == 200
+    assert payload["status"] == "accepted"
+    record = runtime.command_store.get_command("pc_home", payload["command_id"])
+    assert record is not None
+    assert isinstance(record.command_payload["attachments"], list)
+    assert record.command_payload["attachments"][0]["name"] == "wireframe.png"
+    assert len(runner.snapshots) == 1
+    assert len(runner.snapshots[0].attachments) == 1
+
+    saved_path = runner.snapshots[0].attachments[0]
+    assert saved_path.endswith("wireframe.png")
+    assert saved_path.startswith(str(tmp_path / "sync_root" / "alpha"))
+    assert Path(saved_path).exists()
+    assert Path(saved_path).read_bytes() == attachment_bytes

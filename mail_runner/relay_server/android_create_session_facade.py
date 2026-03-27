@@ -78,6 +78,33 @@ def _optional_text_list(value: Any, field_name: str) -> list[str]:
     return items
 
 
+def _optional_attachment_list(value: Any, field_name: str) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise AndroidCreateSessionRequestError(f"{field_name} must be a list of attachment objects when provided")
+
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise AndroidCreateSessionRequestError(f"{field_name}[{index}] must be a JSON object")
+        name = _require_text(item.get("name"), f"{field_name}[{index}].name")
+        content_type = _require_text(item.get("content_type"), f"{field_name}[{index}].content_type")
+        content_bytes_b64 = _require_text(item.get("content_bytes_b64"), f"{field_name}[{index}].content_bytes_b64")
+        size_bytes = item.get("size_bytes")
+        if size_bytes is not None and (not isinstance(size_bytes, int) or size_bytes < 0):
+            raise AndroidCreateSessionRequestError(f"{field_name}[{index}].size_bytes must be a non-negative integer")
+        normalized.append(
+            {
+                "name": name,
+                "content_type": content_type,
+                "size_bytes": size_bytes,
+                "content_bytes_b64": content_bytes_b64,
+            }
+        )
+    return normalized
+
+
 def _sanitize_identifier(value: str, *, prefix: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in str(value or "").strip())
     cleaned = cleaned.strip("._-")
@@ -187,6 +214,7 @@ class AndroidCreateSessionCommand:
     mode: str | None = None
     timeout_seconds: int | None = None
     acceptance: list[str] = field(default_factory=list)
+    attachments: list[dict[str, Any]] = field(default_factory=list)
     repo_path: str | None = None
     workdir: str | None = None
     source: str | None = None
@@ -203,6 +231,7 @@ class AndroidCreateSessionCommand:
             mode=_optional_text(payload.get("mode"), "mode"),
             timeout_seconds=_optional_positive_int(payload.get("timeout_seconds"), "timeout_seconds"),
             acceptance=_optional_text_list(payload.get("acceptance"), "acceptance"),
+            attachments=_optional_attachment_list(payload.get("attachments"), "attachments"),
             repo_path=_optional_text(payload.get("repo_path"), "repo_path"),
             workdir=_optional_text(payload.get("workdir"), "workdir"),
             source=_optional_text(payload.get("source"), "source"),
@@ -220,6 +249,8 @@ class AndroidCreateSessionCommand:
             payload["timeout_minutes"] = max(1, int(math.ceil(self.timeout_seconds / 60.0)))
         if self.acceptance:
             payload["acceptance"] = list(self.acceptance)
+        if self.attachments:
+            payload["attachments"] = [dict(item) for item in self.attachments]
         if self.repo_path is not None:
             payload["repo_path"] = self.repo_path
         if self.workdir is not None:

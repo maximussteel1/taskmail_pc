@@ -16,11 +16,11 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import websockets
 
-from ..config import load_config
+from ..config import AppConfig, load_config
 from ..file_surface import FileSurfaceStore, FileSurfaceUploadError
 from .android_create_session_facade import (
     ANDROID_CREATE_SESSION_PATH,
@@ -28,6 +28,19 @@ from .android_create_session_facade import (
     AndroidCreateSessionRequestError,
     AndroidCreateSessionSubmitTimeout,
     submit_android_create_session_command,
+)
+from .android_environment_inventory_facade import (
+    ANDROID_ENVIRONMENT_INVENTORY_PATH,
+    build_android_environment_inventory_snapshot,
+)
+from .android_sessions_facade import (
+    ANDROID_SESSIONS_PATH,
+    build_android_sessions_snapshot,
+)
+from .android_session_snapshot_facade import (
+    ANDROID_SESSION_SNAPSHOT_PATH,
+    AndroidSessionSnapshotFacadeError,
+    build_android_session_snapshot,
 )
 from .auth import token_fingerprint, validate_bearer_token, validate_transport_token
 from .config import RelayServerConfig, load_relay_server_config
@@ -57,7 +70,11 @@ from .pc_control_protocol import (
     PcCommandEventMessage,
     PcCommandResultMessage,
     PcControlProtocolError,
+    PcIngressCandidateMessage,
+    PcMailboxLeaseMessage,
     PcOutputChunkMessage,
+    PcTerminalOutcomeMessage,
+    PcThreadBindingMessage,
     PcHeartbeatMessage,
     PcHelloMessage,
     PcWorkspaceSnapshotMessage,
@@ -81,6 +98,12 @@ _RELAY_WEBSOCKET_PATH = "/relay"
 _CONTROL_WEBSOCKET_PATH = "/control"
 _PC_CONTROL_WEBSOCKET_PATH = "/pc-control"
 _PC_CONTROL_OPERATOR_DISPATCH_PATH = "/debug/pc-control/dispatch"
+_PC_CONTROL_OPERATOR_NODES_PATH = "/debug/pc-control/nodes"
+_PC_CONTROL_OPERATOR_WORKSPACES_PATH = "/debug/pc-control/workspaces"
+_PC_CONTROL_OPERATOR_COMMANDS_PATH = "/debug/pc-control/commands"
+_PC_CONTROL_OPERATOR_LEASE_PATH = "/debug/pc-control/lease"
+_PC_CONTROL_OPERATOR_INGRESS_PATH = "/debug/pc-control/ingress"
+_PC_CONTROL_OPERATOR_OUTCOME_PATH = "/debug/pc-control/terminal-outcome"
 
 
 def _timestamp() -> str:
@@ -125,12 +148,25 @@ def _task_root_diagnostics(task_root: str | None) -> dict[str, Any]:
     }
 
 
+def _taskmail_direct_ingress_enabled(
+    config: RelayServerConfig,
+    *,
+    runner_config: AppConfig | None = None,
+) -> bool:
+    if not config.taskmail_direct_ingress_enabled:
+        return False
+    if runner_config is None:
+        return True
+    return runner_config.mail_ingress_enabled
+
+
 def build_health_payload(
     config: RelayServerConfig,
     session_store,
     *,
     packet_store=None,
     pc_control_runtime: PcControlRuntime | None = None,
+    runner_config: AppConfig | None = None,
     listening_host: str | None = None,
     listening_port: int | None = None,
 ) -> dict[str, Any]:
@@ -145,7 +181,10 @@ def build_health_payload(
         "packet_count": packet_store.count() if packet_store is not None else 0,
         "state_dir": config.state_dir,
         "tls_enabled": bool(config.tls_certfile),
-        "taskmail_direct_ingress_enabled": config.taskmail_direct_ingress_enabled,
+        "taskmail_direct_ingress_enabled": _taskmail_direct_ingress_enabled(
+            config,
+            runner_config=runner_config,
+        ),
         "task_root": _task_root_diagnostics(config.task_root or None),
         "auth": {
             "transport_token_id": token_fingerprint(config.transport_token),
@@ -154,6 +193,12 @@ def build_health_payload(
             "node_count": pc_control_runtime.node_store.count() if pc_control_runtime is not None else 0,
             "workspace_count": pc_control_runtime.workspace_store.count() if pc_control_runtime is not None else 0,
             "command_count": pc_control_runtime.command_store.count() if pc_control_runtime is not None else 0,
+            "lease_count": pc_control_runtime.ingress_store.count_leases() if pc_control_runtime is not None else 0,
+            "ingress_count": pc_control_runtime.ingress_store.count_ingress() if pc_control_runtime is not None else 0,
+            "binding_count": pc_control_runtime.ingress_store.count_bindings() if pc_control_runtime is not None else 0,
+            "terminal_outcome_count": (
+                pc_control_runtime.ingress_store.count_terminal_outcomes() if pc_control_runtime is not None else 0
+            ),
         },
     }
 
@@ -164,18 +209,23 @@ def build_runtime_relay(
     session_store,
     packet_store,
 ) -> LoopbackRelayServer:
+    runner_config = load_config()
     deliverer = RelayPacketDeliverer(config)
     direct_packet_handlers: list[Any] = []
     if config.taskmail_direct_ingress_enabled:
-        direct_packet_handlers = [
-            RelayTaskMailDirectNewTaskMailBridge(config),
-            RelayTaskMailDirectCurrentSessionStatusMailBridge(config, task_root=config.task_root or None),
-            RelayTaskMailDirectCurrentSessionReplyMailBridge(config, task_root=config.task_root or None),
-        ]
+        if runner_config.mail_ingress_enabled:
+            direct_packet_handlers.extend(
+                [
+                    RelayTaskMailDirectNewTaskMailBridge(config),
+                    RelayTaskMailDirectCurrentSessionStatusMailBridge(config, task_root=config.task_root or None),
+                    RelayTaskMailDirectCurrentSessionReplyMailBridge(config, task_root=config.task_root or None),
+                ]
+            )
         if str(config.task_root or "").strip():
-            direct_packet_handlers.append(RelayTaskMailDirectProjectSyncHandler(config=load_config()))
-        direct_packet_handlers.append(RelayTaskMailDirectProjectSyncMailBridge(config))
-        direct_packet_handlers.append(RelayTaskMailTransportProbeHandler(config))
+            direct_packet_handlers.append(RelayTaskMailDirectProjectSyncHandler(config=runner_config))
+        if runner_config.mail_ingress_enabled:
+            direct_packet_handlers.append(RelayTaskMailDirectProjectSyncMailBridge(config))
+            direct_packet_handlers.append(RelayTaskMailTransportProbeHandler(config))
     return LoopbackRelayServer(
         config,
         session_store=session_store,
@@ -201,10 +251,12 @@ def build_http_server(
     session_store: InMemorySessionStore | None = None,
     packet_store: InMemoryAcceptedPacketStore | None = None,
     pc_control_runtime: PcControlRuntime | None = None,
+    runner_config: AppConfig | None = None,
     file_upload_limit_bytes: int | None = None,
 ) -> ThreadingHTTPServer:
     store = session_store or InMemorySessionStore()
     packets = packet_store or InMemoryAcceptedPacketStore()
+    effective_runner_config = runner_config or load_config()
     file_store = FileSurfaceStore(
         config.state_dir,
         upload_limit_bytes=file_upload_limit_bytes if file_upload_limit_bytes is not None else 32 * 1024 * 1024,
@@ -301,9 +353,313 @@ def build_http_server(
                         store,
                         packet_store=packets,
                         pc_control_runtime=pc_control_runtime,
+                        runner_config=effective_runner_config,
                         listening_host=str(host),
                         listening_port=int(port),
                     ),
+                )
+                return
+            if path == ANDROID_ENVIRONMENT_INVENTORY_PATH:
+                if not self._require_android_app_token():
+                    return
+                if pc_control_runtime is None:
+                    self._write_json(
+                        503,
+                        {
+                            "status": "error",
+                            "error_code": "pc_control_unavailable",
+                            "error_message": "pc_control_runtime is not configured",
+                            "retryable": True,
+                        },
+                    )
+                    return
+                query = parse_qs(urlparse(self.path).query)
+                include_offline = str((query.get("include_offline") or ["true"])[0]).strip().lower() != "false"
+                include_missing_workspaces = (
+                    str((query.get("include_missing_workspaces") or ["true"])[0]).strip().lower() != "false"
+                )
+                pc_ids = [item.strip() for item in query.get("pc_id", []) if str(item).strip()]
+                workspace_ids = [item.strip() for item in query.get("workspace_id", []) if str(item).strip()]
+                self._write_json(
+                    200,
+                    build_android_environment_inventory_snapshot(
+                        pc_control_runtime=pc_control_runtime,
+                        include_offline=include_offline,
+                        include_missing_workspaces=include_missing_workspaces,
+                        pc_ids=pc_ids,
+                        workspace_ids=workspace_ids,
+                    ),
+                )
+                return
+            if path == ANDROID_SESSIONS_PATH:
+                if not self._require_android_app_token():
+                    return
+                task_root = str(config.task_root or "").strip()
+                if not task_root:
+                    self._write_json(
+                        503,
+                        {
+                            "status": "error",
+                            "error_code": "task_root_unavailable",
+                            "error_message": "relay task_root is not configured for android session reads",
+                            "retryable": True,
+                        },
+                    )
+                    return
+                query = parse_qs(urlparse(self.path).query)
+                include_ended = str((query.get("include_ended") or ["false"])[0]).strip().lower() == "true"
+                pc_ids = [item.strip() for item in query.get("pc_id", []) if str(item).strip()]
+                workspace_ids = [item.strip() for item in query.get("workspace_id", []) if str(item).strip()]
+                session_ids = [item.strip() for item in query.get("session_id", []) if str(item).strip()]
+                thread_ids = [item.strip() for item in query.get("thread_id", []) if str(item).strip()]
+                self._write_json(
+                    200,
+                    build_android_sessions_snapshot(
+                        task_root=task_root,
+                        pc_control_runtime=pc_control_runtime,
+                        include_ended=include_ended,
+                        pc_ids=pc_ids,
+                        workspace_ids=workspace_ids,
+                        session_ids=session_ids,
+                        thread_ids=thread_ids,
+                    ),
+                )
+                return
+            if path == ANDROID_SESSION_SNAPSHOT_PATH:
+                if not self._require_android_app_token():
+                    return
+                task_root = str(config.task_root or "").strip()
+                if not task_root:
+                    self._write_json(
+                        503,
+                        {
+                            "status": "error",
+                            "error_code": "task_root_unavailable",
+                            "error_message": "relay task_root is not configured for android session reads",
+                            "retryable": True,
+                        },
+                    )
+                    return
+                query = parse_qs(urlparse(self.path).query)
+                try:
+                    response_payload = build_android_session_snapshot(
+                        query=query,
+                        task_root=task_root,
+                        pc_control_runtime=pc_control_runtime,
+                    )
+                except AndroidSessionSnapshotFacadeError as exc:
+                    self._write_json(exc.status_code, exc.to_response_payload())
+                    return
+                self._write_json(200, response_payload)
+                return
+            if path == _PC_CONTROL_OPERATOR_NODES_PATH:
+                if not self._require_transport_token():
+                    return
+                if pc_control_runtime is None:
+                    self._write_json(
+                        503,
+                        {
+                            "status": "error",
+                            "error_code": "pc_control_unavailable",
+                            "error_message": "pc_control_runtime is not configured",
+                            "retryable": True,
+                        },
+                    )
+                    return
+                query = parse_qs(urlparse(self.path).query)
+                pc_id = str((query.get("pc_id") or [""])[0]).strip()
+                self._write_json(
+                    200,
+                    {
+                        "status": "ok",
+                        "pc_id": pc_id or None,
+                        "node": (pc_control_runtime.get_node(pc_id=pc_id) if pc_id else None),
+                        "nodes": ([] if pc_id else pc_control_runtime.list_nodes()),
+                    },
+                )
+                return
+            if path == _PC_CONTROL_OPERATOR_WORKSPACES_PATH:
+                if not self._require_transport_token():
+                    return
+                if pc_control_runtime is None:
+                    self._write_json(
+                        503,
+                        {
+                            "status": "error",
+                            "error_code": "pc_control_unavailable",
+                            "error_message": "pc_control_runtime is not configured",
+                            "retryable": True,
+                        },
+                    )
+                    return
+                query = parse_qs(urlparse(self.path).query)
+                pc_id = str((query.get("pc_id") or [""])[0]).strip() or None
+                self._write_json(
+                    200,
+                    {
+                        "status": "ok",
+                        "pc_id": pc_id,
+                        "workspaces": pc_control_runtime.list_workspaces(pc_id=pc_id),
+                    },
+                )
+                return
+            if path == _PC_CONTROL_OPERATOR_COMMANDS_PATH:
+                if not self._require_transport_token():
+                    return
+                if pc_control_runtime is None:
+                    self._write_json(
+                        503,
+                        {
+                            "status": "error",
+                            "error_code": "pc_control_unavailable",
+                            "error_message": "pc_control_runtime is not configured",
+                            "retryable": True,
+                        },
+                    )
+                    return
+                query = parse_qs(urlparse(self.path).query)
+                pc_id = str((query.get("pc_id") or [""])[0]).strip() or None
+                command_id = str((query.get("command_id") or [""])[0]).strip() or None
+                if command_id and not pc_id:
+                    self._write_json(
+                        400,
+                        {
+                            "status": "error",
+                            "error_code": "missing_pc_id",
+                            "error_message": "pc_id is required when command_id is provided",
+                            "retryable": False,
+                        },
+                    )
+                    return
+                self._write_json(
+                    200,
+                    {
+                        "status": "ok",
+                        "pc_id": pc_id,
+                        "command_id": command_id,
+                        "command": (
+                            pc_control_runtime.get_command(pc_id=pc_id, command_id=command_id)
+                            if pc_id is not None and command_id is not None
+                            else None
+                        ),
+                        "commands": (
+                            []
+                            if command_id is not None
+                            else pc_control_runtime.list_commands(pc_id=pc_id)
+                        ),
+                    },
+                )
+                return
+            if path == _PC_CONTROL_OPERATOR_LEASE_PATH:
+                if not self._require_transport_token():
+                    return
+                if pc_control_runtime is None:
+                    self._write_json(
+                        503,
+                        {
+                            "status": "error",
+                            "error_code": "pc_control_unavailable",
+                            "error_message": "pc_control_runtime is not configured",
+                            "retryable": True,
+                        },
+                    )
+                    return
+                query = parse_qs(urlparse(self.path).query)
+                mailbox_key = str((query.get("mailbox_key") or [""])[0]).strip()
+                if not mailbox_key:
+                    self._write_json(
+                        400,
+                        {
+                            "status": "error",
+                            "error_code": "missing_mailbox_key",
+                            "error_message": "mailbox_key is required",
+                            "retryable": False,
+                        },
+                    )
+                    return
+                self._write_json(
+                    200,
+                    {
+                        "status": "ok",
+                        "mailbox_key": mailbox_key,
+                        "lease": pc_control_runtime.get_mailbox_lease(mailbox_key=mailbox_key),
+                        "lease_events": pc_control_runtime.list_mailbox_lease_events(mailbox_key=mailbox_key, limit=20),
+                    },
+                )
+                return
+            if path == _PC_CONTROL_OPERATOR_INGRESS_PATH:
+                if not self._require_transport_token():
+                    return
+                if pc_control_runtime is None:
+                    self._write_json(
+                        503,
+                        {
+                            "status": "error",
+                            "error_code": "pc_control_unavailable",
+                            "error_message": "pc_control_runtime is not configured",
+                            "retryable": True,
+                        },
+                    )
+                    return
+                query = parse_qs(urlparse(self.path).query)
+                mailbox_key = str((query.get("mailbox_key") or [""])[0]).strip() or None
+                message_id = str((query.get("message_id") or [""])[0]).strip() or None
+                ingress_id = str((query.get("ingress_id") or [""])[0]).strip() or None
+                uid_text = str((query.get("uid") or [""])[0]).strip()
+                uid = int(uid_text) if uid_text.isdigit() else None
+                uid_validity_text = str((query.get("uid_validity") or [""])[0]).strip()
+                uid_validity = int(uid_validity_text) if uid_validity_text.isdigit() else None
+                folder = str((query.get("folder") or ["INBOX"])[0]).strip() or "INBOX"
+                record = pc_control_runtime.find_ingress(
+                    ingress_id=ingress_id,
+                    mailbox_key=mailbox_key,
+                    message_id=message_id,
+                    uid=uid,
+                    folder=folder,
+                    uid_validity=uid_validity,
+                )
+                self._write_json(
+                    200,
+                    {
+                        "status": "ok",
+                        "ingress": record,
+                    },
+                )
+                return
+            if path == _PC_CONTROL_OPERATOR_OUTCOME_PATH:
+                if not self._require_transport_token():
+                    return
+                if pc_control_runtime is None:
+                    self._write_json(
+                        503,
+                        {
+                            "status": "error",
+                            "error_code": "pc_control_unavailable",
+                            "error_message": "pc_control_runtime is not configured",
+                            "retryable": True,
+                        },
+                    )
+                    return
+                query = parse_qs(urlparse(self.path).query)
+                thread_id = str((query.get("thread_id") or [""])[0]).strip()
+                if not thread_id:
+                    self._write_json(
+                        400,
+                        {
+                            "status": "error",
+                            "error_code": "missing_thread_id",
+                            "error_message": "thread_id is required",
+                            "retryable": False,
+                        },
+                    )
+                    return
+                self._write_json(
+                    200,
+                    {
+                        "status": "ok",
+                        "thread_id": thread_id,
+                        "terminal_outcome": pc_control_runtime.find_terminal_outcome(thread_id=thread_id),
+                    },
                 )
                 return
             if path.startswith("/v1/files/"):
@@ -925,6 +1281,7 @@ async def _handle_unified_connection(
                     session_store,
                     packet_store=packet_store,
                     pc_control_runtime=pc_control_runtime,
+                    runner_config=load_config(),
                     listening_host=str(listen_ref.get("host") or config.host),
                     listening_port=int(listen_ref.get("port") or config.port),
                 ),
@@ -1013,7 +1370,13 @@ async def _process_request(path: str, _request_headers: Any, *, config: RelaySer
         return None
     return _json_response(
         HTTPStatus.OK,
-        build_health_payload(config, session_store, packet_store=packet_store, pc_control_runtime=pc_control_runtime),
+        build_health_payload(
+            config,
+            session_store,
+            packet_store=packet_store,
+            pc_control_runtime=pc_control_runtime,
+            runner_config=load_config(),
+        ),
     )
 
 
@@ -1389,6 +1752,18 @@ async def _pc_control_websocket_handler(websocket, *, pc_control_runtime: PcCont
                             )
                             responses = [] if response is None else [response]
                             allow_pending_dispatches = response is None
+                        elif isinstance(message, PcMailboxLeaseMessage):
+                            responses = [pc_control_runtime.handle_mailbox_lease(message, connection_id=server_connection_id)]
+                            allow_pending_dispatches = False
+                        elif isinstance(message, PcIngressCandidateMessage):
+                            responses = [pc_control_runtime.handle_ingress_candidate(message, connection_id=server_connection_id)]
+                            allow_pending_dispatches = False
+                        elif isinstance(message, PcThreadBindingMessage):
+                            responses = [pc_control_runtime.handle_thread_binding(message, connection_id=server_connection_id)]
+                            allow_pending_dispatches = False
+                        elif isinstance(message, PcTerminalOutcomeMessage):
+                            responses = [pc_control_runtime.handle_terminal_outcome(message, connection_id=server_connection_id)]
+                            allow_pending_dispatches = False
                         else:
                             responses = [
                                 _protocol_error(

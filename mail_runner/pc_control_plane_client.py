@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import hashlib
 import inspect
 import json
 import logging
@@ -18,7 +21,8 @@ from typing import Any, Callable
 import websockets
 
 from .config import AppConfig
-from .models import RunResult, TaskSnapshot, ThreadState
+from .mail_attachments import materialize_incoming_attachments
+from .models import MailAttachment, MailEnvelope, RunResult, TaskSnapshot, ThreadState
 from .pc_control_plane_projection import project_artifact_manifest, project_output_chunks
 from .pc_workspace_inventory import build_execution_capabilities, collect_workspace_inventory
 from .relay_server.auth import token_fingerprint
@@ -27,14 +31,22 @@ from .relay_server.pc_control_protocol import (
     PcControlProtocolError,
     PcErrorMessage,
     PcHelloAckMessage,
+    PcIngressDecisionMessage,
+    PcMailboxLeaseAckMessage,
     PcOutputResumeRequestMessage,
+    PcTerminalOutcomeAckMessage,
+    PcThreadBindingAckMessage,
     build_artifact_manifest,
     build_command_ack,
     build_command_event,
     build_command_result,
+    build_ingress_candidate,
+    build_mailbox_lease,
     build_output_chunk,
     build_heartbeat,
     build_pc_hello,
+    build_terminal_outcome,
+    build_thread_binding,
     build_workspace_snapshot,
     parse_pc_control_server_message,
 )
@@ -48,6 +60,7 @@ from .status import (
 
 LOGGER = logging.getLogger(__name__)
 _WEBSOCKETS_CONNECT_SUPPORTS_PROXY = "proxy" in inspect.signature(websockets.connect).parameters
+_CONTROL_PLANE_ATTACHMENT_PREFIX = "_ctrlin_"
 
 
 def _timestamp() -> str:
@@ -72,6 +85,22 @@ def derive_pc_control_url(relay_url: str) -> str:
     else:
         target_path = f"{path.rstrip('/')}/pc-control"
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, target_path, parsed.query, parsed.fragment))
+
+
+def derive_mailbox_key(config: AppConfig) -> str:
+    imap_host = str(config.imap_host or "").strip().lower()
+    imap_user = str(config.imap_user or "").strip().lower()
+    if not imap_host or not imap_user:
+        return ""
+    return f"imap://{imap_user}@{imap_host}/INBOX"
+
+
+def hash_references(references: list[str]) -> str | None:
+    normalized = [str(item).strip() for item in references if str(item).strip()]
+    if not normalized:
+        return None
+    digest = hashlib.sha256(" ".join(normalized).encode("utf-8")).hexdigest()
+    return digest
 
 
 class PcControlPlaneClient:
@@ -107,6 +136,10 @@ class PcControlPlaneClient:
         self._clock = clock or _timestamp
         self._monotonic = monotonic_fn or time.monotonic
         self._workspace_provider = workspace_provider or (lambda: collect_workspace_inventory(self._config))
+        self._runner_id = f"runner:{self._pc_id}:{secrets.token_hex(6)}"
+        self._mailbox_key = derive_mailbox_key(self._config)
+        self._lease_mode = str(self._config.relay_mailbox_lease_mode or "disabled").strip().lower() or "disabled"
+        self._lease_ttl_seconds = max(5, int(self._config.relay_mailbox_lease_ttl_seconds or 45))
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -119,10 +152,213 @@ class PcControlPlaneClient:
         self._launched_command_ids: set[str] = set()
         self._command_contexts: dict[str, dict[str, Any]] = {}
         self._output_chunk_replay_contexts: dict[str, dict[str, Any]] = {}
+        self._pending_rpc_requests: dict[str, asyncio.Future] = {}
+        self._lease_state: dict[str, Any] = {
+            "mode": self._lease_mode,
+            "mailbox_key": self._mailbox_key,
+            "runner_id": self._runner_id,
+            "status": "disabled" if self._lease_mode == "disabled" else "inactive",
+            "lease_epoch": None,
+            "expires_at": None,
+            "lease_holder_id": None,
+            "lease_pc_id": None,
+            "reason": None,
+            "degraded_mode": False,
+            "connected": False,
+        }
 
     @property
     def is_configured(self) -> bool:
         return bool(self._pc_control_url and self._transport_token and self._pc_id and self._client_version)
+
+    @property
+    def mailbox_lease_enabled(self) -> bool:
+        return self._lease_mode != "disabled"
+
+    def mailbox_lease_state(self) -> dict[str, Any]:
+        with self._control_lock:
+            return dict(self._lease_state)
+
+    def can_consume_mailbox(self) -> bool:
+        if not self.mailbox_lease_enabled:
+            return True
+        state = self.mailbox_lease_state()
+        if state.get("status") == "active" and state.get("lease_holder_id") == self._runner_id:
+            return True
+        if state.get("connected"):
+            return False
+        return self._lease_mode == "degraded"
+
+    def register_ingress_candidate(
+        self,
+        *,
+        envelope,
+        classification: str,
+        subject_norm: str,
+        candidate_status: str,
+        candidate_reason: str | None = None,
+        taskmail_request_id: str | None = None,
+        packet_id: str | None = None,
+        folder: str = "INBOX",
+    ) -> dict[str, Any]:
+        if not self.mailbox_lease_enabled:
+            return self._synthetic_ingress_decision(
+                classification=classification,
+                candidate_status=candidate_status,
+                candidate_reason=candidate_reason,
+                degraded_mode=False,
+            )
+        if self._should_use_local_degraded_path():
+            return self._synthetic_ingress_decision(
+                classification=classification,
+                candidate_status=candidate_status,
+                candidate_reason=candidate_reason,
+                degraded_mode=True,
+            )
+        state = self.mailbox_lease_state()
+        return self._rpc_call(
+            request_id=self._next_request_id("ingress"),
+            trace_id=self._next_trace_id("ingress"),
+            payload_builder=lambda request_id, trace_id, connection_epoch: build_ingress_candidate(
+                message_id=self._next_message_id("ingress_candidate"),
+                trace_id=trace_id,
+                pc_id=self._pc_id,
+                connection_epoch=connection_epoch,
+                sent_at=self._clock(),
+                request_id=request_id,
+                mailbox_key=self._mailbox_key,
+                lease_holder_id=self._runner_id,
+                lease_epoch=int(state["lease_epoch"]),
+                folder=folder,
+                uid_validity=getattr(envelope, "imap_uid_validity", None),
+                uid=getattr(envelope, "imap_uid", None),
+                ingress_message_id=envelope.message_id,
+                in_reply_to=envelope.in_reply_to,
+                references_hash=hash_references(getattr(envelope, "references", []) or []),
+                from_addr=envelope.from_addr,
+                subject=envelope.subject,
+                subject_norm=subject_norm,
+                raw_date=(str(envelope.date) if getattr(envelope, "date", None) is not None else None),
+                classification=classification,
+                candidate_status=candidate_status,
+                candidate_reason=candidate_reason,
+                taskmail_request_id=taskmail_request_id,
+                packet_id=packet_id,
+                degraded_mode=False,
+            ),
+        )
+
+    def commit_thread_binding(
+        self,
+        *,
+        ingress_id: str | None,
+        root_message_id: str,
+        thread_id: str,
+        session_id: str,
+        repo_path: str,
+        workdir: str | None,
+        subject_norm: str,
+        degraded_mode: bool = False,
+    ) -> dict[str, Any]:
+        if not ingress_id or not self.mailbox_lease_enabled:
+            return {
+                "binding_status": "committed",
+                "ingress_id": ingress_id,
+                "thread_id": thread_id,
+                "session_id": session_id,
+                "degraded_mode": degraded_mode,
+            }
+        if self._should_use_local_degraded_path():
+            return {
+                "binding_status": "committed",
+                "ingress_id": ingress_id,
+                "thread_id": thread_id,
+                "session_id": session_id,
+                "degraded_mode": True,
+            }
+        state = self.mailbox_lease_state()
+        return self._rpc_call(
+            request_id=self._next_request_id("thread_binding"),
+            trace_id=self._next_trace_id("thread_binding"),
+            payload_builder=lambda request_id, trace_id, connection_epoch: build_thread_binding(
+                message_id=self._next_message_id("thread_binding"),
+                trace_id=trace_id,
+                pc_id=self._pc_id,
+                connection_epoch=connection_epoch,
+                sent_at=self._clock(),
+                request_id=request_id,
+                mailbox_key=self._mailbox_key,
+                lease_holder_id=self._runner_id,
+                lease_epoch=int(state["lease_epoch"]),
+                ingress_id=ingress_id,
+                root_message_id=root_message_id,
+                thread_id=thread_id,
+                session_id=session_id,
+                repo_path=repo_path,
+                workdir=workdir,
+                subject_norm=subject_norm,
+                degraded_mode=False,
+            ),
+        )
+
+    def commit_terminal_outcome(
+        self,
+        *,
+        thread_id: str,
+        task_id: str,
+        run_status: str,
+        generated_at: str,
+        last_summary: str | None,
+        terminal_mail_message_id: str | None,
+        terminal_mail_subject: str | None,
+        taskmail_request_id: str | None,
+        packet_id: str | None,
+        source_ingress_id: str | None,
+        degraded_mode: bool = False,
+    ) -> dict[str, Any]:
+        if not self.mailbox_lease_enabled:
+            return {
+                "outcome_status": "committed",
+                "thread_id": thread_id,
+                "task_id": task_id,
+                "source_ingress_id": source_ingress_id,
+                "degraded_mode": degraded_mode,
+            }
+        if self._should_use_local_degraded_path():
+            return {
+                "outcome_status": "committed",
+                "thread_id": thread_id,
+                "task_id": task_id,
+                "source_ingress_id": source_ingress_id,
+                "degraded_mode": True,
+            }
+        state = self.mailbox_lease_state()
+        return self._rpc_call(
+            request_id=self._next_request_id("terminal_outcome"),
+            trace_id=self._next_trace_id("terminal_outcome"),
+            payload_builder=lambda request_id, trace_id, connection_epoch: build_terminal_outcome(
+                message_id=self._next_message_id("terminal_outcome"),
+                trace_id=trace_id,
+                pc_id=self._pc_id,
+                connection_epoch=connection_epoch,
+                sent_at=self._clock(),
+                request_id=request_id,
+                mailbox_key=self._mailbox_key,
+                lease_holder_id=self._runner_id,
+                lease_epoch=int(state["lease_epoch"]),
+                thread_id=thread_id,
+                task_id=task_id,
+                run_status=run_status,
+                generated_at=generated_at,
+                last_summary=last_summary,
+                terminal_mail_message_id=terminal_mail_message_id,
+                terminal_mail_subject=terminal_mail_subject,
+                taskmail_request_id=taskmail_request_id,
+                packet_id=packet_id,
+                source_ingress_id=source_ingress_id,
+                degraded_mode=False,
+            ),
+        )
 
     def start(self) -> None:
         if not self.is_configured:
@@ -135,6 +371,11 @@ class PcControlPlaneClient:
 
     def stop(self, timeout_seconds: float = 5.0) -> None:
         self._stop_event.set()
+        if self.mailbox_lease_enabled and self._loop is not None and self._websocket is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(self._release_mailbox_lease(), self._loop).result(timeout=timeout_seconds)
+            except Exception:
+                LOGGER.debug("pc-control mailbox lease release skipped during shutdown", exc_info=True)
         if self._loop is not None and self._websocket is not None:
             try:
                 asyncio.run_coroutine_threadsafe(self._websocket.close(), self._loop).result(timeout=timeout_seconds)
@@ -142,6 +383,71 @@ class PcControlPlaneClient:
                 LOGGER.debug("pc-control websocket close skipped during shutdown", exc_info=True)
         if self._thread is not None:
             self._thread.join(timeout=max(1.0, timeout_seconds))
+
+    def _set_connection_state(self, *, connected: bool) -> None:
+        with self._control_lock:
+            self._lease_state["connected"] = connected
+            if connected:
+                if self.mailbox_lease_enabled and self._lease_state["status"] == "disabled":
+                    self._lease_state["status"] = "inactive"
+                return
+            if self.mailbox_lease_enabled:
+                self._lease_state["status"] = "inactive"
+                self._lease_state["reason"] = "pc-control disconnected"
+                self._lease_state["lease_holder_id"] = None
+                self._lease_state["lease_pc_id"] = None
+                self._lease_state["expires_at"] = None
+
+    def _update_lease_state_from_ack(self, payload: dict[str, Any]) -> None:
+        with self._control_lock:
+            self._lease_state["status"] = str(payload.get("lease_status") or "inactive")
+            self._lease_state["lease_epoch"] = payload.get("lease_epoch")
+            self._lease_state["expires_at"] = payload.get("expires_at")
+            self._lease_state["lease_holder_id"] = payload.get("lease_holder_id")
+            self._lease_state["lease_pc_id"] = payload.get("lease_pc_id")
+            self._lease_state["reason"] = payload.get("reason")
+            self._lease_state["degraded_mode"] = bool(payload.get("degraded_mode"))
+            self._lease_state["connected"] = True
+
+    def _synthetic_ingress_decision(
+        self,
+        *,
+        classification: str,
+        candidate_status: str,
+        candidate_reason: str | None,
+        degraded_mode: bool,
+    ) -> dict[str, Any]:
+        if candidate_status == "stale":
+            decision = "stale"
+        elif candidate_status == "invalid":
+            decision = "invalid"
+        elif candidate_status == "ignored":
+            decision = "ignored"
+        else:
+            decision = "accepted"
+        return {
+            "type": "ingress_decision",
+            "ingress_id": None,
+            "mailbox_key": self._mailbox_key or None,
+            "decision": decision,
+            "reason": candidate_reason,
+            "classification": classification,
+            "lease_holder_id": self._runner_id if not degraded_mode else None,
+            "lease_epoch": self.mailbox_lease_state().get("lease_epoch"),
+            "thread_id": None,
+            "session_id": None,
+            "degraded_mode": degraded_mode,
+        }
+
+    def _should_use_local_degraded_path(self) -> bool:
+        if self._lease_mode != "degraded":
+            return False
+        if not self._mailbox_key:
+            return True
+        state = self.mailbox_lease_state()
+        if state.get("connected"):
+            return False
+        return True
 
     def _run_thread(self) -> None:
         try:
@@ -160,6 +466,144 @@ class PcControlPlaneClient:
                 break
             await asyncio.sleep(2)
 
+    async def _rpc_async(
+        self,
+        *,
+        request_id: str,
+        trace_id: str,
+        payload_builder,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        websocket = self._websocket
+        send_lock = self._send_lock
+        connection_epoch = self._current_connection_epoch
+        if websocket is None or send_lock is None or connection_epoch is None:
+            raise RuntimeError("pc-control sidecar is not connected")
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        with self._control_lock:
+            self._pending_rpc_requests[request_id] = future
+        try:
+            payload = payload_builder(request_id, trace_id, connection_epoch)
+            await self._send_payload(websocket, payload, send_lock)
+            resolved = await asyncio.wait_for(future, timeout=timeout_seconds or max(5.0, self._heartbeat_interval_seconds))
+            return dict(resolved)
+        finally:
+            with self._control_lock:
+                self._pending_rpc_requests.pop(request_id, None)
+
+    def _rpc_call(self, *, request_id: str, trace_id: str, payload_builder, timeout_seconds: float | None = None) -> dict[str, Any]:
+        if self._loop is None:
+            raise RuntimeError("pc-control sidecar loop is not running")
+        future = asyncio.run_coroutine_threadsafe(
+            self._rpc_async(
+                request_id=request_id,
+                trace_id=trace_id,
+                payload_builder=payload_builder,
+                timeout_seconds=timeout_seconds,
+            ),
+            self._loop,
+        )
+        return future.result(timeout=(timeout_seconds or max(5.0, self._heartbeat_interval_seconds)) + 1.0)
+
+    def _resolve_rpc_response(self, parsed) -> bool:
+        if not isinstance(
+            parsed,
+            (PcMailboxLeaseAckMessage, PcIngressDecisionMessage, PcThreadBindingAckMessage, PcTerminalOutcomeAckMessage),
+        ):
+            return False
+        request_id = str(parsed.payload.get("request_id") or "").strip()
+        if not request_id:
+            return False
+        with self._control_lock:
+            future = self._pending_rpc_requests.get(request_id)
+        if future is None or future.done():
+            return False
+        payload = {"type": parsed.type, **dict(parsed.payload)}
+        future.set_result(payload)
+        return True
+
+    def _fail_pending_rpc_requests(self, exc: Exception) -> None:
+        with self._control_lock:
+            pending = list(self._pending_rpc_requests.values())
+            self._pending_rpc_requests = {}
+        for future in pending:
+            if not future.done():
+                future.set_exception(exc)
+
+    async def _maintain_mailbox_lease(self) -> None:
+        if not self.mailbox_lease_enabled or not self._mailbox_key:
+            return
+        state = self.mailbox_lease_state()
+        operation = "acquire"
+        lease_epoch = None
+        if state.get("status") == "active" and state.get("lease_holder_id") == self._runner_id:
+            expires_at = state.get("expires_at")
+            if expires_at:
+                try:
+                    expires_dt = datetime.fromisoformat(str(expires_at))
+                    remaining = (expires_dt - datetime.fromisoformat(self._clock())).total_seconds()
+                except Exception:
+                    remaining = 0.0
+                if remaining > max(5.0, self._lease_ttl_seconds / 2):
+                    return
+            operation = "renew"
+            lease_epoch = state.get("lease_epoch")
+        try:
+            response = await self._rpc_async(
+                request_id=self._next_request_id("mailbox_lease"),
+                trace_id=self._next_trace_id("mailbox_lease"),
+                payload_builder=lambda request_id, trace_id, connection_epoch: build_mailbox_lease(
+                    message_id=self._next_message_id("mailbox_lease"),
+                    trace_id=trace_id,
+                    pc_id=self._pc_id,
+                    connection_epoch=connection_epoch,
+                    sent_at=self._clock(),
+                    request_id=request_id,
+                    operation=operation,
+                    mailbox_key=self._mailbox_key,
+                    lease_holder_id=self._runner_id,
+                    lease_ttl_seconds=self._lease_ttl_seconds,
+                    lease_epoch=(None if lease_epoch is None else int(lease_epoch)),
+                    config_fingerprint=token_fingerprint(
+                        f"{self._config.imap_host}|{self._config.imap_user}|{self._config.new_task_max_age_minutes}"
+                    ),
+                    host_fingerprint=token_fingerprint(socket.gethostname()),
+                    runtime_fingerprint=token_fingerprint(self._runner_id),
+                    degraded_mode=False,
+                ),
+            )
+            self._update_lease_state_from_ack(response)
+        except Exception:
+            LOGGER.warning("pc-control mailbox lease maintenance failed", exc_info=True)
+            self._set_connection_state(connected=False)
+
+    async def _release_mailbox_lease(self) -> None:
+        if not self.mailbox_lease_enabled or not self._mailbox_key:
+            return
+        state = self.mailbox_lease_state()
+        if state.get("status") != "active" or state.get("lease_holder_id") != self._runner_id:
+            return
+        await self._rpc_async(
+            request_id=self._next_request_id("mailbox_lease_release"),
+            trace_id=self._next_trace_id("mailbox_lease_release"),
+            payload_builder=lambda request_id, trace_id, connection_epoch: build_mailbox_lease(
+                message_id=self._next_message_id("mailbox_lease"),
+                trace_id=trace_id,
+                pc_id=self._pc_id,
+                connection_epoch=connection_epoch,
+                sent_at=self._clock(),
+                request_id=request_id,
+                operation="release",
+                mailbox_key=self._mailbox_key,
+                lease_holder_id=self._runner_id,
+                lease_ttl_seconds=self._lease_ttl_seconds,
+                lease_epoch=int(state["lease_epoch"]),
+                degraded_mode=False,
+            ),
+            timeout_seconds=3.0,
+        )
+
     async def _connect_once(self) -> None:
         ssl_context = self._build_ssl_context()
         async with websockets.connect(
@@ -176,6 +620,7 @@ class PcControlPlaneClient:
             self._send_lock = send_lock
             connection_epoch = await self._perform_hello(websocket, send_lock)
             self._current_connection_epoch = connection_epoch
+            self._set_connection_state(connected=True)
             await self._send_workspace_snapshot(websocket, connection_epoch, send_lock)
             await self._flush_pending_client_messages(websocket, send_lock)
             await self._replay_output_chunks_after_reconnect(websocket, send_lock)
@@ -186,6 +631,8 @@ class PcControlPlaneClient:
                     send_lock=send_lock,
                 )
             )
+            if self.mailbox_lease_enabled:
+                await self._maintain_mailbox_lease()
             last_snapshot_at = self._monotonic()
             try:
                 while not self._stop_event.is_set() and not receiver_task.done():
@@ -193,6 +640,8 @@ class PcControlPlaneClient:
                     if stop_requested:
                         break
                     await self._send_heartbeat(websocket, connection_epoch, send_lock)
+                    if self.mailbox_lease_enabled:
+                        await self._maintain_mailbox_lease()
                     if self._monotonic() - last_snapshot_at >= self._snapshot_interval_seconds:
                         await self._send_workspace_snapshot(websocket, connection_epoch, send_lock)
                         last_snapshot_at = self._monotonic()
@@ -206,6 +655,8 @@ class PcControlPlaneClient:
                     await receiver_task
                 except asyncio.CancelledError:
                     pass
+                self._set_connection_state(connected=False)
+                self._fail_pending_rpc_requests(RuntimeError("pc-control sidecar disconnected"))
                 self._mark_output_chunk_replay_needed()
                 self._websocket = None
                 self._send_lock = None
@@ -224,7 +675,7 @@ class PcControlPlaneClient:
                 display_name=self._display_name,
                 client_version=self._client_version,
                 host_fingerprint=token_fingerprint(socket.gethostname()),
-                runtime_fingerprint=token_fingerprint(f"{self._pc_id}|{self._pc_control_url}"),
+                runtime_fingerprint=token_fingerprint(f"{self._runner_id}|{self._pc_control_url}"),
                 capabilities=capabilities,
             ),
             send_lock,
@@ -279,6 +730,10 @@ class PcControlPlaneClient:
                     parsed.payload["code"],
                     parsed.payload["message"],
                 )
+                continue
+            if self._resolve_rpc_response(parsed):
+                if isinstance(parsed, PcMailboxLeaseAckMessage):
+                    self._update_lease_state_from_ack(parsed.payload)
                 continue
             if isinstance(parsed, PcCommandDispatchMessage):
                 await self._handle_command_dispatch(
@@ -434,6 +889,31 @@ class PcControlPlaneClient:
         task_text = str(message.payload["payload"].get("task_text") or "").strip()
         if not task_text:
             return "invalid_command_payload", "new_task requires payload.task_text"
+        attachments_raw = message.payload["payload"].get("attachments") or []
+        if not isinstance(attachments_raw, list):
+            return "invalid_command_payload", "payload.attachments must be a list when provided"
+        for index, item in enumerate(attachments_raw):
+            if isinstance(item, str):
+                if item.strip():
+                    continue
+                continue
+            if not isinstance(item, dict):
+                return "invalid_command_payload", f"payload.attachments[{index}] must be a string or JSON object"
+            if not isinstance(item.get("name"), str) or not str(item.get("name") or "").strip():
+                return "invalid_command_payload", f"payload.attachments[{index}].name must be a non-empty string"
+            if not isinstance(item.get("content_type"), str) or not str(item.get("content_type") or "").strip():
+                return "invalid_command_payload", (
+                    f"payload.attachments[{index}].content_type must be a non-empty string"
+                )
+            if not isinstance(item.get("content_bytes_b64"), str) or not str(item.get("content_bytes_b64") or "").strip():
+                return "invalid_command_payload", (
+                    f"payload.attachments[{index}].content_bytes_b64 must be a non-empty string"
+                )
+            size_bytes = item.get("size_bytes")
+            if size_bytes is not None and (not isinstance(size_bytes, int) or size_bytes < 0):
+                return "invalid_command_payload", (
+                    f"payload.attachments[{index}].size_bytes must be a non-negative integer"
+                )
 
         return None, None
 
@@ -550,10 +1030,12 @@ class PcControlPlaneClient:
         if not isinstance(acceptance_raw, list):
             raise ValueError("payload.acceptance must be a list[str] when provided")
         acceptance = [str(item).strip() for item in acceptance_raw if str(item).strip()]
-        attachments_raw = command_payload.get("attachments") or []
-        if not isinstance(attachments_raw, list):
-            raise ValueError("payload.attachments must be a list[str] when provided")
-        attachments = [str(item).strip() for item in attachments_raw if str(item).strip()]
+        attachments = self._materialize_command_attachments(
+            command_id=str(message.payload["command_id"]),
+            repo_path=str(workspace.get("repo_path") or "").strip(),
+            workdir=(str(workspace.get("workdir") or "").strip() or None),
+            attachments_raw=command_payload.get("attachments") or [],
+        )
         timeout_minutes = int(command_payload.get("timeout_minutes") or self._config.default_timeout_minutes)
         mode = str(command_payload.get("mode") or "modify").strip() or "modify"
         now = self._clock()
@@ -581,6 +1063,73 @@ class PcControlPlaneClient:
                 str(policy.get("backend_transport") or "").strip()
                 or self._config.default_transport_for_backend(backend)
             ),
+        )
+
+    def _materialize_command_attachments(
+        self,
+        *,
+        command_id: str,
+        repo_path: str,
+        workdir: str | None,
+        attachments_raw: Any,
+    ) -> list[str]:
+        if not isinstance(attachments_raw, list):
+            raise ValueError("payload.attachments must be a list when provided")
+        normalized_paths = [str(item).strip() for item in attachments_raw if isinstance(item, str) and str(item).strip()]
+        inline_attachments = [
+            self._build_command_mail_attachment(item=item, index=index)
+            for index, item in enumerate(attachments_raw, start=1)
+            if isinstance(item, dict)
+        ]
+        if not inline_attachments:
+            return normalized_paths
+
+        envelope = MailEnvelope(
+            message_id=f"<pc-control-{self._sanitize_identifier(command_id, prefix='attachment')}@local>",
+            subject=f"pc-control attachments for {command_id}",
+            from_addr="pc-control@local",
+            to_addr="runner@local",
+            date=self._clock(),
+            body_text="pc-control inline attachments",
+            attachments=inline_attachments,
+        )
+        materialized = materialize_incoming_attachments(
+            envelope,
+            repo_path=repo_path,
+            workdir=workdir,
+            auto_create_workdir=False,
+            filename_prefix=_CONTROL_PLANE_ATTACHMENT_PREFIX,
+        )
+        materialized_paths = [
+            str(attachment.saved_path).strip()
+            for attachment in materialized.attachments
+            if str(attachment.saved_path or "").strip()
+        ]
+        if len(materialized_paths) != len(inline_attachments):
+            raise ValueError("failed to materialize all control-plane attachments")
+        return normalized_paths + materialized_paths
+
+    def _build_command_mail_attachment(
+        self,
+        *,
+        item: dict[str, Any],
+        index: int,
+    ) -> MailAttachment:
+        name = str(item.get("name") or "").strip()
+        content_type = str(item.get("content_type") or "").strip()
+        encoded_bytes = str(item.get("content_bytes_b64") or "").strip()
+        try:
+            content_bytes = base64.b64decode(encoded_bytes, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError(f"payload.attachments[{index - 1}].content_bytes_b64 is invalid base64") from exc
+
+        declared_size = item.get("size_bytes")
+        size_bytes = declared_size if isinstance(declared_size, int) and declared_size >= 0 else len(content_bytes)
+        return MailAttachment(
+            filename=name,
+            content_type=content_type,
+            size_bytes=size_bytes,
+            content_bytes=content_bytes,
         )
 
     def _workspace_by_id(self, workspace_id: str) -> dict[str, Any] | None:
@@ -1087,12 +1636,33 @@ class PcControlPlaneClient:
     @staticmethod
     def _parse_server_frame(
         payload: dict[str, Any],
-    ) -> PcHelloAckMessage | PcErrorMessage | PcCommandDispatchMessage | PcOutputResumeRequestMessage:
+    ) -> (
+        PcHelloAckMessage
+        | PcErrorMessage
+        | PcCommandDispatchMessage
+        | PcOutputResumeRequestMessage
+        | PcMailboxLeaseAckMessage
+        | PcIngressDecisionMessage
+        | PcThreadBindingAckMessage
+        | PcTerminalOutcomeAckMessage
+    ):
         try:
             parsed = parse_pc_control_server_message(payload)
         except PcControlProtocolError as exc:
             raise RuntimeError(str(exc)) from exc
-        if isinstance(parsed, (PcHelloAckMessage, PcErrorMessage, PcCommandDispatchMessage, PcOutputResumeRequestMessage)):
+        if isinstance(
+            parsed,
+            (
+                PcHelloAckMessage,
+                PcErrorMessage,
+                PcCommandDispatchMessage,
+                PcOutputResumeRequestMessage,
+                PcMailboxLeaseAckMessage,
+                PcIngressDecisionMessage,
+                PcThreadBindingAckMessage,
+                PcTerminalOutcomeAckMessage,
+            ),
+        ):
             return parsed
         raise RuntimeError("unsupported pc-control server frame")
 
@@ -1101,6 +1671,9 @@ class PcControlPlaneClient:
 
     def _next_trace_id(self, prefix: str) -> str:
         return f"trace:{prefix}:{self._pc_id}:{secrets.token_hex(4)}"
+
+    def _next_request_id(self, prefix: str) -> str:
+        return f"request:{prefix}:{self._pc_id}:{secrets.token_hex(4)}"
 
     def _next_snapshot_id(self) -> str:
         return f"snapshot:{self._pc_id}:{secrets.token_hex(4)}"
@@ -1113,6 +1686,8 @@ def build_pc_control_plane_client(
     heartbeat_interval_seconds: int = 15,
     snapshot_interval_seconds: int = 60,
 ) -> PcControlPlaneClient | None:
+    if not config.pc_control_sidecar_enabled:
+        return None
     relay_url = str(config.relay_url or "").strip()
     transport_token = str(config.relay_transport_token or "").strip()
     pc_id = str(config.relay_client_id or "").strip()
