@@ -25,6 +25,7 @@ from .phase3_subscription import (
 
 ANDROID_SESSION_SNAPSHOT_PATH = "/v1/android/session-snapshot"
 ANDROID_SESSION_SNAPSHOT_SCHEMA_VERSION = "taskmail-android-session-snapshot-facade-v1"
+_LATEST_SESSION_ACTION_TYPES = {"reply", "status", "pause", "resume", "kill", "end", "answers", "attachment_continuation"}
 
 
 def _timestamp() -> str:
@@ -73,13 +74,6 @@ def _build_request_from_query(query: dict[str, list[str]]) -> Phase3SubscribeSes
             error_message="session_id or thread_id is required",
             retryable=False,
         )
-    if session_id is not None and workspace_id is None and repo_path is None and thread_id is None:
-        raise AndroidSessionSnapshotFacadeError(
-            status_code=400,
-            error_code="invalid_payload",
-            error_message="session_id requires workspace_id, repo_path/workdir, or thread_id",
-            retryable=False,
-        )
 
     return Phase3SubscribeSessionDetailRequest(
         request_id=(
@@ -118,6 +112,60 @@ def _map_subscription_error(exc: Phase3SubscriptionError) -> AndroidSessionSnaps
     )
 
 
+def _latest_session_action_continuity(
+    *,
+    session_id: str,
+    workspace_id: str,
+    pc_control_runtime: PcControlRuntime | None,
+) -> dict[str, Any] | None:
+    if pc_control_runtime is None:
+        return None
+    matching_commands: list[dict[str, Any]] = []
+    for command in pc_control_runtime.list_commands():
+        if str(command.get("command_type") or "").strip() not in _LATEST_SESSION_ACTION_TYPES:
+            continue
+        if str(command.get("workspace_id") or "").strip() != workspace_id:
+            continue
+        if str(command.get("session_id") or "").strip() != session_id:
+            continue
+        if str(command.get("ack_status") or "").strip() == "" and not isinstance(command.get("result"), dict):
+            continue
+        matching_commands.append(command)
+    if not matching_commands:
+        return None
+    matching_commands.sort(
+        key=lambda item: (
+            str(item.get("acked_at") or ""),
+            str(item.get("created_at") or ""),
+            str(item.get("command_id") or ""),
+        ),
+        reverse=True,
+    )
+    latest = matching_commands[0]
+    continuity = {
+        "command_id": str(latest.get("command_id") or "").strip(),
+        "action_type": str(latest.get("command_type") or "").strip(),
+        "submit_ack": {
+            "ack_status": str(latest.get("ack_status") or "").strip() or None,
+            "queue_position": latest.get("queue_position"),
+            "reason": latest.get("reason"),
+            "error_code": latest.get("error_code"),
+        },
+        "created_at": str(latest.get("created_at") or "").strip() or None,
+        "acked_at": str(latest.get("acked_at") or "").strip() or None,
+        "pc_id": str(latest.get("pc_id") or "").strip() or None,
+    }
+    result = latest.get("result")
+    if isinstance(result, dict):
+        continuity["result_status"] = str(result.get("final_status") or "").strip() or None
+        structured_payload = result.get("structured_payload")
+        if isinstance(structured_payload, dict) and structured_payload.get("kind") == "session_action_result":
+            session_action_result = structured_payload.get("session_action_result")
+            if isinstance(session_action_result, dict):
+                continuity["session_action_result"] = dict(session_action_result)
+    return continuity
+
+
 def build_android_session_snapshot(
     *,
     query: dict[str, list[str]],
@@ -152,6 +200,11 @@ def build_android_session_snapshot(
             emitted_at=generated_at,
         )
         | {
+            "latest_session_action": _latest_session_action_continuity(
+                session_id=session_state.session_id,
+                workspace_id=session_state.workspace_id,
+                pc_control_runtime=pc_control_runtime,
+            ),
             "history_rounds": build_android_history_rounds(
                 session_state=session_state,
                 thread_state=thread_state,

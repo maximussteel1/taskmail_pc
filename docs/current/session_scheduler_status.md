@@ -12,8 +12,9 @@ As of 2026-03-14, the scheduler refactor is no longer just a proposal. The codeb
 - run artifacts still persist under `tasks/thread_xxx/`
 - workspace/session indexes persist under `tasks/_scheduler/workspaces/<workspace_id>/`
 - `WorkspaceState` and `SessionState` are derived from and kept in sync with `ThreadState`
-- the background runner now allows up to `max_active_sessions_per_workspace` active sessions per workspace
-- different workspaces can run concurrently up to the global `max_active_sessions` cap
+- the active working set is capped separately from running concurrency
+- active-session caps are now `max_active_sessions` globally plus `max_active_sessions_per_workspace` for one workspace
+- running concurrency caps are now `max_running_sessions` globally plus `max_running_sessions_per_workspace` for one workspace
 - follow-up work for a running session is queued on that same session
 - accepted and queued work can be recovered after runner restart, including automatic status-mail callbacks
 
@@ -30,14 +31,18 @@ What is still incomplete is the non-reply routing policy and any broader cross-w
 
 ### Scheduling rules
 
-- one workspace may now run multiple sessions concurrently up to `max_active_sessions_per_workspace` (default `2`)
-- different workspaces may run concurrently until the global `max_active_sessions` cap is reached
+- one workspace may now hold multiple `active` sessions up to `max_active_sessions_per_workspace`; when omitted it inherits the global `max_active_sessions` cap
+- one workspace may now run multiple sessions concurrently up to `max_running_sessions_per_workspace` (default `2`)
+- different workspaces may stay `active` until the global `max_active_sessions` cap is reached
+- different workspaces may run concurrently until the global `max_running_sessions` cap is reached
 - a running session can hold one queued follow-up snapshot
 - restarting the runner requeues persisted `accepted` work and preserves automatic `[RUNNING]` / terminal mail callbacks
 - restarting the runner promotes queued follow-up work if the previous run was interrupted and preserves automatic status-mail callbacks
 - restarting the runner marks an orphaned persisted `running` task as failed when no safe queued follow-up exists
-- `max_active_sessions` remains the active working-set cap and the global concurrency cap
-- `max_active_sessions_per_workspace` now separately controls how many sessions from the same workspace may run at once
+- `max_active_sessions` is now only the global active working-set cap
+- `max_active_sessions_per_workspace` is now the same-workspace active working-set cap
+- `max_running_sessions` is now the global running concurrency cap
+- `max_running_sessions_per_workspace` is now the same-workspace running concurrency cap
 
 ### Health visibility
 

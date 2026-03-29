@@ -232,7 +232,7 @@ def test_serial_task_runner_keeps_backend_session_resumable_after_kill(tmp_path)
 def test_serial_task_runner_queues_following_session_in_same_workspace(tmp_path) -> None:
     task_root = tmp_path / "tasks"
     dispatcher = Dispatcher(MockAdapter(sleep_seconds=0.5), MockAdapter(sleep_seconds=0.5))
-    runner = SerialTaskRunner(task_root, dispatcher, max_active_sessions_per_workspace=1)
+    runner = SerialTaskRunner(task_root, dispatcher, max_running_sessions_per_workspace=1)
     first = _snapshot("task_001", "thread_001")
     second = _snapshot("task_002", "thread_002")
 
@@ -325,7 +325,7 @@ def test_serial_task_runner_runs_different_workspaces_concurrently(tmp_path) -> 
 def test_serial_task_runner_runs_two_sessions_in_same_workspace_when_workspace_cap_allows_it(tmp_path) -> None:
     task_root = tmp_path / "tasks"
     dispatcher = Dispatcher(MockAdapter(sleep_seconds=0.5), MockAdapter(sleep_seconds=0.5))
-    runner = SerialTaskRunner(task_root, dispatcher, max_active_sessions=4, max_active_sessions_per_workspace=2)
+    runner = SerialTaskRunner(task_root, dispatcher, max_active_sessions=4, max_running_sessions_per_workspace=2)
     first = _snapshot("task_001", "thread_001")
     second = _snapshot("task_002", "thread_002")
 
@@ -357,7 +357,7 @@ def test_serial_task_runner_runs_two_sessions_in_same_workspace_when_workspace_c
 def test_serial_task_runner_queues_third_session_after_workspace_cap_is_reached(tmp_path) -> None:
     task_root = tmp_path / "tasks"
     dispatcher = Dispatcher(MockAdapter(sleep_seconds=0.5), MockAdapter(sleep_seconds=0.5))
-    runner = SerialTaskRunner(task_root, dispatcher, max_active_sessions=4, max_active_sessions_per_workspace=2)
+    runner = SerialTaskRunner(task_root, dispatcher, max_active_sessions=4, max_running_sessions_per_workspace=2)
     first = _snapshot("task_001", "thread_001")
     second = _snapshot("task_002", "thread_002")
     third = _snapshot("task_003", "thread_003")

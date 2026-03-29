@@ -24,9 +24,11 @@ _INT_FIELDS = {
     "new_task_max_age_minutes",
     "max_active_sessions",
     "max_active_sessions_per_workspace",
-    "monitor_window_refresh_seconds",
-    "monitor_window_buffer_lines",
-    "monitor_window_history_limit",
+    "max_running_sessions",
+    "max_running_sessions_per_workspace",
+    "active_session_window_refresh_seconds",
+    "active_session_window_buffer_lines",
+    "active_session_window_history_limit",
     "external_delivery_threshold_mb",
     "cos_presign_expire_seconds",
     "relay_timeout_seconds",
@@ -40,7 +42,7 @@ _FLOAT_FIELDS = {
 _BOOL_FIELDS = {
     "auto_create_workdir",
     "enable_web_search",
-    "spawn_monitor_windows",
+    "spawn_active_session_windows",
     "relay_verify_tls",
     "relay_auto_fallback_email",
 }
@@ -52,6 +54,16 @@ _MAP_FIELDS = {
 
 _LIST_FIELDS = {
     "project_sync_roots",
+}
+
+_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "max_active_sessions": ("max_concurrent_runs",),
+    "max_running_sessions": ("max_concurrent_runs",),
+    "max_running_sessions_per_workspace": ("max_active_sessions_per_workspace",),
+    "spawn_active_session_windows": ("spawn_monitor_windows",),
+    "active_session_window_refresh_seconds": ("monitor_window_refresh_seconds",),
+    "active_session_window_buffer_lines": ("monitor_window_buffer_lines",),
+    "active_session_window_history_limit": ("monitor_window_history_limit",),
 }
 
 
@@ -72,13 +84,15 @@ class AppConfig:
     default_timeout_minutes: int = 60
     new_task_max_age_minutes: int = 0
     max_active_sessions: int = 4
-    max_active_sessions_per_workspace: int = 2
+    max_active_sessions_per_workspace: int | None = None
+    max_running_sessions: int | None = None
+    max_running_sessions_per_workspace: int | None = 2
     auto_create_workdir: bool = False
     enable_web_search: bool = False
-    spawn_monitor_windows: bool = False
-    monitor_window_refresh_seconds: int = 5
-    monitor_window_buffer_lines: int = 1000
-    monitor_window_history_limit: int = 12
+    spawn_active_session_windows: bool = False
+    active_session_window_refresh_seconds: int = 5
+    active_session_window_buffer_lines: int = 1000
+    active_session_window_history_limit: int = 12
     opencode_command: str = ""
     codex_command: str = ""
     opencode_transport_default: str = BACKEND_TRANSPORT_SDK
@@ -112,6 +126,21 @@ class AppConfig:
     external_delivery_threshold_mb: int = 20
     cos_presign_expire_seconds: int = 7 * 24 * 60 * 60
 
+    def __post_init__(self) -> None:
+        self.max_active_sessions = max(1, int(self.max_active_sessions))
+        if self.max_active_sessions_per_workspace is None:
+            self.max_active_sessions_per_workspace = self.max_active_sessions
+        else:
+            self.max_active_sessions_per_workspace = max(1, int(self.max_active_sessions_per_workspace))
+        if self.max_running_sessions is None:
+            self.max_running_sessions = self.max_active_sessions
+        else:
+            self.max_running_sessions = max(1, int(self.max_running_sessions))
+        if self.max_running_sessions_per_workspace is None:
+            self.max_running_sessions_per_workspace = self.max_running_sessions
+        else:
+            self.max_running_sessions_per_workspace = max(1, int(self.max_running_sessions_per_workspace))
+
     def resolve_task_root(self, base_dir: str | Path | None = None) -> Path:
         root = Path(base_dir) if base_dir is not None else PROJECT_ROOT
         task_root = Path(self.task_root)
@@ -131,6 +160,22 @@ class AppConfig:
     @property
     def pc_control_sidecar_enabled(self) -> bool:
         return self.control_plane_mode != "mail_first"
+
+    @property
+    def spawn_monitor_windows(self) -> bool:
+        return self.spawn_active_session_windows
+
+    @property
+    def monitor_window_refresh_seconds(self) -> int:
+        return self.active_session_window_refresh_seconds
+
+    @property
+    def monitor_window_buffer_lines(self) -> int:
+        return self.active_session_window_buffer_lines
+
+    @property
+    def monitor_window_history_limit(self) -> int:
+        return self.active_session_window_history_limit
 
 
 def _coerce_value(field_name: str, value: Any) -> Any:
@@ -219,19 +264,21 @@ def load_config(path: str | None = None) -> AppConfig:
     for field_info in fields(AppConfig):
         field_name = field_info.name
         default_value = getattr(defaults, field_name)
-        legacy_field_name = "max_concurrent_runs" if field_name == "max_active_sessions" else None
-        if field_name in data:
-            values[field_name] = _coerce_value(field_name, data[field_name])
-        elif legacy_field_name and legacy_field_name in data:
-            values[field_name] = _coerce_value(field_name, data[legacy_field_name])
-        else:
-            values[field_name] = default_value
+        alias_names = _FIELD_ALIASES.get(field_name, ())
+        candidate_names = (field_name, *alias_names)
+
+        values[field_name] = default_value
+        for candidate_name in candidate_names:
+            if candidate_name in data:
+                values[field_name] = _coerce_value(field_name, data[candidate_name])
+                break
 
         env_name = f"{ENV_PREFIX}{field_name.upper()}"
-        legacy_env_name = f"{ENV_PREFIX}{legacy_field_name.upper()}" if legacy_field_name else None
-        if field_name not in _MAP_FIELDS and env_name in os.environ:
-            values[field_name] = _coerce_value(field_name, os.environ[env_name])
-        elif field_name not in _MAP_FIELDS and legacy_env_name and legacy_env_name in os.environ:
-            values[field_name] = _coerce_value(field_name, os.environ[legacy_env_name])
+        alias_env_names = tuple(f"{ENV_PREFIX}{alias_name.upper()}" for alias_name in alias_names)
+        if field_name not in _MAP_FIELDS:
+            for candidate_env_name in (env_name, *alias_env_names):
+                if candidate_env_name in os.environ:
+                    values[field_name] = _coerce_value(field_name, os.environ[candidate_env_name])
+                    break
 
     return AppConfig(**values)

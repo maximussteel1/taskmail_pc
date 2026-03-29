@@ -6,7 +6,7 @@
 
 ## 状态
 
-- 日期：2026-03-27
+- 日期：2026-03-29
 - 目的：冻结当前 repo-side `GET /v1/android/session-snapshot` 的已实现行为
 - 范围：locator、鉴权、错误面，以及当前 first-pass `session summary + session_snapshot` 返回形态
 - 补充：`session_snapshot.history_rounds` 的 round-level 字段与排序规则，另见 `android_session_history_rounds_contract.md`
@@ -34,13 +34,10 @@
 当前最小命中规则：
 
 - `thread_id` 单独即可
-- `session_id` 不能单独使用
-- `session_id` 需要配合以下任一条件：
-  - `workspace_id`
-  - `repo_path + workdir`
-  - `thread_id`
+- `session_id` 单独也可使用，但前提是 repo-side 能唯一命中一个 canonical session
+- `workspace_id`、`repo_path + workdir`、`thread_id` 当前都降为 supporting locator / 一致性校验
 
-当前 repo-side 不会对 `session_id` 做跨 workspace 猜测。
+当前 repo-side 不会对多命中的 `session_id` 做跨 workspace 猜测；如果 `session_id` 不能唯一命中 canonical session，会固定返回 `409 session_binding_unresolved`。
 
 ## 3. 顶层返回
 
@@ -126,6 +123,7 @@
 - `paused_from_status`
 - `question_state`
 - `timeline_items`
+- `latest_session_action`
 - `history_rounds`
 
 这里的 `status` 不是原始 `SessionState.status`，而是当前 detail 投影使用的 normalized wire status。
@@ -145,7 +143,41 @@
 - `SessionState.status = waiting_user`
 - `session_snapshot.status = awaiting_user_input`
 
-### 6.1 `history_rounds`
+### 6.1 `latest_session_action`
+
+当前 `session_snapshot.latest_session_action` 是一个可选 continuity projection。
+
+它当前的职责只有一个：
+
+- 当 repo-side 已经在 `pc_control` ledger 中看见当前 session 的最近一条 `reply|status|pause|resume|kill|end|answers|attachment_continuation` command 时，把最小 `command_id` continuity 暴露给 Android
+
+当前返回为：
+
+- `null`，如果 repo-side 还没有可归属到当前 session 的最近 `reply|status|pause|resume|kill|end|answers|attachment_continuation` command
+- object，如果 repo-side 已能从当前 `pc_control` command ledger 投影出最近一条 current-session `reply|status|pause|resume|kill|end|answers|attachment_continuation`
+
+当前 object 最少包含：
+
+- `command_id`
+- `action_type`
+- `submit_ack`
+- `created_at`
+- `acked_at`
+- `pc_id`
+
+当 repo-side 已经记录到该 command 的 canonical `session_action_result` 时，当前还会增量返回：
+
+- `result_status`
+- `session_action_result`
+
+固定边界：
+
+1. 这块 continuity 当前来源于 repo-side `pc_control` command ledger，不是 task-root 原生字段。
+2. 它当前只服务于 current-session session-action first slice `reply/status/pause/resume/kill/end/answers/attachment_continuation` 的 `command_id` continuity。
+3. 它不代表全 action family 都已进入 current contract。
+4. 它不把 `submit_ack` 升格为最终业务结果；最终 user-visible outcome 仍以后续 canonical mail / snapshot 投影为准。
+
+### 6.2 `history_rounds`
 
 当前 `history_rounds` 是挂在 `session_snapshot` 下的增量历史快照字段。
 
@@ -173,7 +205,8 @@
 - relay 未配置 `task_root`：`503 task_root_unavailable`
 - locator 缺失或结构不合法：`400 invalid_payload`
 - session 无法命中：`404 session_not_found`
-- locator 与 canonical identity 冲突：`409 workspace_identity_mismatch` 或其他同类 identity conflict
+- `session_id` 多命中且 supporting locator 仍不足以唯一解析：`409 session_binding_unresolved`
+- locator 与 canonical identity 冲突：`409 workspace_identity_mismatch`、`409 session_identity_mismatch` 或其他同类 identity conflict
 
 当前这些错误都不会被 repo-side 自动降级成“猜一个最近 session”。
 

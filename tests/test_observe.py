@@ -489,7 +489,8 @@ def test_follow_thread_live_replays_recent_transcript_and_live_stream(tmp_path: 
 
     output = capsys.readouterr().out
     assert exit_code == 0
-    assert "Live Thread Monitor: thread_001" in output
+    assert "Active Session Window: thread_001" in output
+    assert "Current State: lifecycle=active | status=running | task=task_run | transport=sdk" in output
     assert "Please continue the refactor." in output
     assert "I am applying the patch now." in output
     assert "tool.started | pytest -q" not in output
@@ -528,8 +529,9 @@ def test_follow_thread_live_keeps_active_done_thread_open_until_iteration_limit(
 
     output = capsys.readouterr().out
     assert exit_code == 0
-    assert "Live Thread Monitor: thread_001" in output
-    assert "monitor closed" not in output
+    assert "Active Session Window: thread_001" in output
+    assert "Session Note: this window stays open while lifecycle=active, even when no backend run is currently executing." in output
+    assert "active session window closed" not in output
 
 
 def test_follow_thread_live_closes_for_non_active_thread(tmp_path: Path, capsys) -> None:
@@ -570,7 +572,7 @@ def test_follow_thread_live_closes_for_non_active_thread(tmp_path: Path, capsys)
     output = capsys.readouterr().out
     exit_state = json.loads(exit_state_path.read_text(encoding="utf-8"))
     assert exit_code == 0
-    assert "monitor closed: session is no longer active." in output
+    assert "active session window closed: session is no longer active." in output
     assert exit_state == {"reason": "inactive", "thread_id": "thread_001"}
 
 

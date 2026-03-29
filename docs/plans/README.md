@@ -37,6 +37,8 @@
 - `vps_first_multi_pc_control_plane_mainline_v0.1.md`
 - `vps_first_multi_pc_phase1_execution_plan_v0.1.md`
 - `android_facing_environment_inventory_facade_requirements_v0.1.md`
+- `android_facing_session_action_facade_requirements_v0.1.md`
+- `android_facing_session_action_facade_preflight_checklist_v0.1.md`
 - `repo_only_preflight_queue_v0.1.md`
 - `vps_file_surface_cutover_and_cos_decommission_checklist_v0.1.md`
 - `vps_first_multi_pc_phase1_slice_abc_implementation_design_v0.1.md`

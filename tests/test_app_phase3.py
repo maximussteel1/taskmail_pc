@@ -979,9 +979,42 @@ def test_process_once_auto_ends_oldest_active_session_when_creating_fifth_one(tm
     assert stats == {"fetched": 1, "processed": 1, "skipped": 0, "failed": 0}
     assert load_thread_state("thread_001", task_root).lifecycle == "ended"
     assert load_thread_state("thread_005", task_root).lifecycle == "active"
-    assert "Auto-ended least recently active session(s) to keep the active working set within 4: thread_001" in (
+    assert "Auto-ended least recently active session(s) to keep the active working set within global=4 and workspace=4: thread_001" in (
         client.sent_messages[0]["body"]
     )
+
+
+def test_process_once_auto_ends_oldest_same_workspace_active_session_when_workspace_cap_is_hit(tmp_path) -> None:
+    task_root = tmp_path / "tasks"
+    _create_finished_thread(task_root, "thread_001", last_active_at="2026-03-12T12:01:00", updated_at="2026-03-12T12:01:00")
+    _create_finished_thread(task_root, "thread_002", last_active_at="2026-03-12T12:02:00", updated_at="2026-03-12T12:02:00")
+    adapter = RecordingAdapter()
+    dispatcher = Dispatcher(adapter, adapter)
+    envelope = MailEnvelope(
+        message_id="<root-workspace-cap@example.com>",
+        subject="[OC] Workspace scoped task",
+        from_addr="user@example.com",
+        to_addr="user@example.com",
+        date="2026-03-12T12:05:00",
+        body_text="Repo: D:\\repo\nWorkdir: src\nTask:\nCreate another active thread in the same workspace.\n",
+        raw_headers={"Subject": "[OC] Workspace scoped task"},
+    )
+    client = FakeMailClient([envelope])
+    config = AppConfig(
+        from_addr="user@example.com",
+        from_name="Mail Runner",
+        task_root="tasks",
+        max_active_sessions=8,
+        max_active_sessions_per_workspace=2,
+    )
+
+    stats = process_once(config, base_dir=tmp_path, mail_client=client, dispatcher=dispatcher)
+
+    assert stats == {"fetched": 1, "processed": 1, "skipped": 0, "failed": 0}
+    assert load_thread_state("thread_001", task_root).lifecycle == "ended"
+    assert load_thread_state("thread_002", task_root).lifecycle == "active"
+    assert load_thread_state("thread_003", task_root).lifecycle == "active"
+    assert "global=8 and workspace=2: thread_001" in client.sent_messages[0]["body"]
 
 
 def test_process_once_reactivating_ended_thread_auto_ends_oldest_other_active_thread(tmp_path) -> None:

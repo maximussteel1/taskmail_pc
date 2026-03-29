@@ -169,7 +169,7 @@ if (-not [string]::IsNullOrWhiteSpace($ThreadId)) {
             $ThreadId,
             "--runtime-dir", $resolvedRuntimeDir,
             "--config", $resolvedConfigPath,
-            "--source", "monitor_window"
+            "--source", "active_session_window"
         )
         if (-not [string]::IsNullOrWhiteSpace($TaskRoot)) {
             $controlArgs += @("--task-root", $resolvedTaskRoot)
@@ -186,14 +186,15 @@ if (-not [string]::IsNullOrWhiteSpace($ThreadId)) {
         }
     }
 
-    Write-Host "Mail Runner Monitor"
+    Write-Host "Mail Runner Active Session"
     Write-Host "Config: $resolvedConfigPath"
     Write-Host "Runtime Dir: $resolvedRuntimeDir"
-    Write-Host "Focused Thread: $ThreadId"
+    Write-Host "Focused Session Thread: $ThreadId"
     Write-Host "Poll Seconds: $RefreshSeconds"
     Write-Host "Buffer Lines: $MaxBufferLines"
     Write-Host "History Limit: $HistoryLimit"
-    Write-Host "Kill Command: .\\scripts\\monitor_mail_runner.cmd -ThreadId $ThreadId -RequestKill"
+    Write-Host "Close Semantics: closing this focused window requests a local close for the active session."
+    Write-Host "Kill Command: .\\scripts\\active_session_window.cmd -ThreadId $ThreadId -RequestKill"
     Write-Host ""
 
     $followArgs = @($observeBaseArgs)
@@ -267,7 +268,7 @@ while ($true) {
     }
 
     Write-Host ""
-    Write-Host "Press Ctrl+C to close this monitor window."
+    Write-Host "Press Ctrl+C to close this window."
 
     $iteration += 1
     if ($Iterations -gt 0 -and $iteration -ge $Iterations) {

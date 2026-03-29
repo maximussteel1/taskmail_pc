@@ -33,8 +33,8 @@
 - 支持 `profile` 字段在 snapshot / thread state / action 中持久化，并在真实 adapter 中按后端映射到实际 model 参数
 - 支持 `permission` 字段在 snapshot / thread state / session state / action 中持久化；缺省 reply 会继承当前权限，`highest` 会映射到 `Codex` 的危险直通模式和 `OpenCode` 的 run-scoped overlay
 - 支持在 thread/session/run 结果中持久化 `backend_session_id`，并在后续 `/resume` 时走 native `codex exec resume` / `opencode run --session`
-- 支持 `tasks/_scheduler/workspaces/...` 下的 `workspace_state.json` / `session_state.json` 索引，用于 session 列表、same-workspace 并发上限控制和排队恢复
-- 支持后台队列调度：同一个 `workspace(repo_path + workdir)` 内最多并行 `2` 个 session，不同 workspace 在统一的 `max_active_sessions` 上限内并发
+- 支持 `tasks/_scheduler/workspaces/...` 下的 `workspace_state.json` / `session_state.json` 索引，用于 session 列表、same-workspace active/running 上限控制和排队恢复
+- 支持后台队列调度：`active` working set 与 `running` 并发已拆分；默认全局 active 上限 `4`、同 workspace active 上限继承全局、全局 running 上限 `4`、同 workspace running 上限 `2`
 - 支持同一 session 运行中暂存 follow-up snapshot，当前 run 结束后继续；runner 重启时可恢复 `accepted` / queued 状态，并把遗留 `running` 标记为失败
 - Windows 下在 `opencode_command` / `codex_command` 为空时，会优先自动发现 `opencode.cmd` / `codex.cmd`
 - 支持将 `opencode_command: demo` / `codex_command: demo` 作为本地演示后端，用于不消耗真实模型额度的验证
@@ -55,7 +55,7 @@
 ## Session Lifecycle
 
 - Thread/session persistence now carries `lifecycle: active|ended` plus `last_active_at` and `last_progress_at`.
-- The active working set is controlled by `max_active_sessions` (default `4`); background execution now also uses `max_active_sessions_per_workspace` (default `2`) to cap same-workspace concurrency. If a new task or ended-thread reactivation would exceed the active working-set cap, the oldest non-running active session is auto-ended.
+- The active working set now uses `max_active_sessions` as the global cap and `max_active_sessions_per_workspace` as the same-workspace cap. Running concurrency is now split out to `max_running_sessions` globally and `max_running_sessions_per_workspace` per workspace. If a new task or ended-thread reactivation would exceed either active-session cap, the oldest non-running active session is auto-ended.
 - Replying with `/end` on a non-running thread marks the same thread/session as `ended` without rewriting its last run status; `/resume` can reactivate that same thread back into the active working set.
 - `mail_runner.observe` now surfaces active vs ended counts and shows lifecycle details in thread/session views.
 
@@ -110,7 +110,7 @@ task.md
 - reply 邮件只能命中已有 session，解析优先级是 `In-Reply-To` / `References` -> `state capsule` -> 主题里的 `[S:session_id]`
 - 普通 reply、`/resume` 和回答 `[QUESTION]` 都会优先续接已有 native backend context；显式 `/new` 会从当前对话里开启 fresh session
 - 如果 thread 已经 `[FAILED]` 且缺少可恢复的 `backend_session_id`，继续回复会自动退化为“基于最近 snapshot 的 fresh recovery run”，同时在 `[ACCEPTED]` 邮件里说明这是恢复重跑
-- 后台调度遵循“同一 workspace 最多同时跑 `2` 个 session；不同 workspace 在统一的 `max_active_sessions` 上限内可并发”
+- 后台调度现在区分 `active` 与 `running`：默认情况下，同一 workspace 的 active 上限继承 `max_active_sessions`，而 running 上限由 `max_running_sessions_per_workspace`（默认 `2`）控制；不同 workspace 分别受全局 active 上限 `max_active_sessions` 和全局 running 上限 `max_running_sessions` 控制
 - 如果同一 session 运行中又收到 follow-up，runner 会暂存 `queued_task_id` / `queued_snapshot_file`，当前 run 结束后继续
 
 剩余的调度差距和后续扩展项记录在 [docs/current/session_scheduler_status.md](docs/current/session_scheduler_status.md)。
@@ -139,21 +139,25 @@ task.md
 - `opencode_profile_models` / `codex_profile_models`
   表示后端自己的 `profile -> model` 映射。邮件和 snapshot 里只允许出现 `fast` / `strong` / `vision` 这类 profile 标签，不直接出现 raw model id。
 - `max_active_sessions: 4`
-  表示 active working set 上限，同时也是全局最多允许多少个 session 同时运行。
-- `max_active_sessions_per_workspace: 2`
-  表示同一个 `workspace(repo + workdir)` 最多允许多少个 session 同时运行；超过这个上限时，同 workspace 的后续 session 会进入队列等待。
+  表示全局 active working set 上限。
+- `max_active_sessions_per_workspace: 4`
+  表示同一个 `workspace(repo + workdir)` 的 active 上限；省略时默认继承 `max_active_sessions`。
+- `max_running_sessions: 4`
+  表示全局 `running` 并发上限。
+- `max_running_sessions_per_workspace: 2`
+  表示同一个 `workspace(repo + workdir)` 的 `running` 并发上限；超过这个上限时，同 workspace 的后续 session 会进入队列等待。
 - `auto_create_workdir: false`
   表示默认要求 `Repo + Workdir` 已存在；若设为 `true`，当 `Repo` 已存在且 `Workdir` 是仓库内的相对路径时，会在执行前自动创建该目录。
 - `enable_web_search: false`
   表示是否给真实后端打开联网搜索能力。`Codex` 会附加 `--search`，`OpenCode` 会注入 `OPENCODE_ENABLE_EXA=1`。
-- `spawn_monitor_windows: false`
-  Windows-only。设为 `true` 后，后台轮询模式会为每个进入 `running` 的 thread 自动拉起一个聚焦监控窗口；窗口复用 `scripts\monitor_mail_runner.ps1`，只要该 thread 仍处于 `active` 就持续保留，脱离 `active` 后自动关闭。自动拉起前 controller 还会再检查一次 thread 是否仍为 `active`，避免线程刚结束时窗口一闪而退。
-- `monitor_window_refresh_seconds: 5`
-  表示上述聚焦监控窗口的轮询周期（秒）；窗口会按这个周期增量抓取新 transcript turn 和新的 live stream 事件，而不是整屏重绘。
-- `monitor_window_buffer_lines: 1000`
-  表示 Windows 聚焦监控窗口的控制台 scrollback 上限；脚本会尽量把窗口缓冲区限制在最近这些行，避免窗口内容无限增长。
-- `monitor_window_history_limit: 12`
-  表示聚焦监控窗口启动时最多回放多少个已归档 transcript turn；后续新增内容仍会继续增量追加。
+- `spawn_active_session_windows: false`
+  Windows-only。设为 `true` 后，后台轮询模式会为每个进入 `running` 的 thread 自动拉起一个聚焦 active-session window。这个窗口绑定的是 active session，不是单次 run：只要该 thread 仍处于 `active` 就持续保留，即使状态已经变成 `done` / `waiting_user` / `paused` 也会继续显示当前 session state；脱离 `active` 后自动关闭。当前仍兼容 legacy 键名 `spawn_monitor_windows`。
+- `active_session_window_refresh_seconds: 5`
+  表示上述聚焦 active-session window 的轮询周期（秒）；窗口会按这个周期增量抓取新 transcript turn、live stream 事件和当前 session state，而不是整屏重绘。当前仍兼容 legacy 键名 `monitor_window_refresh_seconds`。
+- `active_session_window_buffer_lines: 1000`
+  表示 Windows 聚焦 active-session window 的控制台 scrollback 上限；脚本会尽量把窗口缓冲区限制在最近这些行，避免窗口内容无限增长。当前仍兼容 legacy 键名 `monitor_window_buffer_lines`。
+- `active_session_window_history_limit: 12`
+  表示聚焦 active-session window 启动时最多回放多少个已归档 transcript turn；后续新增内容仍会继续增量追加。当前仍兼容 legacy 键名 `monitor_window_history_limit`。
 - `project_sync_roots`
   表示首封 `[SYNC]` 项目目录同步动作允许扫描的根路径列表。默认值是 `D:\projects` 和 `E:\projects`；回复只会列出这些根下的一级文件夹，不递归，不列文件。
 - `cos_region` / `cos_bucket` / `cos_secret_id` / `cos_secret_key`
@@ -203,6 +207,7 @@ task.md
 ```powershell
 .\scripts\start_mail_runner.cmd
 .\scripts\restart_mail_runner.cmd
+.\scripts\active_session_window.cmd
 .\scripts\monitor_mail_runner.cmd
 .\scripts\fetch_bot_mails.cmd
 .\scripts\fetch_user_mails.cmd
@@ -223,10 +228,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\safe_shutdown_mail
 - `loop.pid` 现在会记录 launcher/host 两个 pid，便于在受限 shell 下稳定 `stop / restart`
 - `status` 会先显示 `host_state.json`，再显示当前进程信息；拿不到完整命令行时会退回到 pid 文件 / host state 的有限视图
 - `mail_runner.observe` 是最小可观测 CLI，只读现有状态文件，不引入新的持久化层；当前支持 `show-thread-live` 做静态快照，也支持 `follow-thread-live` 以 append-only 方式持续输出 thread transcript 增量和当前 `sdk` live stream
-- `monitor_mail_runner.cmd` 会弹出独立监控窗口；不带线程号时仍循环显示 `status / running / queue`，聚焦单个 thread 时例如 `.\scripts\monitor_mail_runner.cmd -ThreadId thread_048` 会切到 append-only live follow 视图，不再整屏刷新
-- 在当前低配版里，`Ctrl+C`、直接点窗口右上角 `X`、或关闭 terminal tab/pane，都只会结束监控窗口本身，不会自动结束对应的 running thread
-- 如需从 PC 侧请求结束当前 running thread，必须显式执行 `.\scripts\monitor_mail_runner.cmd -ThreadId thread_048 -RequestKill`
-- 当 `spawn_monitor_windows: true` 时，后台轮询模式还会在 Windows 上为每个进入 `running` 的 thread 自动拉起一个聚焦监控窗口；这些自动窗口会聚焦 `follow-thread-live <thread_id>`，并应用 `monitor_window_buffer_lines` 与 `monitor_window_history_limit`，只在对应 thread 仍为 `active` 时保留，脱离 `active` 后自行退出
+- `active_session_window.cmd` 是当前首选的聚焦 active-session window 入口；legacy 的 `monitor_mail_runner.cmd` 仍保留为兼容别名。不带线程号时仍循环显示 `status / running / queue` 总览；带 `-ThreadId` 时会切到 append-only live follow 视图，并持续打印当前 session state
+- 对聚焦 active-session window 来说，`Ctrl+C`、右上角 `X`、或关闭 terminal tab/pane，不再应理解成“只关 UI”；如果对应 thread 仍处于 `active`，controller 会补发本地 close request，必要时先结束当前 run，再在不运行后把该 session 标记为 `ended`。总览窗口关闭时仍不会改动后端状态
+- 如需从 PC 侧显式请求结束当前 running thread，执行 `.\scripts\active_session_window.cmd -ThreadId thread_048 -RequestKill`；legacy 的 `monitor_mail_runner.cmd` 入口仍可用
+- 当 `spawn_active_session_windows: true` 时，后台轮询模式会在 Windows 上为每个进入 `running` 的 thread 自动拉起一个聚焦 active-session window；这些自动窗口会聚焦 `follow-thread-live <thread_id>`，应用 `active_session_window_buffer_lines` 与 `active_session_window_history_limit`，并把当前 session state 一起显示出来。窗口在 thread 仍为 `active` 时保留，脱离 `active` 后自行退出；runtime dir 下的持久化窗口状态还会帮助 host 重启后避免重复拉起。legacy 键名 `spawn_monitor_windows` 仍接受
 - `fetch_bot_mails.cmd` 会默认抓取 bot mailbox，并把结果写到 `._tmp_live_mail_runner\recent_bot_100_mails.json`
 - `fetch_user_mails.cmd` 会默认抓取 user mailbox，并把结果写到 `._tmp_live_mail_runner\recent_user_100_mails.json`
 - `restart` 会先停止旧的 mail-runner 进程链，再用最新代码重启后台轮询
@@ -543,7 +548,7 @@ question_id: phase2_device_validation
 ## 当前限制
 
 - 当前仍然只支持单用户、本地、文件系统落盘，不提供数据库、Web UI、多租户或分布式 worker
-- `--once` 仍然是同步批处理；只有 `--loop` / 后台 runner 路径才会利用队列和 `max_active_sessions`
+- `--once` 仍然是同步批处理；只有 `--loop` / 后台 runner 路径才会利用队列以及 `active` / `running` 两层上限
 - 非 reply 新邮件当前总是创建 fresh session；“按 workspace + 标题自动复用已有 session” 还没有落地
 - `/sessions` 现在仍是当前 workspace 的发现入口，但会附带可复制的 targeted command 提示；同 workspace 下可以直接用 `/status <session_id>`、`/last <session_id>`、`/continue <session_id>` 等显式命中目标 session
 - reply 线程恢复现在只接受显式 session 线索：优先 header，再用 state capsule，最后才用 subject 里的 `[S:session_id]` 标签；不再使用“同主题自动接旧 session”的兜底策略

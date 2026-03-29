@@ -6,7 +6,7 @@
 
 ## Status
 
-- Date: 2026-03-25
+- Date: 2026-03-29
 - Purpose: handoff document for the Android side that needs to communicate with the current `mail_based_task_manager`
 - Scope: current Android send/read contract, current relay boundary, the optional direct `new_task` ingress, the optional bootstrap `[SYNC]` direct v1/v2 slices, the optional shared `/control` bootstrap v2 slice, the optional relay-side `/control transport_probe` harness slice, the optional current-session direct `/status` / plain `reply` slice, the optional Phase 3 v1 active-session-detail direct read sidecar, and current relay-hosted file-surface delivery notes
 
@@ -23,6 +23,7 @@ Current direct exceptions:
 
 - when the relay operator enables TaskMail direct ingress, Android may submit the first `new_task` action to `/relay`
 - when the relay operator provisions the Android-facing create-session facade, Android may also `POST /v1/android/create-session`
+- when the relay operator provisions the Android-facing session-action facade first slice, Android may also `POST /v1/android/session-action`
 - when the relay operator enables TaskMail direct ingress, Android may also submit the bootstrap `sync_project_folders` action to `/relay`
 - when the relay operator provisions the current shared `/control` slice, Android may also submit bootstrap `sync_project_folders` to `/control`
 - when the relay operator provisions the current shared `/control` session-action slice, Android may also submit current-session direct `/status` and plain `reply` to `/control`
@@ -48,10 +49,29 @@ Current direct exceptions:
 - this Phase 3 path is read-side only and is limited to `session_snapshot` / `session_delta` freshness for one active session detail view
 - oversized relay-hosted artifacts may now surface to Android as `/v1/files` download links inside normal task mail, but `/v1/files` is not a general Android control API
 - current `/v1/files` download links are still transport-token-protected, not anonymous public URLs; Android should only consume them inside explicitly provisioned direct/debug scopes that already own the transport token
-- current `POST /v1/android/create-session` is a thin app-facing facade, not a `/pc-control` or `/debug/pc-control/dispatch` rebranding; it accepts `pc_id / workspace_id / prompt / execution_policy` plus optional `repo_path / workdir`
+- current `POST /v1/android/create-session` is a thin app-facing facade, not a `/pc-control` or `/debug/pc-control/dispatch` rebranding; it accepts `pc_id / workspace_id / prompt / canonical_reply_recipient / execution_policy` plus optional `repo_path / workdir`
 - current facade success returns `command_id + submit_ack`; when `submit_ack.ack_status=accepted|accepted_but_queued`, the same submit window also returns `session_binding(session_id/pc_id/workspace_id)`
+- current create-session also writes `canonical_reply_recipient` into durable session state, so fresh Android-created sessions do not need historical inbound raw mail before the first session-action
 - current facade-facing rejected `submit_ack.error_code` is fixed to: `unsupported_backend`, `unsupported_profile`, `unsupported_permission`, `profile_model_unresolved`, `workspace_unavailable`, `pc_offline`
 - current facade auth is a dedicated `Authorization: Bearer <android_app_token>` admission, separate from the internal relay transport token
+- current `POST /v1/android/session-action` is the current-session session-action companion facade, not a `/control` or `/relay` rebranding; it currently accepts `request_id / action / target.session_id` plus optional supporting `target.workspace_id / target.thread_id`
+- current session-action facade scope is the current-session first slice `reply|status|pause|resume|kill|end|answers|attachment_continuation`
+- current `pause / resume / kill / end` first-slice body shape is an empty object at `pause` / `resume` / `kill` / `end`
+- current `answers` first-slice body shape is `answers.question_answers[]`, where each item includes canonical `question_id + value`
+- current `attachment_continuation` first-slice body shape is `attachment_continuation.attachments[]` plus optional `attachment_continuation.reply_text`
+- current `attachment_continuation` is still bridge-to-mail: the server first materializes the inline attachments into the target workdir and then reuses the canonical attachment-bearing reply mail semantics for continuation / answer recovery
+- current session-action facade success returns `command_id + submit_ack + target_session_identity(pc_id/workspace_id/session_id/thread_id)`
+- current session-action recipient resolution now reads durable `canonical_reply_recipient` first; legacy mail-born sessions may still fallback to historical inbound mail recovery
+- current rejected `submit_ack.error_code` may now also return `session_recipient_unresolved` when the target session exists but has no canonical reply-recipient binding
+- current session-action facade first slice now resolves current-session route on the server side with `session_id` as the primary target identity; `target.workspace_id` and `target.thread_id` are only supporting identity / diagnostics and are validated against the resolved canonical session when present
+- current first `accepted` and first `accepted_but_queued` both return `HTTP 200`
+- current same-`request_id` replay for the same canonical payload currently reuses the same `command_id` and submit response, and also returns `HTTP 200`
+- current same-`request_id` with a different canonical payload returns `HTTP 409 request_id_conflict`
+- current `session_id`-only lookup succeeds only when repo-side can resolve one unique canonical session; ambiguous `session_id` lookup currently returns `409 session_binding_unresolved` rather than guessing
+- current `request_id` ledger is a narrow first-slice app-facing idempotency seam for `reply|status|pause|resume|kill|end|answers|attachment_continuation`; this should still not be read as the fully frozen long-term all-action idempotency contract
+- current session-action facade auth is the same dedicated `Authorization: Bearer <android_app_token>` admission used by `create-session`, separate from the internal relay transport token
+- current `GET /v1/android/session-snapshot` also supports `session_id`-only lookup under the same rule: unique `session_id` succeeds, supporting locators are consistency checks only, and ambiguous `session_id` returns `409 session_binding_unresolved`
+- current `GET /v1/android/session-snapshot` may also include `session_snapshot.latest_session_action`, which is a conservative read-side projection of the latest current-session `reply|status|pause|resume|kill|end|answers|attachment_continuation` command continuity and exposes the minimum `command_id` join key for the app-facing first slice
 
 Android should **not** implement the VPS relay WebSocket protocol as a general-purpose or primary app protocol in the current phase.
 

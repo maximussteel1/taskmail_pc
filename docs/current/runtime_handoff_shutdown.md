@@ -8,7 +8,7 @@
 
 - `scripts/manage_mail_runner.ps1 shutdown` 会强制杀进程，不会优雅排空
 - `accepted/running` 任务不能靠 `/pause` 或 `/end` 安全停住底层 CLI
-- Windows 聚焦 monitor 在 `thread` 仍为 `active` 时被手动关掉，可能触发 controller 的本地 close request
+- Windows 聚焦 active-session window 在 `thread` 仍为 `active` 时被手动关掉，可能触发 controller 的本地 close request
 - `manage_mail_runner.ps1` 和 `cleanup_project_codex.ps1` 如果喂错 config/runtime/task_root，可能停错实例或漏掉 sidecar 残留
 
 ## 当前推荐命令
@@ -57,16 +57,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\safe_shutdown_mail
 
 只要这两种状态还存在，就不该直接执行强制 shutdown。
 
-## monitor 注意事项
+## active-session window 注意事项
 
-停服前不要先手动关聚焦 monitor 窗口。当前实现里：
+停服前不要先手动关聚焦 active-session window。当前实现里：
 
 - 如果 thread 仍为 `active`
-- 聚焦 monitor 被 `Ctrl+C`、右上角 `X` 或 terminal pane 关闭
+- 聚焦 active-session window 被 `Ctrl+C`、右上角 `X` 或 terminal pane 关闭
 
 controller 可能会补发本地 close request，必要时先结束当前 run，再把 session 标成 `ended`。
 
-因此 handoff 流程应先看状态，再决定是否 `/kill` 或等待完成，而不是先关 monitor。
+因此 handoff 流程应先看状态，再决定是否 `/kill` 或等待完成，而不是先关聚焦 active-session window。
 
 ## 切机后的动作
 

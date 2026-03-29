@@ -11,6 +11,7 @@ import requests
 from mail_runner.config import AppConfig
 from mail_runner.pc_control_plane_client import PcControlPlaneClient
 from mail_runner.relay_server.android_create_session_facade import ANDROID_CREATE_SESSION_PATH
+from mail_runner.relay_server.android_session_action_facade import ANDROID_SESSION_ACTION_PATH
 from mail_runner.relay_server.app import build_http_server, build_runtime_relay, start_relay_server
 from mail_runner.relay_server.config import RelayServerConfig
 from mail_runner.relay_server.packet_store import PersistentAcceptedPacketStore
@@ -20,6 +21,8 @@ from mail_runner.relay_server.pc_control_protocol import (
 )
 from mail_runner.relay_server.pc_control_runtime import build_pc_control_runtime
 from mail_runner.relay_server.session_store import InMemorySessionStore, PersistentSessionStore
+from mail_runner.thread_store import create_thread, load_thread_state, save_thread_state
+from mail_runner.workspace import WorkspaceManager
 
 
 class _StubRunner:
@@ -39,8 +42,112 @@ class _StubRunner:
         return None
 
 
+class _StatePersistingRunner:
+    def __init__(self, task_root: Path) -> None:
+        self.workspace = WorkspaceManager(task_root)
+        self.snapshots = []
+
+    def active_count(self) -> int:
+        return 0
+
+    def queued_count(self) -> int:
+        return 0
+
+    def start_background_task(
+        self,
+        snapshot,
+        *,
+        root_message_id: str | None = None,
+        latest_message_id: str | None = None,
+        subject_norm: str | None = None,
+        session_name: str | None = None,
+        on_accepted=None,
+        on_running=None,
+        on_finished=None,
+    ):
+        self.snapshots.append(snapshot)
+        snapshot_path = self.workspace.save_snapshot(snapshot)
+        snapshot_rel = self.workspace.to_thread_relative(snapshot.thread_id, snapshot_path)
+        state_path = self.workspace.thread_state_path(snapshot.thread_id)
+        if state_path.exists():
+            state = load_thread_state(snapshot.thread_id, self.workspace.task_root)
+            state.backend = snapshot.backend
+            state.profile = snapshot.profile
+            state.permission = snapshot.permission
+            state.repo_path = snapshot.repo_path
+            state.workdir = snapshot.workdir
+            state.current_task_id = snapshot.task_id
+            state.last_task_snapshot_file = snapshot_rel
+            state.status = "accepted"
+            state.lifecycle = "active"
+            state.last_active_at = snapshot.updated_at
+            state.last_progress_at = snapshot.updated_at
+            state.backend_transport = snapshot.backend_transport
+            if snapshot.canonical_reply_recipient is not None:
+                state.canonical_reply_recipient = snapshot.canonical_reply_recipient
+            state.updated_at = snapshot.updated_at
+            save_thread_state(state, self.workspace.task_root)
+        else:
+            state = create_thread(
+                thread_id=snapshot.thread_id,
+                root_message_id=root_message_id or f"local-root:{snapshot.thread_id}",
+                latest_message_id=latest_message_id or f"local-latest:{snapshot.thread_id}",
+                subject_norm=subject_norm or snapshot.thread_id,
+                backend=snapshot.backend,
+                profile=snapshot.profile,
+                permission=snapshot.permission,
+                repo_path=snapshot.repo_path,
+                workdir=snapshot.workdir,
+                current_task_id=snapshot.task_id,
+                last_task_snapshot_file=snapshot_rel,
+                task_root=self.workspace.task_root,
+                status="accepted",
+                history_files=[],
+                last_summary=None,
+                lifecycle="active",
+                last_active_at=snapshot.updated_at,
+                pending_question_id=None,
+                pending_question_text=None,
+                pending_choices=[],
+                pending_question_set_id=None,
+                pending_questions=[],
+                collected_answers=[],
+                awaiting_since=None,
+                paused_from_status=None,
+                session_id=snapshot.thread_id,
+                session_name=session_name or snapshot.thread_id,
+                session_norm=(session_name or snapshot.thread_id).lower(),
+                canonical_reply_recipient=snapshot.canonical_reply_recipient,
+                backend_session_id=snapshot.backend_session_id,
+                backend_session_resumable=False,
+                backend_transport=snapshot.backend_transport,
+                queued_task_id=None,
+                queued_snapshot_file=None,
+                created_at=snapshot.created_at,
+                updated_at=snapshot.updated_at,
+                last_progress_at=snapshot.updated_at,
+            )
+        if on_accepted is not None:
+            on_accepted(state)
+        return state
+
+
+class _FakeMailClient:
+    def __init__(self) -> None:
+        self.sent_messages: list[dict[str, object]] = []
+
+    def send_message(self, **kwargs):
+        self.sent_messages.append(kwargs)
+        return f"<sent-{len(self.sent_messages)}@example.com>"
+
+
 def _post_create_session(url: str, payload: dict[str, object]) -> requests.Response:
     return _post_create_session_with_token(url, payload, auth_token="android-secret")
+
+
+def _post_session_action(url: str, payload: dict[str, object]) -> requests.Response:
+    headers = {"Authorization": "Bearer android-secret"}
+    return requests.post(url, headers=headers, json=payload, timeout=5)
 
 
 def _post_create_session_with_token(
@@ -103,6 +210,7 @@ async def _run_create_session_roundtrip_test(
     runner: _StubRunner,
     execution_policy: dict[str, object],
     attachments: list[dict[str, object]] | None = None,
+    canonical_reply_recipient: str = "user@example.com",
     workspace_provider=None,
     codex_profile_models: dict[str, str] | None = None,
     heartbeat_interval_seconds: int = 1,
@@ -183,6 +291,7 @@ async def _run_create_session_roundtrip_test(
                 "pc_id": "pc_home",
                 "workspace_id": workspace.workspace_id,
                 "prompt": "Refactor floor_shear.py",
+                "canonical_reply_recipient": canonical_reply_recipient,
                 "execution_policy": execution_policy,
                 "mode": "modify",
                 "timeout_seconds": 181,
@@ -260,6 +369,40 @@ def test_android_create_session_requires_execution_policy_when_posting_http(tmp_
                 "pc_id": "pc_home",
                 "workspace_id": "workspace_001",
                 "prompt": "Refactor floor_shear.py",
+                "canonical_reply_recipient": "user@example.com",
+            },
+        )
+        payload = response.json()
+
+        assert response.status_code == 400
+        assert payload["error_code"] == "invalid_payload"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_android_create_session_requires_canonical_reply_recipient_when_posting_http(tmp_path) -> None:
+    config = RelayServerConfig(
+        host="127.0.0.1",
+        port=0,
+        transport_token="relay-secret",
+        android_app_token="android-secret",
+        state_dir=str(tmp_path / "relay_state"),
+    )
+    runtime = build_pc_control_runtime(config)
+    server = build_http_server(config, session_store=InMemorySessionStore(), pc_control_runtime=runtime)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address[:2]
+        response = _post_create_session(
+            f"http://{host}:{port}{ANDROID_CREATE_SESSION_PATH}",
+            {
+                "pc_id": "pc_home",
+                "workspace_id": "workspace_001",
+                "prompt": "Refactor floor_shear.py",
+                "execution_policy": {"backend": "codex"},
             },
         )
         payload = response.json()
@@ -292,6 +435,7 @@ def test_android_create_session_requires_dedicated_android_app_token(tmp_path) -
                 "pc_id": "pc_home",
                 "workspace_id": "workspace_001",
                 "prompt": "Refactor floor_shear.py",
+                "canonical_reply_recipient": "user@example.com",
                 "execution_policy": {"backend": "codex"},
             },
             auth_token="relay-secret",
@@ -326,6 +470,7 @@ def test_android_create_session_maps_pc_offline_to_rejected_submit_ack(tmp_path)
                 "pc_id": "pc_home",
                 "workspace_id": "workspace_001",
                 "prompt": "Refactor floor_shear.py",
+                "canonical_reply_recipient": "user@example.com",
                 "execution_policy": {"backend": "codex"},
             },
         )
@@ -363,6 +508,7 @@ def test_android_create_session_maps_workspace_unavailable_to_rejected_submit_ac
                 "pc_id": "pc_home",
                 "workspace_id": "workspace_missing",
                 "prompt": "Refactor floor_shear.py",
+                "canonical_reply_recipient": "user@example.com",
                 "execution_policy": {"backend": "codex"},
             },
         )
@@ -406,6 +552,7 @@ def test_android_create_session_roundtrip_returns_submit_ack_and_session_binding
     assert record.command_type == "new_task"
     assert record.session_id == payload["session_binding"]["session_id"]
     assert record.command_payload["task_text"] == "Refactor floor_shear.py"
+    assert record.command_payload["canonical_reply_recipient"] == "user@example.com"
     assert record.command_payload["timeout_seconds"] == 181
     assert record.command_payload["timeout_minutes"] == 4
     assert record.command_payload["acceptance"] == ["pytest passes", "brief summary"]
@@ -415,6 +562,141 @@ def test_android_create_session_roundtrip_returns_submit_ack_and_session_binding
     assert runner.snapshots[0].task_text == "Refactor floor_shear.py"
     assert runner.snapshots[0].timeout_minutes == 4
     assert runner.snapshots[0].backend_transport == "sdk"
+    assert runner.snapshots[0].canonical_reply_recipient == "user@example.com"
+
+
+def test_android_create_session_binds_canonical_reply_recipient_for_immediate_session_action(tmp_path) -> None:
+    async def _run() -> None:
+        state_dir = tmp_path / "relay_state"
+        sync_root = tmp_path / "sync_root"
+        repo_dir = sync_root / "alpha"
+        repo_dir.mkdir(parents=True)
+        task_root = tmp_path / "tasks"
+        runner = _StatePersistingRunner(task_root)
+        mail_client = _FakeMailClient()
+
+        relay_config = RelayServerConfig(
+            host="127.0.0.1",
+            port=0,
+            transport_token="relay-secret",
+            android_app_token="android-secret",
+            state_dir=str(state_dir),
+            task_root=str(task_root),
+            smtp_host="smtp.example.com",
+            smtp_port=587,
+            smtp_user="bot@example.com",
+            smtp_password="secret",
+            from_name="TaskMail Relay",
+            from_addr="bot@example.com",
+        )
+        session_store = PersistentSessionStore(state_dir)
+        packet_store = PersistentAcceptedPacketStore(state_dir)
+        pc_runtime = build_pc_control_runtime(relay_config)
+        relay = build_runtime_relay(
+            relay_config,
+            session_store=session_store,
+            packet_store=packet_store,
+        )
+        server = await start_relay_server(
+            relay_config,
+            relay=relay,
+            session_store=session_store,
+            packet_store=packet_store,
+            pc_control_runtime=pc_runtime,
+        )
+        client = None
+        try:
+            host, port = server.sockets[0].getsockname()[:2]
+            app_config = AppConfig(
+                relay_url=f"ws://{host}:{port}/relay",
+                relay_transport_token="relay-secret",
+                relay_client_id="pc_home",
+                relay_client_version="0.1.0",
+                project_sync_roots=[str(sync_root)],
+                from_addr="bot@example.com",
+            )
+            client = PcControlPlaneClient(
+                relay_url=app_config.relay_url,
+                transport_token=app_config.relay_transport_token,
+                pc_id=app_config.relay_client_id,
+                client_version=app_config.relay_client_version,
+                display_name="pc_home",
+                config=app_config,
+                runner=runner,
+                mail_client=mail_client,
+                heartbeat_interval_seconds=1,
+                snapshot_interval_seconds=1,
+            )
+            client.start()
+            await _wait_until(
+                lambda: (
+                    pc_runtime.node_store.get_node("pc_home") is not None
+                    and len(pc_runtime.workspace_store.list_workspaces(pc_id="pc_home")) == 1
+                ),
+                timeout_seconds=5,
+            )
+            workspace = pc_runtime.workspace_store.list_workspaces(pc_id="pc_home")[0]
+
+            create_response = await asyncio.to_thread(
+                _post_create_session,
+                f"http://{host}:{port}{ANDROID_CREATE_SESSION_PATH}",
+                {
+                    "pc_id": "pc_home",
+                    "workspace_id": workspace.workspace_id,
+                    "prompt": "Refactor floor_shear.py",
+                    "canonical_reply_recipient": "user@example.com",
+                    "execution_policy": {
+                        "backend": "codex",
+                        "profile": "default",
+                        "permission": "default",
+                        "backend_transport": "sdk",
+                    },
+                    "repo_path": workspace.repo_path,
+                    "mode": "modify",
+                    "source": "android-ui",
+                },
+            )
+            create_payload = create_response.json()
+            assert create_response.status_code == 200
+            assert create_payload["status"] == "accepted"
+
+            session_id = create_payload["session_binding"]["session_id"]
+            await _wait_until(
+                lambda: runner.workspace.thread_state_path(session_id).exists(),
+                timeout_seconds=5,
+            )
+            thread_state = load_thread_state(session_id, task_root)
+            assert thread_state.canonical_reply_recipient == "user@example.com"
+            mail_dir = task_root / session_id / "mail"
+            assert not mail_dir.exists() or list(mail_dir.glob("raw_*.json")) == []
+
+            session_action_response = await asyncio.to_thread(
+                _post_session_action,
+                f"http://{host}:{port}{ANDROID_SESSION_ACTION_PATH}",
+                {
+                    "request_id": "req_reply_after_create_001",
+                    "action": "reply",
+                    "target": {
+                        "session_id": session_id,
+                    },
+                    "reply": {
+                        "reply_text": "Please continue with the cleanup.",
+                    },
+                },
+            )
+            session_action_payload = session_action_response.json()
+
+            assert session_action_response.status_code == 200
+            assert session_action_payload["status"] == "accepted"
+            assert session_action_payload["submit_ack"]["ack_status"] == "accepted"
+            assert session_action_payload["target_session_identity"]["session_id"] == session_id
+        finally:
+            if client is not None:
+                client.stop()
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(_run())
 
 
 def test_android_create_session_roundtrip_does_not_wait_for_heartbeat(tmp_path) -> None:

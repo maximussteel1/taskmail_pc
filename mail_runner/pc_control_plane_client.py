@@ -15,17 +15,40 @@ import ssl
 import threading
 import time
 import urllib.parse
+from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
 
 import websockets
 
 from .config import AppConfig
+from .mail_io import MailClient
 from .mail_attachments import materialize_incoming_attachments
 from .models import MailAttachment, MailEnvelope, RunResult, TaskSnapshot, ThreadState
+from .parser import parse_subject
 from .pc_control_plane_projection import project_artifact_manifest, project_output_chunks
 from .pc_workspace_inventory import build_execution_capabilities, collect_workspace_inventory
+from .question_utils import effective_pending_questions
 from .relay_server.auth import token_fingerprint
+from .relay_server.control_protocol import (
+    CONTROL_CHANNEL,
+    CONTROL_FALLBACK_POLICY,
+    CONTROL_POST_CREATION_PAYLOAD_SCHEMA,
+    CONTROL_SESSION_ACTION_RESULT_TYPE,
+)
+from .relay_server.direct_actions import RelayDirectActionError, RelayDirectActionResult
+from .relay_server.packet_store import AcceptedRelayPacket
+from .relay_server.post_creation_actions import (
+    RelayTaskMailDirectCurrentSessionReplyHandler,
+    RelayTaskMailDirectCurrentSessionStatusHandler,
+    _build_direct_message_id,
+    _build_post_creation_headers,
+    _build_thread_reply_chain,
+    _resolve_current_session_thread_state,
+    _subject_text_for_target_state,
+    _validate_plain_reply_target_state,
+)
 from .relay_server.pc_control_protocol import (
     PcCommandDispatchMessage,
     PcControlProtocolError,
@@ -57,10 +80,108 @@ from .status import (
     RUN_STATUS_PAUSED,
     RUN_STATUS_SUCCESS,
 )
+from .thread_store import load_thread_state, save_thread_state
+from .session_action_closeout import build_target_session_identity, load_session_action_closeout
 
 LOGGER = logging.getLogger(__name__)
 _WEBSOCKETS_CONNECT_SUPPORTS_PROXY = "proxy" in inspect.signature(websockets.connect).parameters
 _CONTROL_PLANE_ATTACHMENT_PREFIX = "_ctrlin_"
+_SESSION_ACTION_COMMAND_TYPES = frozenset(
+    {"reply", "status", "pause", "resume", "kill", "end", "answers", "attachment_continuation"}
+)
+_EMPTY_BODY_SESSION_ACTION_TYPES = frozenset({"pause", "resume", "kill", "end"})
+
+
+@dataclass(slots=True)
+class _SessionActionCommand:
+    action_type: str
+    request_id: str
+    packet_id: str
+    receipt_id: str
+    workspace_id: str
+    session_id: str
+    thread_id: str | None
+    task_run_packet: dict[str, Any]
+    dispatch_metadata: dict[str, Any]
+
+
+def _normalize_session_action_question_answers(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("payload.answers.question_answers must be a non-empty list")
+    normalized: list[dict[str, str]] = []
+    seen_question_ids: set[str] = set()
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ValueError(f"payload.answers.question_answers[{index}] must be a dict")
+        question_id = str(item.get("question_id") or "").strip()
+        if not question_id:
+            raise ValueError(f"payload.answers.question_answers[{index}].question_id must be a non-empty string")
+        if question_id in seen_question_ids:
+            raise ValueError(
+                f"payload.answers.question_answers[{index}].question_id duplicates an earlier answer entry"
+            )
+        answer_value = item.get("value")
+        if not isinstance(answer_value, str) or not answer_value.strip():
+            raise ValueError(f"payload.answers.question_answers[{index}].value must be a non-empty string")
+        seen_question_ids.add(question_id)
+        normalized.append(
+            {
+                "question_id": question_id,
+                "value": answer_value.strip(),
+            }
+        )
+    return sorted(normalized, key=lambda item: item["question_id"])
+
+
+def _normalize_attachment_payload_items(
+    value: Any,
+    *,
+    field_name: str,
+    allow_string_paths: bool,
+    require_non_empty: bool = False,
+) -> list[str | dict[str, Any]]:
+    if value is None:
+        normalized: list[str | dict[str, Any]] = []
+    elif not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a list when provided")
+    else:
+        normalized = []
+        for index, item in enumerate(value):
+            item_field_name = f"{field_name}[{index}]"
+            if isinstance(item, str):
+                normalized_text = item.strip()
+                if not allow_string_paths:
+                    raise ValueError(f"{item_field_name} must be a JSON object")
+                if normalized_text:
+                    normalized.append(normalized_text)
+                continue
+            if not isinstance(item, dict):
+                if allow_string_paths:
+                    raise ValueError(f"{item_field_name} must be a string or JSON object")
+                raise ValueError(f"{item_field_name} must be a JSON object")
+            name = str(item.get("name") or "").strip()
+            if not name:
+                raise ValueError(f"{item_field_name}.name must be a non-empty string")
+            content_type = str(item.get("content_type") or "").strip()
+            if not content_type:
+                raise ValueError(f"{item_field_name}.content_type must be a non-empty string")
+            content_bytes_b64 = str(item.get("content_bytes_b64") or "").strip()
+            if not content_bytes_b64:
+                raise ValueError(f"{item_field_name}.content_bytes_b64 must be a non-empty string")
+            size_bytes = item.get("size_bytes")
+            if size_bytes is not None and (not isinstance(size_bytes, int) or size_bytes < 0):
+                raise ValueError(f"{item_field_name}.size_bytes must be a non-negative integer")
+            normalized.append(
+                {
+                    "name": name,
+                    "content_type": content_type,
+                    "content_bytes_b64": content_bytes_b64,
+                    "size_bytes": size_bytes,
+                }
+            )
+    if require_non_empty and not normalized:
+        raise ValueError(f"{field_name} must contain at least one attachment entry")
+    return normalized
 
 
 def _timestamp() -> str:
@@ -121,6 +242,7 @@ class PcControlPlaneClient:
         clock: Callable[[], str] | None = None,
         monotonic_fn: Callable[[], float] | None = None,
         workspace_provider: Callable[[], list[dict[str, Any]]] | None = None,
+        mail_client: Any | None = None,
     ) -> None:
         self._pc_control_url = derive_pc_control_url(relay_url)
         self._transport_token = str(transport_token or "").strip()
@@ -136,6 +258,7 @@ class PcControlPlaneClient:
         self._clock = clock or _timestamp
         self._monotonic = monotonic_fn or time.monotonic
         self._workspace_provider = workspace_provider or (lambda: collect_workspace_inventory(self._config))
+        self._mail_client = mail_client or MailClient(self._config)
         self._runner_id = f"runner:{self._pc_id}:{secrets.token_hex(6)}"
         self._mailbox_key = derive_mailbox_key(self._config)
         self._lease_mode = str(self._config.relay_mailbox_lease_mode or "disabled").strip().lower() or "disabled"
@@ -803,6 +926,14 @@ class PcControlPlaneClient:
                 "reason": reason,
                 "error_code": error_code,
             }
+        command_type = str(message.payload["command_type"] or "").strip().lower()
+        if command_type == "status":
+            return {
+                "ack_status": "accepted",
+                "queue_position": None,
+                "reason": None,
+                "error_code": None,
+            }
         active_count = self._runner_count("active_count")
         queued_count = self._runner_count("queued_count")
         if active_count > 0 or queued_count > 0:
@@ -833,6 +964,8 @@ class PcControlPlaneClient:
         policy = dict(message.payload["execution_policy"])
         command_type = str(message.payload["command_type"] or "").strip().lower()
 
+        if command_type in _SESSION_ACTION_COMMAND_TYPES:
+            return self._validate_session_action_dispatch(message)
         if command_type != "new_task":
             return "unsupported_command_type", f"command_type is not implemented on this PC client: {command_type}"
 
@@ -889,33 +1022,196 @@ class PcControlPlaneClient:
         task_text = str(message.payload["payload"].get("task_text") or "").strip()
         if not task_text:
             return "invalid_command_payload", "new_task requires payload.task_text"
-        attachments_raw = message.payload["payload"].get("attachments") or []
-        if not isinstance(attachments_raw, list):
-            return "invalid_command_payload", "payload.attachments must be a list when provided"
-        for index, item in enumerate(attachments_raw):
-            if isinstance(item, str):
-                if item.strip():
-                    continue
-                continue
-            if not isinstance(item, dict):
-                return "invalid_command_payload", f"payload.attachments[{index}] must be a string or JSON object"
-            if not isinstance(item.get("name"), str) or not str(item.get("name") or "").strip():
-                return "invalid_command_payload", f"payload.attachments[{index}].name must be a non-empty string"
-            if not isinstance(item.get("content_type"), str) or not str(item.get("content_type") or "").strip():
-                return "invalid_command_payload", (
-                    f"payload.attachments[{index}].content_type must be a non-empty string"
-                )
-            if not isinstance(item.get("content_bytes_b64"), str) or not str(item.get("content_bytes_b64") or "").strip():
-                return "invalid_command_payload", (
-                    f"payload.attachments[{index}].content_bytes_b64 must be a non-empty string"
-                )
-            size_bytes = item.get("size_bytes")
-            if size_bytes is not None and (not isinstance(size_bytes, int) or size_bytes < 0):
-                return "invalid_command_payload", (
-                    f"payload.attachments[{index}].size_bytes must be a non-negative integer"
-                )
+        attachments_raw = message.payload["payload"].get("attachments")
+        try:
+            _normalize_attachment_payload_items(
+                attachments_raw,
+                field_name="payload.attachments",
+                allow_string_paths=True,
+            )
+        except ValueError as exc:
+            return "invalid_command_payload", str(exc)
 
         return None, None
+
+    def _validate_session_action_dispatch(self, message: PcCommandDispatchMessage) -> tuple[str | None, str | None]:
+        task_root = self._runner_task_root()
+        if task_root is None:
+            return (
+                "direct_temporarily_unavailable",
+                "runner task_root is unavailable for current-session action handling",
+            )
+        if self._session_action_bot_mailbox_addr() is None:
+            return (
+                "direct_temporarily_unavailable",
+                "bot mailbox address is not configured for current-session action handling",
+            )
+        try:
+            command = self._build_session_action_command(message)
+            target_state = self._resolve_session_action_target_state(command, task_root=task_root)
+            if self._resolve_session_action_recipient(task_root=task_root, state=target_state) is None:
+                return (
+                    "session_recipient_unresolved",
+                    "could not resolve a durable canonical reply recipient for the requested session action",
+                )
+        except RelayDirectActionError as exc:
+            return exc.code, exc.message
+        except ValueError as exc:
+            return "invalid_command_payload", str(exc).strip() or "invalid current-session action payload"
+        return None, None
+
+    def _build_session_action_command(self, message: PcCommandDispatchMessage) -> _SessionActionCommand:
+        command_type = str(message.payload["command_type"] or "").strip().lower()
+        if command_type not in _SESSION_ACTION_COMMAND_TYPES:
+            raise ValueError(f"unsupported session-action command_type: {command_type}")
+
+        command_payload = dict(message.payload["payload"] or {})
+        target_raw = command_payload.get("target")
+        if target_raw is not None and not isinstance(target_raw, dict):
+            raise ValueError("payload.target must be a dict when present")
+        target_payload = dict(target_raw or {})
+
+        target_scope = str(target_payload.get("scope") or "").strip() or "current_session"
+        if target_scope != "current_session":
+            raise ValueError("payload.target.scope must be current_session")
+
+        workspace_id = str(target_payload.get("workspace_id") or message.payload["workspace_id"] or "").strip()
+        if workspace_id != str(message.payload["workspace_id"] or "").strip():
+            raise ValueError("payload.target.workspace_id must match dispatch workspace_id")
+
+        dispatch_session_id = str(message.payload.get("session_id") or "").strip()
+        session_id = str(target_payload.get("session_id") or dispatch_session_id or "").strip()
+        if not session_id:
+            raise ValueError("current-session action requires session_id or payload.target.session_id")
+        if dispatch_session_id and dispatch_session_id != session_id:
+            raise ValueError("dispatch session_id must match payload.target.session_id")
+
+        thread_id = str(target_payload.get("thread_id") or command_payload.get("thread_id") or "").strip() or None
+        normalized_target = {
+            "scope": "current_session",
+            "workspace_id": workspace_id,
+            "session_id": session_id,
+        }
+        if thread_id is not None:
+            normalized_target["thread_id"] = thread_id
+
+        request_id = str(message.payload["command_id"] or "").strip()
+        if not request_id:
+            raise ValueError("command_id is required for current-session action dispatch")
+        task_run_packet: dict[str, Any] = {
+            "schema_version": CONTROL_POST_CREATION_PAYLOAD_SCHEMA,
+            "action": command_type,
+            "request_id": request_id,
+            "origin": {
+                "client": "android_taskmail",
+                "sender_account_uuid": "pc_control",
+            },
+            "target": normalized_target,
+        }
+        if command_type == "reply":
+            reply_payload = command_payload.get("reply")
+            if not isinstance(reply_payload, dict):
+                raise ValueError("payload.reply must be a dict")
+            task_run_packet["reply"] = dict(reply_payload)
+        elif command_type == "status":
+            status_payload = command_payload.get("status")
+            if status_payload is None:
+                status_payload = {}
+            if not isinstance(status_payload, dict):
+                raise ValueError("payload.status must be a dict when present")
+            task_run_packet["status"] = dict(status_payload)
+        elif command_type == "answers":
+            answers_payload = command_payload.get("answers")
+            if not isinstance(answers_payload, dict):
+                raise ValueError("payload.answers must be a dict")
+            task_run_packet["answers"] = {
+                "question_answers": _normalize_session_action_question_answers(
+                    answers_payload.get("question_answers")
+                )
+            }
+        elif command_type == "attachment_continuation":
+            attachment_payload = command_payload.get("attachment_continuation")
+            if not isinstance(attachment_payload, dict):
+                raise ValueError("payload.attachment_continuation must be a dict")
+            attachments = _normalize_attachment_payload_items(
+                attachment_payload.get("attachments"),
+                field_name="payload.attachment_continuation.attachments",
+                allow_string_paths=False,
+                require_non_empty=True,
+            )
+            reply_text = attachment_payload.get("reply_text")
+            if reply_text is not None and not isinstance(reply_text, str):
+                raise ValueError("payload.attachment_continuation.reply_text must be a string when present")
+            normalized_attachment_payload: dict[str, Any] = {
+                "attachments": [dict(item) for item in attachments if isinstance(item, dict)],
+            }
+            normalized_reply_text = str(reply_text or "").strip()
+            if normalized_reply_text:
+                normalized_attachment_payload["reply_text"] = normalized_reply_text
+            task_run_packet["attachment_continuation"] = normalized_attachment_payload
+        else:
+            action_payload = command_payload.get(command_type)
+            if action_payload is None:
+                action_payload = {}
+            if not isinstance(action_payload, dict):
+                raise ValueError(f"payload.{command_type} must be a dict when present")
+            if action_payload:
+                raise ValueError(f"payload.{command_type} must be an empty dict in the current first slice")
+            task_run_packet[command_type] = {}
+
+        return _SessionActionCommand(
+            action_type=command_type,
+            request_id=request_id,
+            packet_id=f"pc-control:session-action:{request_id}",
+            receipt_id=f"pc-control:session-action-receipt:{request_id}",
+            workspace_id=workspace_id,
+            session_id=session_id,
+            thread_id=thread_id,
+            task_run_packet=task_run_packet,
+            dispatch_metadata={
+                "schema_version": CONTROL_POST_CREATION_PAYLOAD_SCHEMA,
+                "channel": CONTROL_CHANNEL,
+                "action": command_type,
+                "fallback_policy": CONTROL_FALLBACK_POLICY,
+                "control_trace": {
+                    "trace_id": message.trace_id,
+                },
+                "control_related": {
+                    "pc_control_command_id": request_id,
+                },
+            },
+        )
+
+    def _resolve_session_action_target_state(self, command: _SessionActionCommand, *, task_root: str) -> ThreadState:
+        task_root_path = Path(task_root)
+        target_state = _resolve_current_session_thread_state(command, task_root_path)
+        if command.action_type == "reply":
+            _validate_plain_reply_target_state(target_state)
+        if command.action_type == "answers":
+            self._validate_answers_target_state(command, target_state=target_state)
+        return target_state
+
+    def _resolve_session_action_recipient(self, *, task_root: str, state: ThreadState) -> str | None:
+        from .app import _resolve_recovery_recipient
+
+        normalized = str(state.canonical_reply_recipient or "").strip()
+        if normalized:
+            return normalized
+        recipient = _resolve_recovery_recipient(Path(task_root), state)
+        normalized = str(recipient or "").strip()
+        if not normalized:
+            return None
+        state.canonical_reply_recipient = normalized
+        state.updated_at = self._clock()
+        save_thread_state(state, task_root)
+        return normalized
+
+    def _session_action_bot_mailbox_addr(self) -> str | None:
+        for candidate in (self._config.from_addr, self._config.smtp_user, self._config.imap_user):
+            normalized = str(candidate or "").strip()
+            if normalized:
+                return normalized
+        return None
 
     def _resolve_profile_model(self, backend: str, profile: str) -> str | None:
         if not profile or profile == "default":
@@ -937,6 +1233,26 @@ class PcControlPlaneClient:
         return resolved or None
 
     def _start_command_execution(
+        self,
+        message: PcCommandDispatchMessage,
+        *,
+        admission: dict[str, Any],
+        connection_epoch: int,
+    ) -> None:
+        command_type = str(message.payload["command_type"] or "").strip().lower()
+        if command_type == "new_task":
+            self._start_new_task_execution(
+                message,
+                admission=admission,
+                connection_epoch=connection_epoch,
+            )
+            return
+        self._start_session_action_execution(
+            message,
+            connection_epoch=connection_epoch,
+        )
+
+    def _start_new_task_execution(
         self,
         message: PcCommandDispatchMessage,
         *,
@@ -1014,6 +1330,371 @@ class PcControlPlaneClient:
                 error_message=error_text,
             )
 
+    def _start_session_action_execution(
+        self,
+        message: PcCommandDispatchMessage,
+        *,
+        connection_epoch: int,
+    ) -> None:
+        command_id = message.payload["command_id"]
+        base_context = {
+            "trace_id": message.trace_id,
+            "connection_epoch": connection_epoch,
+            "execution_policy": dict(message.payload["execution_policy"]),
+            "snapshot": None,
+        }
+        with self._control_lock:
+            if command_id in self._launched_command_ids:
+                return
+            self._launched_command_ids.add(command_id)
+            self._command_contexts[command_id] = dict(base_context)
+        try:
+            command = self._build_session_action_command(message)
+            structured_payload = self._dispatch_session_action_command(command)
+            self._emit_command_result(
+                command_id,
+                final_status="done",
+                summary=f"{command.action_type} mail ingress submitted",
+                structured_payload=structured_payload,
+                effective_execution=self._effective_execution(command_id),
+            )
+        except RelayDirectActionError as exc:
+            LOGGER.info(
+                "pc-control session-action command failed command_id=%s code=%s message=%s",
+                command_id,
+                exc.code,
+                exc.message,
+            )
+            self._emit_command_result(
+                command_id,
+                final_status="failed",
+                summary=exc.message,
+                structured_payload={
+                    "kind": "session_action_error",
+                    "command_id": command_id,
+                    "message": exc.message,
+                },
+                effective_execution=self._effective_execution(command_id),
+                error_code=exc.code,
+                error_message=exc.message,
+            )
+        except Exception as exc:
+            LOGGER.exception("pc-control session-action execution failed command_id=%s", command_id)
+            error_text = f"{type(exc).__name__}: {exc}"
+            self._emit_command_result(
+                command_id,
+                final_status="failed",
+                summary=error_text,
+                structured_payload={
+                    "kind": "session_action_error",
+                    "command_id": command_id,
+                    "message": error_text,
+                },
+                effective_execution=self._effective_execution(command_id),
+                error_code="session_action_execution_failed",
+                error_message=error_text,
+            )
+        finally:
+            with self._control_lock:
+                self._launched_command_ids.discard(command_id)
+                self._command_contexts.pop(command_id, None)
+
+    def _dispatch_session_action_command(self, command: _SessionActionCommand) -> dict[str, Any]:
+        task_root = self._runner_task_root()
+        if task_root is None:
+            raise RelayDirectActionError(
+                "direct_temporarily_unavailable",
+                "runner task_root is unavailable for current-session action handling",
+            )
+        target_state = self._resolve_session_action_target_state(command, task_root=task_root)
+        recipient_addr = self._resolve_session_action_recipient(task_root=task_root, state=target_state)
+        if recipient_addr is None:
+            raise RelayDirectActionError(
+                "session_recipient_unresolved",
+                "could not resolve a durable canonical reply recipient for the requested session action",
+            )
+        if command.action_type == "status":
+            handler = RelayTaskMailDirectCurrentSessionStatusHandler(
+                config=self._config,
+                task_root=task_root,
+                mail_client=self._mail_client,
+                runner=self._runner,
+                recipient_addr=recipient_addr,
+                background=True,
+            )
+            result = handler.handle_accepted_packet(
+                AcceptedRelayPacket(
+                    packet_id=command.packet_id,
+                    receipt_id=command.receipt_id,
+                    connection_id=self._runner_id,
+                    client_id="pc_control",
+                    client_trace_id=command.request_id,
+                    received_at=self._clock(),
+                    task_run_packet=command.task_run_packet,
+                    dispatch_metadata=command.dispatch_metadata,
+                )
+            )
+            server_messages = result.server_messages if isinstance(result, RelayDirectActionResult) else []
+        elif command.action_type == "reply":
+            handler = RelayTaskMailDirectCurrentSessionReplyHandler(
+                config=self._config,
+                task_root=task_root,
+                mail_client=self._mail_client,
+                runner=self._runner,
+                recipient_addr=recipient_addr,
+                background=True,
+            )
+            result = handler.handle_accepted_packet(
+                AcceptedRelayPacket(
+                    packet_id=command.packet_id,
+                    receipt_id=command.receipt_id,
+                    connection_id=self._runner_id,
+                    client_id="pc_control",
+                    client_trace_id=command.request_id,
+                    received_at=self._clock(),
+                    task_run_packet=command.task_run_packet,
+                    dispatch_metadata=command.dispatch_metadata,
+                )
+            )
+            server_messages = result.server_messages if isinstance(result, RelayDirectActionResult) else []
+        else:
+            self._dispatch_session_action_via_existing_thread_mail(
+                command,
+                task_root=task_root,
+                target_state=target_state,
+                recipient_addr=recipient_addr,
+            )
+            server_messages = []
+        return self._structured_session_action_payload(
+            command,
+            task_root=task_root,
+            target_state=target_state,
+            server_messages=server_messages,
+        )
+
+    def _dispatch_session_action_via_existing_thread_mail(
+        self,
+        command: _SessionActionCommand,
+        *,
+        task_root: str,
+        target_state: ThreadState,
+        recipient_addr: str,
+    ) -> None:
+        from .app import _process_existing_thread_mail
+
+        bot_addr = self._session_action_bot_mailbox_addr()
+        if bot_addr is None:
+            raise RelayDirectActionError(
+                "direct_temporarily_unavailable",
+                "bot mailbox address is not configured for current-session action handling",
+            )
+        if command.action_type not in {"pause", "resume", "kill"}:
+            if command.action_type not in {"end", "answers", "attachment_continuation"}:
+                raise ValueError(f"unsupported local current-session action: {command.action_type}")
+
+        target_session_identity = build_target_session_identity(
+            workspace_id=target_state.workspace_id,
+            session_id=target_state.session_id or target_state.thread_id,
+            thread_id=target_state.thread_id,
+        )
+        subject_text = _subject_text_for_target_state(target_state)
+        reply_to, references = _build_thread_reply_chain(target_state)
+        subject = f"Re: [S:{command.session_id}] {subject_text}".strip()
+        envelope = MailEnvelope(
+            message_id=_build_direct_message_id(command.packet_id),
+            subject=subject,
+            from_addr=recipient_addr,
+            to_addr=bot_addr,
+            date=self._clock(),
+            in_reply_to=reply_to,
+            references=references,
+            body_text=self._build_session_action_mail_body(command, target_state=target_state),
+            attachments=self._build_session_action_mail_attachments(command),
+            raw_headers={
+                "Subject": subject,
+                **_build_post_creation_headers(
+                    packet_id=command.packet_id,
+                    receipt_id=command.receipt_id,
+                    request_id=command.request_id,
+                    action_type=command.action_type,
+                    target_session_identity=target_session_identity,
+                ),
+            },
+        )
+        subject_info = parse_subject(envelope.subject)
+        handled = _process_existing_thread_mail(
+            envelope,
+            subject_info,
+            {
+                "workspace_id": target_state.workspace_id,
+                "session_id": target_state.session_id,
+                "thread_id": target_state.thread_id,
+            },
+            self._config,
+            Path(task_root),
+            self._mail_client,
+            self._runner,
+            background=True,
+        )
+        if not handled:
+            raise RelayDirectActionError(
+                "direct_temporarily_unavailable",
+                f"direct TaskMail current-session {command.action_type} could not be processed",
+            )
+
+    def _build_session_action_mail_attachments(self, command: _SessionActionCommand) -> list[MailAttachment]:
+        if command.action_type != "attachment_continuation":
+            return []
+        attachment_payload = dict(command.task_run_packet.get("attachment_continuation") or {})
+        attachments = attachment_payload.get("attachments") or []
+        return [
+            self._build_command_mail_attachment(item=dict(item), index=index)
+            for index, item in enumerate(attachments, start=1)
+            if isinstance(item, dict)
+        ]
+
+    def _validate_answers_target_state(
+        self,
+        command: _SessionActionCommand,
+        *,
+        target_state: ThreadState,
+    ) -> None:
+        pending_questions = effective_pending_questions(target_state, fallback_task_id=target_state.current_task_id)
+        if not pending_questions:
+            raise RelayDirectActionError(
+                "validation_failed",
+                "direct answers action requires the target session to have a pending question set",
+            )
+        if target_state.status not in {RUN_STATUS_AWAITING_USER_INPUT, RUN_STATUS_PAUSED}:
+            raise RelayDirectActionError(
+                "validation_failed",
+                "direct answers action is only available while the session is awaiting user input or paused",
+            )
+        answer_items = list(dict(command.task_run_packet.get("answers") or {}).get("question_answers") or [])
+        pending_questions_by_id = {item.question_id: item for item in pending_questions}
+        matched = 0
+        for item in answer_items:
+            question_id = str(item.get("question_id") or "").strip()
+            answer_value = str(item.get("value") or "").strip()
+            question = pending_questions_by_id.get(question_id)
+            if question is None:
+                raise RelayDirectActionError(
+                    "validation_failed",
+                    f"direct answers action includes an unknown pending question id: {question_id}",
+                )
+            if question.choices and answer_value not in question.choices:
+                raise RelayDirectActionError(
+                    "validation_failed",
+                    f"direct answers action must use the canonical choice value for question_id={question_id}",
+                )
+            matched += 1
+        if matched == 0:
+            raise RelayDirectActionError(
+                "validation_failed",
+                "direct answers action must include at least one matching question answer",
+            )
+
+    def _build_session_action_mail_body(
+        self,
+        command: _SessionActionCommand,
+        *,
+        target_state: ThreadState,
+    ) -> str:
+        if command.action_type in _EMPTY_BODY_SESSION_ACTION_TYPES:
+            return f"/{command.action_type}\n"
+        if command.action_type == "attachment_continuation":
+            attachment_payload = dict(command.task_run_packet.get("attachment_continuation") or {})
+            reply_text = str(attachment_payload.get("reply_text") or "").strip()
+            return f"{reply_text.rstrip()}\n" if reply_text else ""
+        if command.action_type != "answers":
+            raise ValueError(f"unsupported local current-session body action: {command.action_type}")
+
+        pending_questions = effective_pending_questions(target_state, fallback_task_id=target_state.current_task_id)
+        pending_questions_by_id = {item.question_id: item for item in pending_questions}
+        answer_map = {
+            str(item.get("question_id") or "").strip(): str(item.get("value") or "").strip()
+            for item in list(dict(command.task_run_packet.get("answers") or {}).get("question_answers") or [])
+        }
+        rendered_answers: list[str] = []
+        for question in pending_questions:
+            answer_value = answer_map.get(question.question_id)
+            if answer_value is None:
+                continue
+            if len(pending_questions) > 1 and ("\n" in answer_value or "\r" in answer_value):
+                raise RelayDirectActionError(
+                    "validation_failed",
+                    f"direct answers action must keep multi-question answer values single-line: {question.question_id}",
+                )
+            rendered_answers.append(f"{question.question_id}: {answer_value}")
+        if not rendered_answers:
+            raise RelayDirectActionError(
+                "validation_failed",
+                "direct answers action must include at least one matching question answer",
+            )
+        if len(pending_questions) == 1:
+            single_answer_value = answer_map.get(pending_questions[0].question_id)
+            if single_answer_value is None:
+                raise RelayDirectActionError(
+                    "validation_failed",
+                    "direct answers action must include the current pending question answer",
+                )
+            body = single_answer_value
+        else:
+            body = "Answers:\n" + "\n".join(rendered_answers)
+        if target_state.status == RUN_STATUS_PAUSED:
+            body = f"/resume\n{body}"
+        return body.rstrip() + "\n"
+
+    def _structured_session_action_payload(
+        self,
+        command: _SessionActionCommand,
+        *,
+        task_root: str,
+        target_state: ThreadState,
+        server_messages: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if server_messages:
+            payload = server_messages[0].get("payload")
+            if isinstance(payload, dict) and payload:
+                return {
+                    "kind": CONTROL_SESSION_ACTION_RESULT_TYPE,
+                    **dict(payload),
+                }
+
+        updated_state = load_thread_state(target_state.thread_id, task_root)
+        closeout_payload = load_session_action_closeout(
+            task_root,
+            thread_id=updated_state.thread_id,
+            request_id=command.request_id,
+        ) or {
+            "action_type": command.action_type,
+            "target_session_identity": build_target_session_identity(
+                workspace_id=updated_state.workspace_id,
+                session_id=updated_state.session_id or updated_state.thread_id,
+                thread_id=updated_state.thread_id,
+            ),
+            "ingress_type": "direct_bridge",
+            "request_id": command.request_id,
+            "ingress_message_id": None,
+            "packet_id": command.packet_id,
+            "receipt_id": command.receipt_id,
+            "last_summary": updated_state.last_summary,
+            "terminal_mail_message_id": None,
+            "terminal_mail_subject": None,
+        }
+        return {
+            "kind": CONTROL_SESSION_ACTION_RESULT_TYPE,
+            "session_action_result": {
+                "action_type": command.action_type,
+                "result_scope": "mail_ingress_submission",
+                "canonical_outcome_via": "mail",
+                "delivery_status": "submitted",
+                "submitted_at": self._clock(),
+                "transport_message_id": None,
+                "session_action_closeout": closeout_payload,
+            },
+        }
+
     def _build_task_snapshot(self, message: PcCommandDispatchMessage) -> TaskSnapshot:
         workspace = self._workspace_by_id(message.payload["workspace_id"])
         if workspace is None:
@@ -1041,6 +1722,13 @@ class PcControlPlaneClient:
         now = self._clock()
         command_id = message.payload["command_id"]
         session_id = str(message.payload.get("session_id") or "").strip() or command_id
+        canonical_reply_recipient_raw = command_payload.get("canonical_reply_recipient")
+        if canonical_reply_recipient_raw is None:
+            canonical_reply_recipient = None
+        elif not isinstance(canonical_reply_recipient_raw, str) or not canonical_reply_recipient_raw.strip():
+            raise ValueError("payload.canonical_reply_recipient must be a non-empty string when provided")
+        else:
+            canonical_reply_recipient = canonical_reply_recipient_raw.strip()
         return TaskSnapshot(
             task_id=self._sanitize_identifier(command_id, prefix="task"),
             thread_id=self._sanitize_identifier(session_id, prefix="thread"),
@@ -1063,6 +1751,7 @@ class PcControlPlaneClient:
                 str(policy.get("backend_transport") or "").strip()
                 or self._config.default_transport_for_backend(backend)
             ),
+            canonical_reply_recipient=canonical_reply_recipient,
         )
 
     def _materialize_command_attachments(

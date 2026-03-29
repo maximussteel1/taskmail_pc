@@ -409,6 +409,7 @@ class TaskSnapshot:
     backend_session_id: str | None = None
     turn_text: str | None = None
     backend_transport: BackendTransport = BACKEND_TRANSPORT_CLI
+    canonical_reply_recipient: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.task_id, "task_id")
@@ -430,6 +431,7 @@ class TaskSnapshot:
         _require_optional_text(self.backend_session_id, "backend_session_id")
         _require_optional_text(self.turn_text, "turn_text")
         _require_literal(self.backend_transport, "backend_transport", _BACKEND_TRANSPORTS)
+        _require_optional_text(self.canonical_reply_recipient, "canonical_reply_recipient")
 
 
 @dataclass(slots=True)
@@ -564,6 +566,7 @@ class ThreadState:
     session_id: str | None = None
     session_name: str | None = None
     session_norm: str | None = None
+    canonical_reply_recipient: str | None = None
     backend_session_id: str | None = None
     backend_session_resumable: bool = False
     backend_transport: BackendTransport = BACKEND_TRANSPORT_CLI
@@ -604,6 +607,7 @@ class ThreadState:
         _require_optional_text(self.session_id, "session_id")
         _require_optional_text(self.session_name, "session_name")
         _require_optional_text(self.session_norm, "session_norm")
+        _require_optional_text(self.canonical_reply_recipient, "canonical_reply_recipient")
         _require_optional_text(self.backend_session_id, "backend_session_id")
         if not isinstance(self.backend_session_resumable, bool):
             raise ModelValidationError("backend_session_resumable must be a bool")

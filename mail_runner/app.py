@@ -30,7 +30,7 @@ from .mail_attachments import materialize_incoming_attachments
 from .mail_io import MailClient, SYSTEM_MESSAGE_HEADER, SYSTEM_MESSAGE_HEADER_VALUE
 from .mail_retention import SYNC_PROJECT_FOLDER_LIST_SUBJECT
 from .models import MailEnvelope, ParsedMailAction, RunResult, TaskSnapshot, ThreadState
-from .monitor_windows import MonitorWindowManager
+from .monitor_windows import ActiveSessionWindowManager
 from .outbound.service import build_references as _build_references, send_status_update as _send_status_update
 from .question_utils import effective_pending_questions, merge_question_answers, missing_required_question_ids
 from .parser import parse_initial_task, parse_subject
@@ -81,6 +81,7 @@ from .status import (
 )
 from .task_compiler import compile_task
 from .thread_store import (
+    build_workspace_id,
     find_workspace_session_by_id,
     list_all_thread_states,
     list_workspace_sessions,
@@ -142,7 +143,9 @@ _DEFAULT_RUNTIME_DIR = PROJECT_ROOT / "_tmp_live_mail_runner"
 _DIRECT_POST_CREATION_HEADER = "X-TaskMail-Direct"
 _DIRECT_POST_CREATION_REQUEST_ID_HEADER = "X-TaskMail-Relay-Request-Id"
 _DIRECT_POST_CREATION_PACKET_ID_HEADER = "X-TaskMail-Relay-Packet-Id"
-_DIRECT_POST_CREATION_ACTION_TYPES = frozenset({"status", "reply"})
+_DIRECT_POST_CREATION_ACTION_TYPES = frozenset(
+    {"status", "reply", "pause", "resume", "kill", "end", "answers", "attachment_continuation"}
+)
 
 
 def configure_logging(level: int = logging.INFO) -> None:
@@ -278,26 +281,26 @@ def _build_dispatcher(config: AppConfig | None = None) -> Dispatcher:
     )
 
 
-def _build_monitor_window_manager(
+def _build_active_session_window_manager(
     config: AppConfig,
     *,
     task_root: Path,
     base_dir: str | Path | None = None,
-) -> MonitorWindowManager | None:
-    if not config.spawn_monitor_windows:
+) -> ActiveSessionWindowManager | None:
+    if not config.spawn_active_session_windows:
         return None
     del base_dir
     config_path = os.getenv("MAIL_RUNNER_CONFIG") or None
     runtime_dir = os.getenv(_RUNTIME_DIR_ENV) or None
-    return MonitorWindowManager(
+    return ActiveSessionWindowManager(
         enabled=True,
         project_root=PROJECT_ROOT,
         task_root=task_root,
         config_path=config_path,
         runtime_dir=runtime_dir,
-        refresh_seconds=config.monitor_window_refresh_seconds,
-        buffer_lines=config.monitor_window_buffer_lines,
-        history_limit=config.monitor_window_history_limit,
+        refresh_seconds=config.active_session_window_refresh_seconds,
+        buffer_lines=config.active_session_window_buffer_lines,
+        history_limit=config.active_session_window_history_limit,
     )
 
 
@@ -773,6 +776,9 @@ def _handle_transport_probe_mail(
 
 def _record_incoming_mail(state: ThreadState, envelope: MailEnvelope, task_root: Path) -> None:
     save_raw_mail(state.thread_id, envelope, task_root)
+    normalized_sender = str(envelope.from_addr or "").strip()
+    if normalized_sender:
+        state.canonical_reply_recipient = normalized_sender
     state.latest_message_id = envelope.message_id
     state.updated_at = _timestamp()
     save_thread_state(state, task_root)
@@ -797,6 +803,9 @@ def _iter_stored_mail_payloads(task_root: Path, thread_id: str) -> list[dict[str
 
 
 def _resolve_recovery_recipient(task_root: Path, state: ThreadState) -> str | None:
+    canonical_reply_recipient = str(state.canonical_reply_recipient or "").strip()
+    if canonical_reply_recipient:
+        return canonical_reply_recipient
     for payload in reversed(_iter_stored_mail_payloads(task_root, state.thread_id)):
         raw_headers = payload.get("raw_headers") or {}
         if not isinstance(raw_headers, dict):
@@ -954,7 +963,9 @@ def _enforce_active_session_cap(
     task_root: Path,
     *,
     target_thread_id: str,
+    target_workspace_id: str,
     max_active_sessions: int,
+    max_active_sessions_per_workspace: int,
 ) -> list[str]:
     try:
         target_state = load_thread_state(target_thread_id, task_root)
@@ -968,19 +979,47 @@ def _enforce_active_session_cap(
         if thread.lifecycle == "active" and thread.thread_id != target_thread_id
     ]
     desired_active_count = len(active_threads) + (1 if target_needs_activation else 0)
-    if desired_active_count <= max_active_sessions:
+    desired_workspace_active_count = (
+        sum(
+            1
+            for thread in active_threads
+            if (thread.workspace_id or build_workspace_id(thread.repo_path, thread.workdir)) == target_workspace_id
+        )
+        + (1 if target_needs_activation else 0)
+    )
+    if (
+        desired_active_count <= max_active_sessions
+        and desired_workspace_active_count <= max_active_sessions_per_workspace
+    ):
         return []
 
     ended_thread_ids: list[str] = []
-    while desired_active_count > max_active_sessions:
+    while (
+        desired_active_count > max_active_sessions
+        or desired_workspace_active_count > max_active_sessions_per_workspace
+    ):
+        enforce_workspace_cap = desired_workspace_active_count > max_active_sessions_per_workspace
         candidates = [
-            thread for thread in active_threads if thread.status not in _NON_ENDABLE_ACTIVE_THREAD_STATUSES
+            thread
+            for thread in active_threads
+            if thread.status not in _NON_ENDABLE_ACTIVE_THREAD_STATUSES
+            and (
+                not enforce_workspace_cap
+                or (thread.workspace_id or build_workspace_id(thread.repo_path, thread.workdir)) == target_workspace_id
+            )
         ]
         if not candidates:
-            LOGGER.warning(
-                "Unable to enforce active session cap before starting %s: no safe active thread can be ended.",
-                target_thread_id,
-            )
+            if enforce_workspace_cap:
+                LOGGER.warning(
+                    "Unable to enforce same-workspace active session cap before starting %s in %s: no safe active thread can be ended.",
+                    target_thread_id,
+                    target_workspace_id,
+                )
+            else:
+                LOGGER.warning(
+                    "Unable to enforce global active session cap before starting %s: no safe active thread can be ended.",
+                    target_thread_id,
+                )
             break
         oldest = min(candidates, key=_thread_last_active_sort_key)
         _set_thread_lifecycle(oldest, lifecycle="ended")
@@ -988,6 +1027,8 @@ def _enforce_active_session_cap(
         ended_thread_ids.append(oldest.thread_id)
         active_threads = [thread for thread in active_threads if thread.thread_id != oldest.thread_id]
         desired_active_count -= 1
+        if (oldest.workspace_id or build_workspace_id(oldest.repo_path, oldest.workdir)) == target_workspace_id:
+            desired_workspace_active_count -= 1
     return ended_thread_ids
 
 
@@ -1013,23 +1054,32 @@ def _start_snapshot_run(
     accepted_reply_to_existing: bool = True,
     accepted_intro: str | None = None,
 ) -> bool:
+    target_workspace_id = build_workspace_id(snapshot.repo_path, snapshot.workdir)
     auto_ended_thread_ids = _enforce_active_session_cap(
         task_root,
         target_thread_id=snapshot.thread_id,
+        target_workspace_id=target_workspace_id,
         max_active_sessions=config.max_active_sessions,
+        max_active_sessions_per_workspace=config.max_active_sessions_per_workspace,
     )
     effective_accepted_intro = accepted_intro
     if auto_ended_thread_ids:
         cap_note = (
             "Auto-ended least recently active session(s) to keep the active working set within "
-            f"{config.max_active_sessions}: "
+            f"global={config.max_active_sessions} and workspace={config.max_active_sessions_per_workspace}: "
             + ", ".join(auto_ended_thread_ids)
         )
         effective_accepted_intro = f"{accepted_intro}\n\n{cap_note}" if accepted_intro else cap_note
 
     def on_accepted(state: ThreadState) -> None:
+        normalized_sender = str(incoming_envelope.from_addr or "").strip()
+        if normalized_sender:
+            state.canonical_reply_recipient = normalized_sender
         if save_incoming_on_accept:
             save_raw_mail(state.thread_id, incoming_envelope, task_root)
+        if normalized_sender:
+            state.updated_at = _timestamp()
+            save_thread_state(state, task_root)
         if accepted_state_callback is not None:
             try:
                 accepted_state_callback(state)
@@ -2263,6 +2313,8 @@ def process_once(
         active_dispatcher,
         max_active_sessions=config.max_active_sessions,
         max_active_sessions_per_workspace=config.max_active_sessions_per_workspace,
+        max_running_sessions=config.max_running_sessions,
+        max_running_sessions_per_workspace=config.max_running_sessions_per_workspace,
         opencode_transport_default=config.opencode_transport_default,
         codex_transport_default=config.codex_transport_default,
         recovery_callback_factory=_build_recovery_callback_factory(config, task_root, client),
@@ -2280,10 +2332,12 @@ def run_forever(config: AppConfig, *, base_dir: str | Path | None = None) -> Non
         _build_dispatcher(config),
         max_active_sessions=config.max_active_sessions,
         max_active_sessions_per_workspace=config.max_active_sessions_per_workspace,
+        max_running_sessions=config.max_running_sessions,
+        max_running_sessions_per_workspace=config.max_running_sessions_per_workspace,
         opencode_transport_default=config.opencode_transport_default,
         codex_transport_default=config.codex_transport_default,
         recovery_callback_factory=_build_recovery_callback_factory(config, task_root, client),
-        monitor_window_manager=_build_monitor_window_manager(config, task_root=task_root, base_dir=base_dir),
+        monitor_window_manager=_build_active_session_window_manager(config, task_root=task_root, base_dir=base_dir),
     )
     pc_control_client = build_pc_control_plane_client(config, runner=runner)
     if pc_control_client is not None:

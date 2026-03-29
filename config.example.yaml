@@ -16,13 +16,16 @@ default_timeout_minutes: 60
 # header is within that many minutes of current runner time.
 new_task_max_age_minutes: 0
 max_active_sessions: 4
-max_active_sessions_per_workspace: 2
+# Optional same-workspace active working-set cap. Defaults to `max_active_sessions` when omitted.
+max_active_sessions_per_workspace: 4
+max_running_sessions: 4
+max_running_sessions_per_workspace: 2
 auto_create_workdir: false
 enable_web_search: false
-spawn_monitor_windows: false
-monitor_window_refresh_seconds: 5
-monitor_window_buffer_lines: 1000
-monitor_window_history_limit: 12
+spawn_active_session_windows: false
+active_session_window_refresh_seconds: 5
+active_session_window_buffer_lines: 1000
+active_session_window_history_limit: 12
 mock_sleep_seconds: 1.0
 project_sync_roots:
   - D:\projects

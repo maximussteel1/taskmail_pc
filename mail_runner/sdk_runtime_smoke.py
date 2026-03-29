@@ -132,6 +132,8 @@ def run_runtime_smoke(
         _build_dispatcher(config),
         max_active_sessions=config.max_active_sessions,
         max_active_sessions_per_workspace=config.max_active_sessions_per_workspace,
+        max_running_sessions=config.max_running_sessions,
+        max_running_sessions_per_workspace=config.max_running_sessions_per_workspace,
         opencode_transport_default=config.opencode_transport_default,
         codex_transport_default=config.codex_transport_default,
     )

@@ -99,6 +99,24 @@ function Start-MonitorWorker {
     return $null
 }
 
+function Write-JsonState {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PathText,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Payload
+    )
+
+    if ([string]::IsNullOrWhiteSpace($PathText)) {
+        return
+    }
+    $parent = Split-Path -Parent $PathText
+    if (-not [string]::IsNullOrWhiteSpace($parent)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
+    ($Payload | ConvertTo-Json -Depth 4) + "`n" | Set-Content -Encoding utf8 $PathText
+}
+
 $ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
@@ -159,11 +177,12 @@ if (-not (Test-ThreadIsActive -ResolvedTaskRoot $resolvedTaskRoot -ThreadId $Thr
     exit 0
 }
 
-$monitorStateDir = Join-Path $resolvedRuntimeDir "monitor_window_state"
-New-Item -ItemType Directory -Force -Path $monitorStateDir | Out-Null
+$sessionWindowStateDir = Join-Path $resolvedRuntimeDir "active_session_window_state"
+New-Item -ItemType Directory -Force -Path $sessionWindowStateDir | Out-Null
 $token = [guid]::NewGuid().ToString("N")
-$readyPath = Join-Path $monitorStateDir "${ThreadId}_${token}.ready.json"
-$exitStatePath = Join-Path $monitorStateDir "${ThreadId}_${token}.exit.json"
+$readyPath = Join-Path $sessionWindowStateDir "${ThreadId}_${token}.ready.json"
+$exitStatePath = Join-Path $sessionWindowStateDir "${ThreadId}_${token}.exit.json"
+$registryPath = Join-Path $sessionWindowStateDir "${ThreadId}.window.json"
 Add-ArgumentPair -Arguments $workerArgs -Name "-ReadyFile" -Value $readyPath
 Add-ArgumentPair -Arguments $workerArgs -Name "-ExitStatePath" -Value $exitStatePath
 
@@ -175,6 +194,14 @@ try {
         -PassThru
     if ($null -eq $child) {
         exit 0
+    }
+    Write-JsonState -PathText $registryPath -Payload @{
+        thread_id      = $ThreadId
+        controller_pid = $PID
+        worker_pid     = $child.Id
+        registered_at  = (Get-Date).ToString("s")
+        runtime_dir    = $resolvedRuntimeDir
+        config_path    = $resolvedConfigPath
     }
     $child.WaitForExit()
 
@@ -202,7 +229,7 @@ try {
             $ThreadId,
             "--runtime-dir", $resolvedRuntimeDir,
             "--config", $resolvedConfigPath,
-            "--source", "monitor_window_close"
+            "--source", "active_session_window_close"
         )
         if (-not [string]::IsNullOrWhiteSpace($resolvedTaskRoot)) {
             $controlArgs += @("--task-root", $resolvedTaskRoot)
@@ -212,4 +239,5 @@ try {
 } finally {
     Remove-Item -LiteralPath $readyPath -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $exitStatePath -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $registryPath -ErrorAction SilentlyContinue
 }

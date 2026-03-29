@@ -1,4 +1,4 @@
-"""Controller-script regression tests for focused monitor launch."""
+"""Controller-script regression tests for focused active-session launch."""
 
 from __future__ import annotations
 
@@ -45,4 +45,4 @@ def test_monitor_controller_accepts_empty_worker_arg_list_and_exits_for_missing_
     )
 
     assert result.returncode == 0, result.stderr
-    assert not (runtime_dir / "monitor_window_state").exists()
+    assert not (runtime_dir / "active_session_window_state").exists()

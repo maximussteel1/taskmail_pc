@@ -22,7 +22,7 @@ from .adapters.opencode_sdk_adapter import OpenCodeSdkAdapter
 from .config import AppConfig, load_config
 from .dispatcher import Dispatcher
 from .models import RunResult, TaskSnapshot, ThreadState
-from .monitor_windows import MonitorWindowManager
+from .monitor_windows import ActiveSessionWindowManager
 from .status import (
     BACKEND_TRANSPORT_CLI,
     FINAL_THREAD_STATUS_BY_RUN_STATUS,
@@ -119,23 +119,36 @@ class _QueuedRun:
 
 
 class SerialTaskRunner:
-    """Coordinates local execution with per-workspace caps and a shared active-session cap."""
+    """Coordinates local execution with separate active-session and running-session caps."""
 
     def __init__(
         self,
         task_root: str | Path,
         dispatcher: Dispatcher,
         max_active_sessions: int = 4,
-        max_active_sessions_per_workspace: int = 2,
+        max_active_sessions_per_workspace: int | None = None,
+        max_running_sessions: int | None = None,
+        max_running_sessions_per_workspace: int | None = 2,
         opencode_transport_default: str = "sdk",
         codex_transport_default: str = "sdk",
         recovery_callback_factory: RecoveryCallbackFactory | None = None,
-        monitor_window_manager: MonitorWindowManager | None = None,
+        monitor_window_manager: ActiveSessionWindowManager | None = None,
     ) -> None:
         self.workspace = WorkspaceManager(task_root)
         self.dispatcher = dispatcher
         self.max_active_sessions = max(1, int(max_active_sessions))
-        self.max_active_sessions_per_workspace = max(1, int(max_active_sessions_per_workspace))
+        if max_active_sessions_per_workspace is None:
+            self.max_active_sessions_per_workspace = self.max_active_sessions
+        else:
+            self.max_active_sessions_per_workspace = max(1, int(max_active_sessions_per_workspace))
+        if max_running_sessions is None:
+            self.max_running_sessions = self.max_active_sessions
+        else:
+            self.max_running_sessions = max(1, int(max_running_sessions))
+        if max_running_sessions_per_workspace is None:
+            self.max_running_sessions_per_workspace = self.max_running_sessions
+        else:
+            self.max_running_sessions_per_workspace = max(1, int(max_running_sessions_per_workspace))
         self.opencode_transport_default = opencode_transport_default
         self.codex_transport_default = codex_transport_default
         self._recovery_callback_factory = recovery_callback_factory
@@ -370,7 +383,7 @@ class SerialTaskRunner:
         started = False
         while True:
             with self._lock:
-                if len(self._active_runs) >= self.max_active_sessions or not self._queued_runs:
+                if len(self._active_runs) >= self.max_running_sessions or not self._queued_runs:
                     return started
                 active_workspace_counts: dict[str, int] = {}
                 active_thread_ids: set[str] = set()
@@ -386,7 +399,7 @@ class SerialTaskRunner:
                     if queued.snapshot.thread_id in active_thread_ids:
                         continue
                     workspace_id = build_workspace_id(queued.snapshot.repo_path, queued.snapshot.workdir)
-                    if active_workspace_counts.get(workspace_id, 0) < self.max_active_sessions_per_workspace:
+                    if active_workspace_counts.get(workspace_id, 0) < self.max_running_sessions_per_workspace:
                         candidate_index = index
                         break
                 if candidate_index is None:
@@ -461,6 +474,8 @@ class SerialTaskRunner:
             state.session_id = state.session_id or snapshot.thread_id
             state.session_name = state.session_name or session_name or subject_norm or snapshot.thread_id
             state.session_norm = state.session_norm or subject_norm or state.subject_norm
+            if snapshot.canonical_reply_recipient is not None:
+                state.canonical_reply_recipient = snapshot.canonical_reply_recipient
             if snapshot.thread_id in (active_thread_ids or set()) and state.status == THREAD_STATUS_RUNNING:
                 state.queued_task_id = snapshot.task_id
                 state.queued_snapshot_file = snapshot_rel
@@ -513,6 +528,7 @@ class SerialTaskRunner:
             collected_answers=[],
             awaiting_since=None,
             paused_from_status=None,
+            canonical_reply_recipient=snapshot.canonical_reply_recipient,
             backend_session_id=None,
             backend_session_resumable=False,
             backend_transport=snapshot.backend_transport,
@@ -568,6 +584,8 @@ class SerialTaskRunner:
         state.last_active_at = _timestamp()
         state.last_progress_at = state.last_active_at
         state.backend_transport = snapshot.backend_transport
+        if snapshot.canonical_reply_recipient is not None:
+            state.canonical_reply_recipient = snapshot.canonical_reply_recipient
         if state.queued_task_id == snapshot.task_id:
             state.current_task_id = snapshot.task_id
             state.last_task_snapshot_file = state.queued_snapshot_file or snapshot_rel
@@ -794,6 +812,8 @@ def main(argv: list[str] | None = None) -> int:
         _build_dispatcher(config),
         max_active_sessions=config.max_active_sessions,
         max_active_sessions_per_workspace=config.max_active_sessions_per_workspace,
+        max_running_sessions=config.max_running_sessions,
+        max_running_sessions_per_workspace=config.max_running_sessions_per_workspace,
         opencode_transport_default=config.opencode_transport_default,
         codex_transport_default=config.codex_transport_default,
     )

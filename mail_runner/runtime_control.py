@@ -243,7 +243,7 @@ def request_thread_close(
         return 1, f"Thread {thread_id} does not have an active task id to close."
     if not thread_monitor_should_stay_open(state):
         return 1, (
-            f"Thread {thread_id} is not currently monitorable; "
+            f"Thread {thread_id} is not currently active-session closable; "
             f"status={state.status or 'unknown'} lifecycle={state.lifecycle or 'unknown'}"
         )
 
@@ -272,7 +272,7 @@ def main(argv: list[str] | None = None) -> int:
 
     request_close = subparsers.add_parser(
         "request-thread-close",
-        help="Queue a local close request for a focused monitor window.",
+        help="Queue a local close request for a focused active-session window.",
     )
     request_close.add_argument("thread_id", help="Thread id, for example thread_048")
     request_close.add_argument("--runtime-dir", required=True, help="Runtime directory shared with the host loop.")

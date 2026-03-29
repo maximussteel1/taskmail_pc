@@ -1,11 +1,12 @@
-"""Monitor-window launcher tests."""
+"""Active-session-window launcher tests."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from mail_runner import monitor_windows
 from mail_runner.models import RunResult, TaskSnapshot, ThreadState
-from mail_runner.monitor_windows import MonitorWindowManager
+from mail_runner.monitor_windows import ActiveSessionWindowManager
 
 
 class FakeProcess:
@@ -80,7 +81,7 @@ def _result() -> RunResult:
 
 def test_monitor_window_manager_does_not_launch_when_disabled(tmp_path: Path) -> None:
     launched: list[list[str]] = []
-    manager = MonitorWindowManager(
+    manager = ActiveSessionWindowManager(
         enabled=False,
         project_root=tmp_path,
         task_root=tmp_path / "tasks",
@@ -103,7 +104,7 @@ def test_monitor_window_manager_launches_focused_thread_window(tmp_path: Path) -
         launched.append((command, creationflags, cwd))
         return FakeProcess()
 
-    manager = MonitorWindowManager(
+    manager = ActiveSessionWindowManager(
         enabled=True,
         project_root=project_root,
         task_root=tmp_path / "tasks",
@@ -134,7 +135,7 @@ def test_monitor_window_manager_launches_focused_thread_window(tmp_path: Path) -
     assert "-ExitWhenThreadNotActive" in command
     assert "-ExitWhenThreadNotRunning" not in command
     assert "-WindowTitle" in command
-    assert "Mail Runner Monitor thread_001" in command
+    assert "Mail Runner Active Session thread_001" in command
     assert creationflags >= 0
     assert cwd == project_root.resolve()
 
@@ -152,7 +153,7 @@ def test_monitor_window_manager_reopens_after_previous_window_exits(tmp_path: Pa
         launches.append(process)
         return process
 
-    manager = MonitorWindowManager(
+    manager = ActiveSessionWindowManager(
         enabled=True,
         project_root=project_root,
         task_root=tmp_path / "tasks",
@@ -165,3 +166,32 @@ def test_monitor_window_manager_reopens_after_previous_window_exits(tmp_path: Pa
     manager.on_run_started(_state(), _snapshot())
 
     assert len(launches) == 2
+
+
+def test_monitor_window_manager_skips_launch_when_persisted_window_is_alive(tmp_path: Path, monkeypatch) -> None:
+    launches: list[tuple[list[str], int, Path]] = []
+    project_root = tmp_path / "repo"
+    runtime_dir = project_root / "_tmp_live_mail_runner"
+    state_dir = runtime_dir / "active_session_window_state"
+    script_dir = project_root / "scripts"
+    script_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    (script_dir / "monitor_mail_runner_controller.ps1").write_text("# test\n", encoding="utf-8")
+    (state_dir / "thread_001.window.json").write_text(
+        '{"thread_id":"thread_001","controller_pid":4242,"worker_pid":4343}\n',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(monitor_windows, "_pid_is_alive", lambda pid: pid == 4343)
+
+    manager = ActiveSessionWindowManager(
+        enabled=True,
+        project_root=project_root,
+        task_root=tmp_path / "tasks",
+        runtime_dir=runtime_dir,
+        launcher=lambda command, creationflags, cwd: launches.append((command, creationflags, cwd)),
+    )
+
+    manager.on_run_started(_state(), _snapshot())
+
+    assert launches == []

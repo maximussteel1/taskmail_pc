@@ -42,6 +42,19 @@ class ThreadFollowCursor:
     stream_seq_by_task: dict[str, int] = field(default_factory=dict)
     current_live_task_id: str | None = None
     assistant_stream_open: bool = False
+    last_session_state: "FollowSessionState | None" = None
+
+
+@dataclass(slots=True)
+class FollowSessionState:
+    lifecycle: str
+    status: str
+    task_id: str
+    backend_transport: str
+    backend_session_resumable: bool
+    host_status: str
+    host_pid_alive: bool
+    updated_at: str
 
 
 def resolve_observe_config_path(config_path: str | None, runtime_dir: Path) -> Path:
@@ -398,7 +411,7 @@ def follow_thread_live(
         if exit_when_inactive and not thread_monitor_should_stay_open(thread):
             _write_follow_chunks(_finalize_follow_output(cursor))
             _write_follow_exit_state(exit_state_path, reason="inactive", thread_id=thread.thread_id)
-            print(f"Thread {thread.thread_id} monitor closed: {thread_monitor_exit_reason(thread)}.")
+            print(f"Thread {thread.thread_id} active session window closed: {thread_monitor_exit_reason(thread)}.")
             return 0
 
         completed_iterations += 1
@@ -414,6 +427,46 @@ def _find_thread(context: ObserveContext, thread_id: str) -> ThreadState | None:
     return next((item for item in context.threads if item.thread_id == thread_id), None)
 
 
+def _build_follow_session_state(context: ObserveContext, thread: ThreadState) -> FollowSessionState:
+    host_state = context.host_state or {}
+    return FollowSessionState(
+        lifecycle=_text_or_dash(thread.lifecycle),
+        status=_text_or_dash(thread.status),
+        task_id=_text_or_dash(thread.current_task_id),
+        backend_transport=_text_or_dash(thread.backend_transport),
+        backend_session_resumable=bool(thread.backend_session_resumable),
+        host_status=_text_or_dash(host_state.get("status")),
+        host_pid_alive=_pid_is_alive(host_state.get("pid")),
+        updated_at=_text_or_dash(thread.updated_at),
+    )
+
+
+def _render_follow_session_state(
+    state: FollowSessionState,
+    *,
+    initial: bool,
+) -> list[str]:
+    prefix = "Current State" if initial else f"{state.updated_at} | Session State"
+    lines = [
+        (
+            f"{prefix}: lifecycle={state.lifecycle}"
+            f" | status={state.status}"
+            f" | task={state.task_id}"
+            f" | transport={state.backend_transport}"
+            f" | resumable={'true' if state.backend_session_resumable else 'false'}"
+            f" | host={state.host_status}"
+            f" | host_pid_alive={'yes' if state.host_pid_alive else 'no'}"
+        )
+    ]
+    if state.status not in {"accepted", "running"}:
+        note_prefix = "Session Note" if initial else f"{state.updated_at} | Session Note"
+        lines.append(
+            f"{note_prefix}: this window stays open while lifecycle=active, even when no backend run is currently executing."
+        )
+    lines.append("")
+    return lines
+
+
 def _collect_follow_chunks(
     *,
     context: ObserveContext,
@@ -423,19 +476,25 @@ def _collect_follow_chunks(
     history_limit: int,
 ) -> list[str]:
     chunks: list[str] = []
+    session_state = _build_follow_session_state(context, thread)
     transcript_turns = _load_transcript_turns(context.task_root, thread.thread_id)
     if include_history:
-        chunks.extend(_line_chunks(_render_follow_header(thread)))
+        chunks.extend(_line_chunks(_render_follow_header(thread, session_state)))
+        chunks.extend(_line_chunks(_render_follow_session_state(session_state, initial=True)))
         chunks.extend(_render_follow_history(transcript_turns, history_limit))
         if transcript_turns:
             cursor.last_transcript_index = transcript_turns[-1].index
     else:
+        if cursor.last_session_state != session_state:
+            chunks.extend(_finalize_follow_output(cursor))
+            chunks.extend(_line_chunks(_render_follow_session_state(session_state, initial=False)))
         new_turns = [turn for turn in transcript_turns if turn.index > cursor.last_transcript_index]
         if new_turns:
             chunks.extend(_finalize_follow_output(cursor))
             for turn in new_turns:
                 chunks.extend(_line_chunks(_render_transcript_turn(turn)))
             cursor.last_transcript_index = transcript_turns[-1].index
+    cursor.last_session_state = session_state
 
     current_task_id = (thread.current_task_id or "").strip()
     if current_task_id:
@@ -453,10 +512,10 @@ def _collect_follow_chunks(
     return chunks
 
 
-def _render_follow_header(thread: ThreadState) -> list[str]:
+def _render_follow_header(thread: ThreadState, state: FollowSessionState) -> list[str]:
     return [
-        f"Live Thread Monitor: {thread.thread_id}",
-        "This window appends new user messages and live backend output. Press Ctrl+C to close.",
+        f"Active Session Window: {thread.thread_id}",
+        "This focused window follows one active session. Closing it requests a local close for that active session.",
         (
             f"Session: {_text_or_dash(thread.session_id or thread.thread_id)}"
             f" | lifecycle={thread.lifecycle}"
@@ -465,6 +524,7 @@ def _render_follow_header(thread: ThreadState) -> list[str]:
             f" | task={thread.current_task_id}"
             f" | resumable={'true' if thread.backend_session_resumable else 'false'}"
         ),
+        f"Host: {state.host_status} | pid_alive={'yes' if state.host_pid_alive else 'no'}",
         f"Repo: {thread.repo_path}",
         f"Workdir: {_text_or_dash(thread.workdir or '.')}",
         "",
@@ -736,7 +796,7 @@ def _build_parser() -> argparse.ArgumentParser:
     show_thread_live.add_argument("thread_id", help="Thread id, for example thread_048")
     follow_thread_live_parser = subparsers.add_parser(
         "follow-thread-live",
-        help="Continuously append new transcript turns and live stream output for a thread.",
+        help="Continuously append new transcript turns and live stream output for one active-session window.",
     )
     follow_thread_live_parser.add_argument("thread_id", help="Thread id, for example thread_048")
     follow_thread_live_parser.add_argument(

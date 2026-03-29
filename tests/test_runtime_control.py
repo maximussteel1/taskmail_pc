@@ -155,7 +155,7 @@ def test_runtime_control_main_queues_close_request_for_active_nonrunning_thread(
     assert read_thread_close_request(request_paths[0])["source"] == "pytest"
 
 
-def test_runtime_control_main_rejects_close_request_for_unmonitorable_thread(tmp_path: Path, capsys) -> None:
+def test_runtime_control_main_rejects_close_request_for_non_active_session_thread(tmp_path: Path, capsys) -> None:
     runtime_dir = tmp_path / "runtime"
     task_root = tmp_path / "tasks"
     _create_thread_state(task_root, status=THREAD_STATUS_DONE, lifecycle="ended")
@@ -174,7 +174,7 @@ def test_runtime_control_main_rejects_close_request_for_unmonitorable_thread(tmp
     output = capsys.readouterr().out
 
     assert exit_code == 1
-    assert "is not currently monitorable" in output
+    assert "is not currently active-session closable" in output
     assert list_thread_close_request_paths(runtime_dir) == []
 
 

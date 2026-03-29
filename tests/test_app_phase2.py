@@ -686,14 +686,17 @@ def test_background_batch_queues_second_session_instead_of_sending_busy_status(t
         from_addr="user@example.com",
         from_name="Mail Runner",
         task_root="tasks",
-        max_active_sessions_per_workspace=1,
+        max_running_sessions_per_workspace=1,
     )
     details = bootstrap(config, tmp_path)
     task_root = Path(details["task_root"])
     runner = SerialTaskRunner(
         task_root,
         dispatcher,
+        max_active_sessions=config.max_active_sessions,
         max_active_sessions_per_workspace=config.max_active_sessions_per_workspace,
+        max_running_sessions=config.max_running_sessions,
+        max_running_sessions_per_workspace=config.max_running_sessions_per_workspace,
     )
 
     stats = _process_batch(config, task_root, client, runner, background=True)
@@ -749,10 +752,23 @@ def test_background_batch_runs_different_workspaces_concurrently(tmp_path) -> No
     )
     client = FakeMailClient([first, second])
     dispatcher = Dispatcher(MockAdapter(sleep_seconds=0.5), MockAdapter(sleep_seconds=0.5))
-    config = AppConfig(from_addr="user@example.com", from_name="Mail Runner", task_root="tasks", max_active_sessions=2)
+    config = AppConfig(
+        from_addr="user@example.com",
+        from_name="Mail Runner",
+        task_root="tasks",
+        max_active_sessions=4,
+        max_running_sessions=2,
+    )
     details = bootstrap(config, tmp_path)
     task_root = Path(details["task_root"])
-    runner = SerialTaskRunner(task_root, dispatcher, max_active_sessions=config.max_active_sessions)
+    runner = SerialTaskRunner(
+        task_root,
+        dispatcher,
+        max_active_sessions=config.max_active_sessions,
+        max_active_sessions_per_workspace=config.max_active_sessions_per_workspace,
+        max_running_sessions=config.max_running_sessions,
+        max_running_sessions_per_workspace=config.max_running_sessions_per_workspace,
+    )
 
     stats = _process_batch(config, task_root, client, runner, background=True)
     time.sleep(0.05)

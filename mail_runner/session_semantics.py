@@ -32,12 +32,12 @@ def thread_can_continue_without_resume(state: ThreadState) -> bool:
 
 
 def thread_monitor_should_stay_open(state: ThreadState) -> bool:
-    """Whether a focused monitor window should stay attached to this thread."""
+    """Whether a focused active-session window should stay attached to this thread."""
 
     return state.lifecycle == "active"
 
 
 def thread_monitor_exit_reason(state: ThreadState) -> str:
-    """Human-readable explanation for why a focused monitor can close."""
+    """Human-readable explanation for why a focused active-session window can close."""
 
     return "session is no longer active"

@@ -31,6 +31,14 @@ from .android_create_session_facade import (
     AndroidCreateSessionSubmitTimeout,
     submit_android_create_session_command,
 )
+from .android_session_action_facade import (
+    ANDROID_SESSION_ACTION_PATH,
+    AndroidSessionActionContractError,
+    AndroidSessionActionFacadeError,
+    AndroidSessionActionSubmitTimeout,
+    submit_android_session_action_command,
+)
+from .android_session_action_request_store import PersistentAndroidSessionActionRequestStore
 from .android_environment_inventory_facade import (
     ANDROID_ENVIRONMENT_INVENTORY_PATH,
     build_android_environment_inventory_snapshot,
@@ -351,6 +359,9 @@ def build_http_server(
     file_store = FileSurfaceStore(
         config.state_dir,
         upload_limit_bytes=file_upload_limit_bytes if file_upload_limit_bytes is not None else 32 * 1024 * 1024,
+    )
+    session_action_request_store = PersistentAndroidSessionActionRequestStore(
+        Path(config.state_dir) / "android_session_action_requests.json"
     )
 
     class RelayRequestHandler(BaseHTTPRequestHandler):
@@ -878,6 +889,74 @@ def build_http_server(
                     )
                     return
                 self._write_json(200, response_payload)
+                return
+            if path == ANDROID_SESSION_ACTION_PATH:
+                if not self._require_android_app_token():
+                    self._discard_request_body()
+                    return
+                if pc_control_runtime is None:
+                    self._discard_request_body()
+                    self._write_json(
+                        503,
+                        {
+                            "status": "error",
+                            "error_code": "pc_control_unavailable",
+                            "error_message": "pc_control_runtime is not configured",
+                            "retryable": True,
+                        },
+                    )
+                    return
+                try:
+                    raw_length = str(self.headers.get("Content-Length", "") or "").strip()
+                    content_length = int(raw_length)
+                    if content_length < 0:
+                        raise ValueError("Content-Length must be non-negative")
+                    body = self.rfile.read(content_length)
+                    payload = json.loads(body.decode("utf-8"))
+                    response = submit_android_session_action_command(
+                        payload,
+                        pc_control_runtime=pc_control_runtime,
+                        request_store=session_action_request_store,
+                        task_root=config.task_root,
+                    )
+                except json.JSONDecodeError as exc:
+                    self._write_json(
+                        400,
+                        {
+                            "status": "error",
+                            "error_code": "invalid_json",
+                            "error_message": f"request body is not valid JSON: {exc}",
+                            "retryable": False,
+                        },
+                    )
+                    return
+                except AndroidSessionActionFacadeError as exc:
+                    self._write_json(exc.status_code, exc.to_response_payload())
+                    return
+                except AndroidSessionActionContractError as exc:
+                    self._write_json(
+                        502,
+                        {
+                            "status": "error",
+                            "error_code": "android_session_action_contract_violation",
+                            "error_message": str(exc),
+                            "retryable": True,
+                        },
+                    )
+                    return
+                except AndroidSessionActionSubmitTimeout as exc:
+                    payload = {
+                        "status": "error",
+                        "error_code": "submit_ack_timeout",
+                        "error_message": str(exc),
+                        "retryable": True,
+                        "command_id": exc.command_id,
+                    }
+                    if exc.target_session_identity is not None:
+                        payload["target_session_identity"] = exc.target_session_identity
+                    self._write_json(504, payload)
+                    return
+                self._write_json(response.status_code, response.payload)
                 return
             if path == _PC_CONTROL_OPERATOR_DISPATCH_PATH:
                 if not self._require_transport_token():

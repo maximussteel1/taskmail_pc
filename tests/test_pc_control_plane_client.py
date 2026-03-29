@@ -1,19 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+from pathlib import Path
 
 from mail_runner.adapters.mock_adapter import SUMMARY_LINE
 from mail_runner.artifact_resolver import write_artifact_index
 from mail_runner.config import AppConfig
 from mail_runner.file_surface import write_artifact_upload_success_binding
-from mail_runner.models import RunArtifact, RunResult, TaskSnapshot, ThreadState
+from mail_runner.models import QuestionAnswer, QuestionItem, RunArtifact, RunResult, TaskSnapshot, ThreadState
 from mail_runner.pc_control_plane_client import PcControlPlaneClient, build_pc_control_plane_client
+from mail_runner.question_utils import canonical_answer_context, canonical_answer_summary
 from mail_runner.relay_server.app import build_runtime_relay, start_relay_server
 from mail_runner.relay_server.config import RelayServerConfig
 from mail_runner.relay_server.packet_store import PersistentAcceptedPacketStore
 from mail_runner.relay_server.pc_command_store import PcCommandRecord
 from mail_runner.relay_server.pc_control_protocol import (
+    PcCommandAckMessage,
+    PcCommandResultMessage,
     PcOutputChunkMessage,
     build_command_dispatch,
     build_output_chunk,
@@ -24,6 +29,7 @@ from mail_runner.relay_server.pc_control_protocol import (
 from mail_runner.relay_server.pc_control_runtime import build_pc_control_runtime
 from mail_runner.relay_server.session_store import PersistentSessionStore
 from mail_runner.stream_events import STREAM_EVENTS_FILENAME
+from mail_runner.thread_store import build_workspace_id, build_workspace_norm, load_thread_state, save_raw_mail, save_thread_state
 from mail_runner.workspace import WorkspaceManager
 
 
@@ -263,6 +269,136 @@ class _RecordingWebSocket:
         self.sent_frames.append(json.loads(payload))
 
 
+class _FakeMailClient:
+    def __init__(self) -> None:
+        self.sent_messages: list[dict[str, object]] = []
+
+    def send_mail(self, **kwargs):
+        self.sent_messages.append(kwargs)
+        return f"<sent-{len(self.sent_messages)}@example.com>"
+
+
+def _workspace_item(*, repo_path: str, workdir: str | None) -> dict[str, object]:
+    return {
+        "workspace_id": build_workspace_id(repo_path, workdir),
+        "workspace_norm": build_workspace_norm(repo_path, workdir),
+        "repo_path": repo_path,
+        "workdir": workdir,
+        "display_name": "android_task_manager",
+        "source": "project_sync_roots",
+        "capabilities": {
+            "streaming": True,
+            "artifact_manifest": True,
+            "workspace_snapshot": True,
+            "supported_backends": ["codex"],
+            "profile_catalogs": {"codex": ["default", "strong"]},
+            "permission_modes": ["default", "highest"],
+            "backend_transport_modes": {"codex": ["cli", "sdk"]},
+        },
+    }
+
+
+def _build_existing_thread_state(
+    task_root,
+    *,
+    status: str = "done",
+    last_summary: str = "Completed.",
+    paused_from_status: str | None = None,
+    pending_questions: list[QuestionItem] | None = None,
+    collected_answers: list[QuestionAnswer] | None = None,
+    backend_session_id: str | None = None,
+    backend_session_resumable: bool = False,
+    lifecycle: str = "active",
+    canonical_reply_recipient: str | None = "user@example.com",
+    save_inbound_mail: bool = False,
+) -> ThreadState:
+    repo_path = "E:\\projects\\android_task_manager"
+    workdir = "feature/taskmail/internal"
+    workspace = WorkspaceManager(task_root)
+    snapshot = TaskSnapshot(
+        task_id="task_001",
+        thread_id="thread_001",
+        backend="codex",
+        profile="strong",
+        permission="highest",
+        repo_path=repo_path,
+        workdir=workdir,
+        task_text="Phase 3 detail bridge",
+        acceptance=[],
+        timeout_minutes=30,
+        mode="modify",
+        attachments=[],
+        created_at="2026-03-25T10:00:20",
+        updated_at="2026-03-25T10:00:20",
+        run_mode="new",
+        backend_session_id=None,
+        turn_text=None,
+        backend_transport="sdk",
+    )
+    snapshot_path = workspace.save_snapshot(snapshot)
+    state = ThreadState(
+        thread_id="thread_001",
+        root_message_id="<root@example.com>",
+        latest_message_id="<latest@example.com>",
+        subject_norm="phase 3 detail bridge",
+        backend="codex",
+        repo_path=repo_path,
+        workdir=workdir,
+        current_task_id=snapshot.task_id,
+        last_task_snapshot_file=workspace.to_thread_relative(snapshot.thread_id, snapshot_path),
+        status=status,
+        profile="strong",
+        permission="highest",
+        last_summary=last_summary,
+        lifecycle=lifecycle,
+        last_active_at="2026-03-25T10:00:20",
+        last_progress_at="2026-03-25T10:00:20",
+        workspace_id=build_workspace_id(repo_path, workdir),
+        workspace_norm=build_workspace_norm(repo_path, workdir),
+        session_id="session_001",
+        session_name="Phase 3 detail bridge",
+        session_norm="phase 3 detail bridge",
+        canonical_reply_recipient=canonical_reply_recipient,
+        collected_answers=list(collected_answers or []),
+        backend_session_id=backend_session_id,
+        backend_session_resumable=backend_session_resumable,
+        backend_transport="sdk",
+        pending_questions=list(pending_questions or []),
+        paused_from_status=paused_from_status,
+        created_at="2026-03-25T10:00:20",
+        updated_at="2026-03-25T10:00:20",
+    )
+    save_thread_state(state, task_root)
+    if save_inbound_mail:
+        save_raw_mail(
+            state.thread_id,
+            {
+                "message_id": "<user-inbound@example.com>",
+                "subject": "Re: [S:session_001] Phase 3 detail bridge",
+                "from_addr": "user@example.com",
+                "to_addr": "bot@example.com",
+                "date": "2026-03-25T10:00:19",
+                "body_text": "Please continue with the cleanup.",
+                "raw_headers": {},
+            },
+            task_root,
+        )
+    return state
+
+
+async def _dispatch_messages(client: PcControlPlaneClient, command, *, connection_epoch: int = 1):
+    websocket = _RecordingWebSocket()
+    send_lock = asyncio.Lock()
+    await client._handle_command_dispatch(
+        websocket,
+        message=command,
+        connection_epoch=connection_epoch,
+        send_lock=send_lock,
+    )
+    await client._flush_pending_client_messages(websocket, send_lock)
+    return [parse_pc_control_client_message(frame) for frame in websocket.sent_frames], websocket
+
+
 def test_pc_control_plane_client_strict_lease_blocks_mailbox_without_active_lease(tmp_path) -> None:
     client = PcControlPlaneClient(
         relay_url="ws://127.0.0.1:8787/relay",
@@ -337,6 +473,736 @@ def test_pc_control_plane_client_degraded_mode_falls_back_locally_when_disconnec
     assert client.can_consume_mailbox() is True
     assert decision["decision"] == "accepted"
     assert decision["degraded_mode"] is True
+
+
+def test_pc_control_plane_client_status_command_reuses_current_session_mail_path(tmp_path) -> None:
+    task_root = tmp_path / "task_root"
+    thread_state = _build_existing_thread_state(task_root)
+    fake_mail_client = _FakeMailClient()
+    workspace_item = _workspace_item(repo_path=thread_state.repo_path, workdir=thread_state.workdir)
+    client = PcControlPlaneClient(
+        relay_url="ws://127.0.0.1:8787/relay",
+        transport_token="relay-secret",
+        pc_id="pc_home",
+        client_version="0.1.0",
+        display_name="pc_home",
+        config=AppConfig(from_addr="bot@example.com", codex_profile_models={"strong": "gpt-5-codex"}),
+        runner=_ImmediateSuccessRunner(task_root),
+        mail_client=fake_mail_client,
+        workspace_provider=lambda: [workspace_item],
+        clock=lambda: "2026-03-25T10:05:00",
+    )
+    command = parse_pc_control_server_message(
+        build_command_dispatch(
+            message_id="msg_cmd_status_001",
+            trace_id="trace_cmd_status_001",
+            pc_id="pc_home",
+            connection_epoch=1,
+            sent_at="2026-03-25T10:05:00",
+            command_id="cmd_status_001",
+            command_type="status",
+            workspace_id=str(workspace_item["workspace_id"]),
+            session_id=thread_state.session_id,
+            execution_policy={},
+            command_payload={
+                "target": {
+                    "scope": "current_session",
+                    "workspace_id": thread_state.workspace_id,
+                    "session_id": thread_state.session_id,
+                    "thread_id": thread_state.thread_id,
+                },
+                "status": {},
+            },
+        )
+    )
+
+    messages, _websocket = asyncio.run(_dispatch_messages(client, command))
+
+    assert len(messages) == 2
+    assert isinstance(messages[0], PcCommandAckMessage)
+    assert isinstance(messages[1], PcCommandResultMessage)
+    assert messages[0].payload["ack_status"] == "accepted"
+    assert messages[1].payload["final_status"] == "done"
+    structured_payload = messages[1].payload["structured_payload"]
+    assert structured_payload["kind"] == "session_action_result"
+    assert structured_payload["session_action_result"]["action_type"] == "status"
+    assert structured_payload["session_action_result"]["result_scope"] == "mail_ingress_submission"
+    closeout = structured_payload["session_action_result"]["session_action_closeout"]
+    assert closeout["request_id"] == "cmd_status_001"
+    assert closeout["packet_id"] == "pc-control:session-action:cmd_status_001"
+    assert closeout["target_session_identity"] == {
+        "workspace_id": thread_state.workspace_id,
+        "session_id": thread_state.session_id,
+        "thread_id": thread_state.thread_id,
+    }
+    assert fake_mail_client.sent_messages[0]["to_addr"] == "user@example.com"
+    assert fake_mail_client.sent_messages[0]["subject"] == "[STATUS][S:session_001] Phase 3 detail bridge"
+
+
+def test_pc_control_plane_client_reply_command_emits_session_action_result(tmp_path) -> None:
+    task_root = tmp_path / "task_root"
+    thread_state = _build_existing_thread_state(task_root)
+    fake_mail_client = _FakeMailClient()
+    workspace_item = _workspace_item(repo_path=thread_state.repo_path, workdir=thread_state.workdir)
+    client = PcControlPlaneClient(
+        relay_url="ws://127.0.0.1:8787/relay",
+        transport_token="relay-secret",
+        pc_id="pc_home",
+        client_version="0.1.0",
+        display_name="pc_home",
+        config=AppConfig(from_addr="bot@example.com", codex_profile_models={"strong": "gpt-5-codex"}),
+        runner=_ImmediateSuccessRunner(task_root),
+        mail_client=fake_mail_client,
+        workspace_provider=lambda: [workspace_item],
+        clock=lambda: "2026-03-25T10:06:00",
+    )
+    command = parse_pc_control_server_message(
+        build_command_dispatch(
+            message_id="msg_cmd_reply_001",
+            trace_id="trace_cmd_reply_001",
+            pc_id="pc_home",
+            connection_epoch=1,
+            sent_at="2026-03-25T10:06:00",
+            command_id="cmd_reply_001",
+            command_type="reply",
+            workspace_id=str(workspace_item["workspace_id"]),
+            session_id=thread_state.session_id,
+            execution_policy={},
+            command_payload={
+                "target": {
+                    "scope": "current_session",
+                    "workspace_id": thread_state.workspace_id,
+                    "session_id": thread_state.session_id,
+                    "thread_id": thread_state.thread_id,
+                },
+                "reply": {
+                    "reply_text": "Please continue with the cleanup.",
+                },
+            },
+        )
+    )
+
+    messages, _websocket = asyncio.run(_dispatch_messages(client, command))
+
+    assert len(messages) == 2
+    assert isinstance(messages[0], PcCommandAckMessage)
+    assert isinstance(messages[1], PcCommandResultMessage)
+    assert messages[0].payload["ack_status"] == "accepted"
+    assert messages[1].payload["final_status"] == "done"
+    structured_payload = messages[1].payload["structured_payload"]
+    assert structured_payload["kind"] == "session_action_result"
+    assert structured_payload["session_action_result"]["action_type"] == "reply"
+    closeout = structured_payload["session_action_result"]["session_action_closeout"]
+    assert closeout["request_id"] == "cmd_reply_001"
+    assert closeout["terminal_mail_subject"] is not None
+    assert any(item["to_addr"] == "user@example.com" for item in fake_mail_client.sent_messages)
+
+
+def test_pc_control_plane_client_legacy_mail_born_session_can_fallback_to_recovery_recipient(tmp_path) -> None:
+    task_root = tmp_path / "task_root"
+    thread_state = _build_existing_thread_state(
+        task_root,
+        canonical_reply_recipient=None,
+        save_inbound_mail=True,
+    )
+    fake_mail_client = _FakeMailClient()
+    workspace_item = _workspace_item(repo_path=thread_state.repo_path, workdir=thread_state.workdir)
+    client = PcControlPlaneClient(
+        relay_url="ws://127.0.0.1:8787/relay",
+        transport_token="relay-secret",
+        pc_id="pc_home",
+        client_version="0.1.0",
+        display_name="pc_home",
+        config=AppConfig(from_addr="bot@example.com", codex_profile_models={"strong": "gpt-5-codex"}),
+        runner=_ImmediateSuccessRunner(task_root),
+        mail_client=fake_mail_client,
+        workspace_provider=lambda: [workspace_item],
+        clock=lambda: "2026-03-25T10:06:30",
+    )
+    command = parse_pc_control_server_message(
+        build_command_dispatch(
+            message_id="msg_cmd_reply_legacy_001",
+            trace_id="trace_cmd_reply_legacy_001",
+            pc_id="pc_home",
+            connection_epoch=1,
+            sent_at="2026-03-25T10:06:30",
+            command_id="cmd_reply_legacy_001",
+            command_type="reply",
+            workspace_id=str(workspace_item["workspace_id"]),
+            session_id=thread_state.session_id,
+            execution_policy={},
+            command_payload={
+                "target": {
+                    "scope": "current_session",
+                    "workspace_id": thread_state.workspace_id,
+                    "session_id": thread_state.session_id,
+                    "thread_id": thread_state.thread_id,
+                },
+                "reply": {
+                    "reply_text": "Please continue with the cleanup.",
+                },
+            },
+        )
+    )
+
+    messages, _websocket = asyncio.run(_dispatch_messages(client, command))
+
+    assert len(messages) == 2
+    assert isinstance(messages[0], PcCommandAckMessage)
+    assert isinstance(messages[1], PcCommandResultMessage)
+    assert messages[0].payload["ack_status"] == "accepted"
+    assert any(item["to_addr"] == "user@example.com" for item in fake_mail_client.sent_messages)
+    updated_state = load_thread_state(thread_state.thread_id, task_root)
+    assert updated_state.canonical_reply_recipient == "user@example.com"
+
+
+def test_pc_control_plane_client_rejects_session_action_when_recipient_binding_is_missing(tmp_path) -> None:
+    task_root = tmp_path / "task_root"
+    thread_state = _build_existing_thread_state(
+        task_root,
+        canonical_reply_recipient=None,
+        save_inbound_mail=False,
+    )
+    fake_mail_client = _FakeMailClient()
+    workspace_item = _workspace_item(repo_path=thread_state.repo_path, workdir=thread_state.workdir)
+    client = PcControlPlaneClient(
+        relay_url="ws://127.0.0.1:8787/relay",
+        transport_token="relay-secret",
+        pc_id="pc_home",
+        client_version="0.1.0",
+        display_name="pc_home",
+        config=AppConfig(from_addr="bot@example.com", codex_profile_models={"strong": "gpt-5-codex"}),
+        runner=_ImmediateSuccessRunner(task_root),
+        mail_client=fake_mail_client,
+        workspace_provider=lambda: [workspace_item],
+        clock=lambda: "2026-03-25T10:06:45",
+    )
+    command = parse_pc_control_server_message(
+        build_command_dispatch(
+            message_id="msg_cmd_reply_missing_recipient_001",
+            trace_id="trace_cmd_reply_missing_recipient_001",
+            pc_id="pc_home",
+            connection_epoch=1,
+            sent_at="2026-03-25T10:06:45",
+            command_id="cmd_reply_missing_recipient_001",
+            command_type="reply",
+            workspace_id=str(workspace_item["workspace_id"]),
+            session_id=thread_state.session_id,
+            execution_policy={},
+            command_payload={
+                "target": {
+                    "scope": "current_session",
+                    "workspace_id": thread_state.workspace_id,
+                    "session_id": thread_state.session_id,
+                    "thread_id": thread_state.thread_id,
+                },
+                "reply": {
+                    "reply_text": "Please continue with the cleanup.",
+                },
+            },
+        )
+    )
+
+    messages, _websocket = asyncio.run(_dispatch_messages(client, command))
+
+    assert len(messages) == 1
+    assert isinstance(messages[0], PcCommandAckMessage)
+    assert messages[0].payload["ack_status"] == "rejected"
+    assert messages[0].payload["error_code"] == "session_recipient_unresolved"
+    assert fake_mail_client.sent_messages == []
+
+
+def test_pc_control_plane_client_rejects_reply_when_target_session_is_paused(tmp_path) -> None:
+    task_root = tmp_path / "task_root"
+    thread_state = _build_existing_thread_state(task_root)
+    thread_state.status = "paused"
+    thread_state.updated_at = "2026-03-25T10:07:00"
+    thread_state.last_progress_at = thread_state.updated_at
+    save_thread_state(thread_state, task_root)
+    fake_mail_client = _FakeMailClient()
+    workspace_item = _workspace_item(repo_path=thread_state.repo_path, workdir=thread_state.workdir)
+    client = PcControlPlaneClient(
+        relay_url="ws://127.0.0.1:8787/relay",
+        transport_token="relay-secret",
+        pc_id="pc_home",
+        client_version="0.1.0",
+        display_name="pc_home",
+        config=AppConfig(from_addr="bot@example.com", codex_profile_models={"strong": "gpt-5-codex"}),
+        runner=_ImmediateSuccessRunner(task_root),
+        mail_client=fake_mail_client,
+        workspace_provider=lambda: [workspace_item],
+        clock=lambda: "2026-03-25T10:07:00",
+    )
+    command = parse_pc_control_server_message(
+        build_command_dispatch(
+            message_id="msg_cmd_reply_002",
+            trace_id="trace_cmd_reply_002",
+            pc_id="pc_home",
+            connection_epoch=1,
+            sent_at="2026-03-25T10:07:00",
+            command_id="cmd_reply_002",
+            command_type="reply",
+            workspace_id=str(workspace_item["workspace_id"]),
+            session_id=thread_state.session_id,
+            execution_policy={},
+            command_payload={
+                "target": {
+                    "scope": "current_session",
+                    "workspace_id": thread_state.workspace_id,
+                    "session_id": thread_state.session_id,
+                    "thread_id": thread_state.thread_id,
+                },
+                "reply": {
+                    "reply_text": "Please continue with the cleanup.",
+                },
+            },
+        )
+    )
+
+    messages, _websocket = asyncio.run(_dispatch_messages(client, command))
+
+    assert len(messages) == 1
+    assert isinstance(messages[0], PcCommandAckMessage)
+    assert messages[0].payload["ack_status"] == "rejected"
+    assert messages[0].payload["error_code"] == "validation_failed"
+    assert fake_mail_client.sent_messages == []
+
+
+def test_pc_control_plane_client_pause_command_reuses_existing_thread_mail_path(tmp_path) -> None:
+    task_root = tmp_path / "task_root"
+    thread_state = _build_existing_thread_state(task_root, status="done")
+    fake_mail_client = _FakeMailClient()
+    workspace_item = _workspace_item(repo_path=thread_state.repo_path, workdir=thread_state.workdir)
+    client = PcControlPlaneClient(
+        relay_url="ws://127.0.0.1:8787/relay",
+        transport_token="relay-secret",
+        pc_id="pc_home",
+        client_version="0.1.0",
+        display_name="pc_home",
+        config=AppConfig(from_addr="bot@example.com", codex_profile_models={"strong": "gpt-5-codex"}),
+        runner=_ImmediateSuccessRunner(task_root),
+        mail_client=fake_mail_client,
+        workspace_provider=lambda: [workspace_item],
+        clock=lambda: "2026-03-25T10:08:00",
+    )
+    command = parse_pc_control_server_message(
+        build_command_dispatch(
+            message_id="msg_cmd_pause_001",
+            trace_id="trace_cmd_pause_001",
+            pc_id="pc_home",
+            connection_epoch=1,
+            sent_at="2026-03-25T10:08:00",
+            command_id="cmd_pause_001",
+            command_type="pause",
+            workspace_id=str(workspace_item["workspace_id"]),
+            session_id=thread_state.session_id,
+            execution_policy={},
+            command_payload={
+                "target": {
+                    "scope": "current_session",
+                    "workspace_id": thread_state.workspace_id,
+                    "session_id": thread_state.session_id,
+                    "thread_id": thread_state.thread_id,
+                },
+                "pause": {},
+            },
+        )
+    )
+
+    messages, _websocket = asyncio.run(_dispatch_messages(client, command))
+
+    assert len(messages) == 2
+    assert isinstance(messages[0], PcCommandAckMessage)
+    assert isinstance(messages[1], PcCommandResultMessage)
+    assert messages[0].payload["ack_status"] == "accepted"
+    assert messages[1].payload["final_status"] == "done"
+    structured_payload = messages[1].payload["structured_payload"]
+    assert structured_payload["kind"] == "session_action_result"
+    assert structured_payload["session_action_result"]["action_type"] == "pause"
+    updated_state = load_thread_state(thread_state.thread_id, task_root)
+    assert updated_state.status == "paused"
+    assert updated_state.paused_from_status == "done"
+    assert fake_mail_client.sent_messages[0]["subject"] == "[PAUSED][S:session_001] Phase 3 detail bridge"
+
+
+def test_pc_control_plane_client_resume_command_restores_question_state_from_paused_session(tmp_path) -> None:
+    task_root = tmp_path / "task_root"
+    thread_state = _build_existing_thread_state(
+        task_root,
+        status="paused",
+        last_summary="Waiting for answers.",
+        paused_from_status="awaiting_user_input",
+        pending_questions=[
+            QuestionItem(
+                question_set_id="qs_branch",
+                question_id="q_branch",
+                question_type="single_choice",
+                question_text="Select the release branch.",
+                choices=["main", "dev"],
+            )
+        ],
+    )
+    fake_mail_client = _FakeMailClient()
+    workspace_item = _workspace_item(repo_path=thread_state.repo_path, workdir=thread_state.workdir)
+    client = PcControlPlaneClient(
+        relay_url="ws://127.0.0.1:8787/relay",
+        transport_token="relay-secret",
+        pc_id="pc_home",
+        client_version="0.1.0",
+        display_name="pc_home",
+        config=AppConfig(from_addr="bot@example.com", codex_profile_models={"strong": "gpt-5-codex"}),
+        runner=_ImmediateSuccessRunner(task_root),
+        mail_client=fake_mail_client,
+        workspace_provider=lambda: [workspace_item],
+        clock=lambda: "2026-03-25T10:09:00",
+    )
+    command = parse_pc_control_server_message(
+        build_command_dispatch(
+            message_id="msg_cmd_resume_001",
+            trace_id="trace_cmd_resume_001",
+            pc_id="pc_home",
+            connection_epoch=1,
+            sent_at="2026-03-25T10:09:00",
+            command_id="cmd_resume_001",
+            command_type="resume",
+            workspace_id=str(workspace_item["workspace_id"]),
+            session_id=thread_state.session_id,
+            execution_policy={},
+            command_payload={
+                "target": {
+                    "scope": "current_session",
+                    "workspace_id": thread_state.workspace_id,
+                    "session_id": thread_state.session_id,
+                    "thread_id": thread_state.thread_id,
+                },
+                "resume": {},
+            },
+        )
+    )
+
+    messages, _websocket = asyncio.run(_dispatch_messages(client, command))
+
+    assert len(messages) == 2
+    assert isinstance(messages[0], PcCommandAckMessage)
+    assert isinstance(messages[1], PcCommandResultMessage)
+    assert messages[0].payload["ack_status"] == "accepted"
+    assert messages[1].payload["final_status"] == "done"
+    structured_payload = messages[1].payload["structured_payload"]
+    assert structured_payload["kind"] == "session_action_result"
+    assert structured_payload["session_action_result"]["action_type"] == "resume"
+    updated_state = load_thread_state(thread_state.thread_id, task_root)
+    assert updated_state.status == "awaiting_user_input"
+    assert updated_state.paused_from_status is None
+    assert fake_mail_client.sent_messages[0]["subject"] == "[QUESTION][S:session_001] Phase 3 detail bridge"
+
+
+def test_pc_control_plane_client_kill_command_updates_waiting_session(tmp_path) -> None:
+    task_root = tmp_path / "task_root"
+    thread_state = _build_existing_thread_state(
+        task_root,
+        status="awaiting_user_input",
+        last_summary="Need an answer before continuing.",
+        pending_questions=[
+            QuestionItem(
+                question_set_id="qs_branch",
+                question_id="q_branch",
+                question_type="single_choice",
+                question_text="Select the release branch.",
+                choices=["main", "dev"],
+            )
+        ],
+    )
+    fake_mail_client = _FakeMailClient()
+    workspace_item = _workspace_item(repo_path=thread_state.repo_path, workdir=thread_state.workdir)
+    client = PcControlPlaneClient(
+        relay_url="ws://127.0.0.1:8787/relay",
+        transport_token="relay-secret",
+        pc_id="pc_home",
+        client_version="0.1.0",
+        display_name="pc_home",
+        config=AppConfig(from_addr="bot@example.com", codex_profile_models={"strong": "gpt-5-codex"}),
+        runner=_ImmediateSuccessRunner(task_root),
+        mail_client=fake_mail_client,
+        workspace_provider=lambda: [workspace_item],
+        clock=lambda: "2026-03-25T10:10:00",
+    )
+    command = parse_pc_control_server_message(
+        build_command_dispatch(
+            message_id="msg_cmd_kill_001",
+            trace_id="trace_cmd_kill_001",
+            pc_id="pc_home",
+            connection_epoch=1,
+            sent_at="2026-03-25T10:10:00",
+            command_id="cmd_kill_001",
+            command_type="kill",
+            workspace_id=str(workspace_item["workspace_id"]),
+            session_id=thread_state.session_id,
+            execution_policy={},
+            command_payload={
+                "target": {
+                    "scope": "current_session",
+                    "workspace_id": thread_state.workspace_id,
+                    "session_id": thread_state.session_id,
+                    "thread_id": thread_state.thread_id,
+                },
+                "kill": {},
+            },
+        )
+    )
+
+    messages, _websocket = asyncio.run(_dispatch_messages(client, command))
+
+    assert len(messages) == 2
+    assert isinstance(messages[0], PcCommandAckMessage)
+    assert isinstance(messages[1], PcCommandResultMessage)
+    assert messages[0].payload["ack_status"] == "accepted"
+    assert messages[1].payload["final_status"] == "done"
+    structured_payload = messages[1].payload["structured_payload"]
+    assert structured_payload["kind"] == "session_action_result"
+    assert structured_payload["session_action_result"]["action_type"] == "kill"
+    updated_state = load_thread_state(thread_state.thread_id, task_root)
+    assert updated_state.status == "killed"
+    assert updated_state.pending_questions == []
+    assert updated_state.last_summary == "Task was cancelled while awaiting user input."
+    assert fake_mail_client.sent_messages[0]["subject"] == "[KILLED][S:session_001] Phase 3 detail bridge"
+
+
+def test_pc_control_plane_client_end_command_marks_session_ended(tmp_path) -> None:
+    task_root = tmp_path / "task_root"
+    thread_state = _build_existing_thread_state(task_root, status="done")
+    fake_mail_client = _FakeMailClient()
+    workspace_item = _workspace_item(repo_path=thread_state.repo_path, workdir=thread_state.workdir)
+    client = PcControlPlaneClient(
+        relay_url="ws://127.0.0.1:8787/relay",
+        transport_token="relay-secret",
+        pc_id="pc_home",
+        client_version="0.1.0",
+        display_name="pc_home",
+        config=AppConfig(from_addr="bot@example.com", codex_profile_models={"strong": "gpt-5-codex"}),
+        runner=_ImmediateSuccessRunner(task_root),
+        mail_client=fake_mail_client,
+        workspace_provider=lambda: [workspace_item],
+        clock=lambda: "2026-03-25T10:11:00",
+    )
+    command = parse_pc_control_server_message(
+        build_command_dispatch(
+            message_id="msg_cmd_end_001",
+            trace_id="trace_cmd_end_001",
+            pc_id="pc_home",
+            connection_epoch=1,
+            sent_at="2026-03-25T10:11:00",
+            command_id="cmd_end_001",
+            command_type="end",
+            workspace_id=str(workspace_item["workspace_id"]),
+            session_id=thread_state.session_id,
+            execution_policy={},
+            command_payload={
+                "target": {
+                    "scope": "current_session",
+                    "workspace_id": thread_state.workspace_id,
+                    "session_id": thread_state.session_id,
+                    "thread_id": thread_state.thread_id,
+                },
+                "end": {},
+            },
+        )
+    )
+
+    messages, _websocket = asyncio.run(_dispatch_messages(client, command))
+
+    assert len(messages) == 2
+    assert isinstance(messages[0], PcCommandAckMessage)
+    assert isinstance(messages[1], PcCommandResultMessage)
+    assert messages[0].payload["ack_status"] == "accepted"
+    assert messages[1].payload["final_status"] == "done"
+    structured_payload = messages[1].payload["structured_payload"]
+    assert structured_payload["kind"] == "session_action_result"
+    assert structured_payload["session_action_result"]["action_type"] == "end"
+    updated_state = load_thread_state(thread_state.thread_id, task_root)
+    assert updated_state.status == "done"
+    assert updated_state.lifecycle == "ended"
+    assert updated_state.last_summary == "Completed."
+    assert fake_mail_client.sent_messages[0]["subject"] == "[STATUS][S:session_001] Phase 3 detail bridge"
+
+
+def test_pc_control_plane_client_answers_command_reuses_question_resume_mail_path(tmp_path) -> None:
+    task_root = tmp_path / "task_root"
+    pending_questions = [
+        QuestionItem(
+            question_set_id="qs_release",
+            question_id="q_branch",
+            question_type="single_choice",
+            question_text="Select the release branch.",
+            choices=["main", "release"],
+        ),
+        QuestionItem(
+            question_set_id="qs_release",
+            question_id="q_env",
+            question_type="short_text",
+            question_text="Which environment should be targeted?",
+        ),
+    ]
+    thread_state = _build_existing_thread_state(
+        task_root,
+        status="paused",
+        last_summary="Waiting for answers.",
+        paused_from_status="awaiting_user_input",
+        pending_questions=pending_questions,
+        backend_session_id="sdk-session-001",
+        backend_session_resumable=True,
+    )
+    fake_mail_client = _FakeMailClient()
+    workspace_item = _workspace_item(repo_path=thread_state.repo_path, workdir=thread_state.workdir)
+    runner = _ImmediateSuccessRunner(task_root)
+    client = PcControlPlaneClient(
+        relay_url="ws://127.0.0.1:8787/relay",
+        transport_token="relay-secret",
+        pc_id="pc_home",
+        client_version="0.1.0",
+        display_name="pc_home",
+        config=AppConfig(from_addr="bot@example.com", codex_profile_models={"strong": "gpt-5-codex"}),
+        runner=runner,
+        mail_client=fake_mail_client,
+        workspace_provider=lambda: [workspace_item],
+        clock=lambda: "2026-03-25T10:12:00",
+    )
+    command = parse_pc_control_server_message(
+        build_command_dispatch(
+            message_id="msg_cmd_answers_001",
+            trace_id="trace_cmd_answers_001",
+            pc_id="pc_home",
+            connection_epoch=1,
+            sent_at="2026-03-25T10:12:00",
+            command_id="cmd_answers_001",
+            command_type="answers",
+            workspace_id=str(workspace_item["workspace_id"]),
+            session_id=thread_state.session_id,
+            execution_policy={},
+            command_payload={
+                "target": {
+                    "scope": "current_session",
+                    "workspace_id": thread_state.workspace_id,
+                    "session_id": thread_state.session_id,
+                    "thread_id": thread_state.thread_id,
+                },
+                "answers": {
+                    "question_answers": [
+                        {"question_id": "q_branch", "value": "release"},
+                        {"question_id": "q_env", "value": "staging"},
+                    ]
+                },
+            },
+        )
+    )
+
+    messages, _websocket = asyncio.run(_dispatch_messages(client, command))
+
+    assert len(messages) == 2
+    assert isinstance(messages[0], PcCommandAckMessage)
+    assert isinstance(messages[1], PcCommandResultMessage)
+    assert messages[0].payload["ack_status"] == "accepted"
+    assert messages[1].payload["final_status"] == "done"
+    structured_payload = messages[1].payload["structured_payload"]
+    assert structured_payload["kind"] == "session_action_result"
+    assert structured_payload["session_action_result"]["action_type"] == "answers"
+    assert len(runner.snapshots) == 1
+    expected_answers = [
+        QuestionAnswer(question_id="q_branch", value="release", raw_value="release"),
+        QuestionAnswer(question_id="q_env", value="staging", raw_value="staging"),
+    ]
+    snapshot = runner.snapshots[0]
+    assert snapshot.run_mode == "resume"
+    assert snapshot.turn_text == canonical_answer_summary("qs_release", expected_answers)
+    assert (
+        "Additional context from reply:\n" + canonical_answer_context("qs_release", pending_questions, expected_answers)
+    ) in snapshot.task_text
+    updated_state = load_thread_state(thread_state.thread_id, task_root)
+    assert updated_state.status == "done"
+    assert any(message["to_addr"] == "user@example.com" for message in fake_mail_client.sent_messages)
+
+
+def test_pc_control_plane_client_attachment_continuation_materializes_attachments_into_resume_turn(tmp_path) -> None:
+    task_root = tmp_path / "task_root"
+    thread_state = _build_existing_thread_state(
+        task_root,
+        status="done",
+        backend_session_id="sdk-session-attachment-001",
+        backend_session_resumable=True,
+    )
+    fake_mail_client = _FakeMailClient()
+    workspace_item = _workspace_item(repo_path=thread_state.repo_path, workdir=thread_state.workdir)
+    runner = _ImmediateSuccessRunner(task_root)
+    client = PcControlPlaneClient(
+        relay_url="ws://127.0.0.1:8787/relay",
+        transport_token="relay-secret",
+        pc_id="pc_home",
+        client_version="0.1.0",
+        display_name="pc_home",
+        config=AppConfig(from_addr="bot@example.com", codex_profile_models={"strong": "gpt-5-codex"}),
+        runner=runner,
+        mail_client=fake_mail_client,
+        workspace_provider=lambda: [workspace_item],
+        clock=lambda: "2026-03-25T10:13:00",
+    )
+    attachment_bytes = b"attachment:v1"
+    command = parse_pc_control_server_message(
+        build_command_dispatch(
+            message_id="msg_cmd_attachment_cont_001",
+            trace_id="trace_cmd_attachment_cont_001",
+            pc_id="pc_home",
+            connection_epoch=1,
+            sent_at="2026-03-25T10:13:00",
+            command_id="cmd_attachment_cont_001",
+            command_type="attachment_continuation",
+            workspace_id=str(workspace_item["workspace_id"]),
+            session_id=thread_state.session_id,
+            execution_policy={},
+            command_payload={
+                "target": {
+                    "scope": "current_session",
+                    "workspace_id": thread_state.workspace_id,
+                    "session_id": thread_state.session_id,
+                    "thread_id": thread_state.thread_id,
+                },
+                "attachment_continuation": {
+                    "reply_text": "Please continue after reviewing the attached screenshot.",
+                    "attachments": [
+                        {
+                            "name": "wireframe.png",
+                            "content_type": "image/png",
+                            "size_bytes": len(attachment_bytes),
+                            "content_bytes_b64": base64.b64encode(attachment_bytes).decode("ascii"),
+                        }
+                    ],
+                },
+            },
+        )
+    )
+
+    messages, _websocket = asyncio.run(_dispatch_messages(client, command))
+
+    assert len(messages) == 2
+    assert isinstance(messages[0], PcCommandAckMessage)
+    assert isinstance(messages[1], PcCommandResultMessage)
+    assert messages[0].payload["ack_status"] == "accepted"
+    assert messages[1].payload["final_status"] == "done"
+    structured_payload = messages[1].payload["structured_payload"]
+    assert structured_payload["kind"] == "session_action_result"
+    assert structured_payload["session_action_result"]["action_type"] == "attachment_continuation"
+    assert len(runner.snapshots) == 1
+    snapshot = runner.snapshots[0]
+    assert snapshot.run_mode == "resume"
+    assert len(snapshot.attachments) == 1
+    saved_path = Path(snapshot.attachments[0])
+    assert saved_path.exists()
+    assert saved_path.name.endswith("wireframe.png")
+    assert saved_path.read_bytes() == attachment_bytes
+    assert snapshot.turn_text is not None
+    assert "Please continue after reviewing the attached screenshot." in snapshot.turn_text
+    assert "New incoming attachments materialized in workdir:" in snapshot.turn_text
+    updated_state = load_thread_state(thread_state.thread_id, task_root)
+    assert updated_state.status == "done"
+    assert any(message["to_addr"] == "user@example.com" for message in fake_mail_client.sent_messages)
 
 
 def test_pc_control_plane_client_registers_and_reports_workspace_snapshot(tmp_path) -> None:

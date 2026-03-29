@@ -12,6 +12,7 @@ from ..models import SessionState, ThreadState
 from ..status import THREAD_STATUS_ACCEPTED, THREAD_STATUS_AWAITING_USER_INPUT, THREAD_STATUS_RUNNING
 from ..thread_store import (
     build_workspace_id,
+    list_all_thread_states,
     load_session_state,
     load_thread_state,
     normalize_workspace_value,
@@ -121,6 +122,14 @@ def _canonical_workspace_id(session_state: SessionState, thread_state: ThreadSta
     if thread_state.workspace_id:
         return thread_state.workspace_id
     return build_workspace_id(session_state.repo_path, session_state.workdir)
+
+
+def _canonical_workspace_id_from_thread_state(thread_state: ThreadState) -> str:
+    return thread_state.workspace_id or build_workspace_id(thread_state.repo_path, thread_state.workdir)
+
+
+def _canonical_session_id_from_thread_state(thread_state: ThreadState) -> str:
+    return thread_state.session_id or thread_state.thread_id
 
 
 def _matches_workspace_locator(
@@ -324,7 +333,14 @@ class ThreadStorePhase3SessionDetailProvider:
             except FileNotFoundError:
                 session_state = None
 
-        if request.thread_id is not None:
+        if session_state is None and request.session_id is not None:
+            thread_state = self._resolve_thread_state_by_session_id(
+                request,
+                resolved_task_root=resolved_task_root,
+                canonical_workspace_id=canonical_workspace_id,
+            )
+
+        if thread_state is None and request.thread_id is not None:
             try:
                 thread_state = load_thread_state(request.thread_id, resolved_task_root)
             except FileNotFoundError:
@@ -348,11 +364,8 @@ class ThreadStorePhase3SessionDetailProvider:
                 ) from exc
 
         if session_state is None and thread_state is not None:
-            canonical_workspace_id = canonical_workspace_id or thread_state.workspace_id or build_workspace_id(
-                thread_state.repo_path,
-                thread_state.workdir,
-            )
-            session_id = thread_state.session_id or thread_state.thread_id
+            canonical_workspace_id = canonical_workspace_id or _canonical_workspace_id_from_thread_state(thread_state)
+            session_id = _canonical_session_id_from_thread_state(thread_state)
             try:
                 session_state = load_session_state(canonical_workspace_id, session_id, resolved_task_root)
             except FileNotFoundError:
@@ -363,19 +376,19 @@ class ThreadStorePhase3SessionDetailProvider:
 
         if request.session_id is not None and session_state.session_id != request.session_id:
             raise Phase3SubscriptionError(
-                "session_identity_unresolved",
+                "session_identity_mismatch",
                 "session_id does not match the resolved canonical session",
                 reject=True,
             )
         if request.thread_id is not None and thread_state.thread_id != request.thread_id:
             raise Phase3SubscriptionError(
-                "session_identity_unresolved",
+                "session_identity_mismatch",
                 "thread_id does not match the resolved canonical thread",
                 reject=True,
             )
         if session_state.thread_id != thread_state.thread_id:
             raise Phase3SubscriptionError(
-                "session_identity_unresolved",
+                "session_binding_unresolved",
                 "session_state and thread_state do not resolve to the same canonical thread",
                 reject=True,
             )
@@ -388,6 +401,117 @@ class ThreadStorePhase3SessionDetailProvider:
             thread_state=thread_state,
         )
         return session_state, thread_state
+
+    def _resolve_thread_state_by_session_id(
+        self,
+        request: Phase3SubscribeSessionDetailRequest,
+        *,
+        resolved_task_root: Path,
+        canonical_workspace_id: str | None,
+    ) -> ThreadState:
+        candidates = [
+            state
+            for state in list_all_thread_states(resolved_task_root)
+            if _canonical_session_id_from_thread_state(state) == request.session_id
+        ]
+        if not candidates:
+            raise Phase3SubscriptionError(
+                "session_not_found",
+                "could not resolve a session for the requested session_id",
+                reject=True,
+            )
+        if len(candidates) == 1:
+            candidate = candidates[0]
+            self._validate_supporting_session_locators(
+                request,
+                thread_state=candidate,
+                canonical_workspace_id=canonical_workspace_id,
+            )
+            return candidate
+
+        filtered = [
+            state
+            for state in candidates
+            if self._matches_supporting_session_locators(
+                request,
+                thread_state=state,
+                canonical_workspace_id=canonical_workspace_id,
+            )
+        ]
+        if len(filtered) == 1:
+            return filtered[0]
+        if filtered:
+            raise Phase3SubscriptionError(
+                "session_binding_unresolved",
+                "multiple sessions matched the requested session_id; provide a stronger supporting locator",
+                reject=True,
+            )
+
+        self._raise_supporting_locator_mismatch(
+            request,
+            candidates=candidates,
+            canonical_workspace_id=canonical_workspace_id,
+        )
+        raise Phase3SubscriptionError(
+            "session_binding_unresolved",
+            "supporting locators did not resolve a unique canonical session",
+            reject=True,
+        )
+
+    def _matches_supporting_session_locators(
+        self,
+        request: Phase3SubscribeSessionDetailRequest,
+        *,
+        thread_state: ThreadState,
+        canonical_workspace_id: str | None,
+    ) -> bool:
+        if canonical_workspace_id is not None and _canonical_workspace_id_from_thread_state(thread_state) != canonical_workspace_id:
+            return False
+        if request.thread_id is not None and thread_state.thread_id != request.thread_id:
+            return False
+        return True
+
+    def _validate_supporting_session_locators(
+        self,
+        request: Phase3SubscribeSessionDetailRequest,
+        *,
+        thread_state: ThreadState,
+        canonical_workspace_id: str | None,
+    ) -> None:
+        if canonical_workspace_id is not None and _canonical_workspace_id_from_thread_state(thread_state) != canonical_workspace_id:
+            raise Phase3SubscriptionError(
+                "workspace_identity_mismatch",
+                "workspace_id does not match the canonical workspace for this session",
+                reject=True,
+            )
+        if request.thread_id is not None and thread_state.thread_id != request.thread_id:
+            raise Phase3SubscriptionError(
+                "session_identity_mismatch",
+                "thread_id does not match the canonical thread for this session",
+                reject=True,
+            )
+
+    def _raise_supporting_locator_mismatch(
+        self,
+        request: Phase3SubscribeSessionDetailRequest,
+        *,
+        candidates: list[ThreadState],
+        canonical_workspace_id: str | None,
+    ) -> None:
+        if canonical_workspace_id is not None and all(
+            _canonical_workspace_id_from_thread_state(state) != canonical_workspace_id for state in candidates
+        ):
+            raise Phase3SubscriptionError(
+                "workspace_identity_mismatch",
+                "workspace_id does not match the canonical workspace for this session",
+                reject=True,
+            )
+        if request.thread_id is not None and all(state.thread_id != request.thread_id for state in candidates):
+            raise Phase3SubscriptionError(
+                "session_identity_mismatch",
+                "thread_id does not match the canonical thread for this session",
+                reject=True,
+            )
 
     def _resolve_workspace_id(self, request: Phase3SubscribeSessionDetailRequest) -> str | None:
         if request.workspace_id is not None and request.repo_path is not None and request.workdir is not None:

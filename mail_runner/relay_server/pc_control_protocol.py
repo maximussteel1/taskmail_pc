@@ -32,7 +32,18 @@ _CLIENT_MESSAGE_TYPES = {
     "terminal_outcome",
 }
 _ACK_STATUSES = {"accepted", "accepted_but_queued", "rejected"}
-_COMMAND_TYPES = {"new_task", "reply", "status", "pause", "resume", "kill", "sync_project_folders"}
+_COMMAND_TYPES = {
+    "new_task",
+    "reply",
+    "status",
+    "pause",
+    "resume",
+    "kill",
+    "end",
+    "answers",
+    "attachment_continuation",
+    "sync_project_folders",
+}
 _EVENT_TYPES = {"queued", "accepted", "running", "awaiting_user_input", "paused", "done", "failed", "killed"}
 _RESULT_FINAL_STATUSES = {"awaiting_user_input", "paused", "done", "failed", "killed"}
 _ARTIFACT_KINDS = {"image", "file"}
