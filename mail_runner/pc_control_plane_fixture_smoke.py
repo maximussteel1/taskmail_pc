@@ -11,6 +11,7 @@ from typing import Any
 
 from .artifact_resolver import write_artifact_index
 from .config import AppConfig
+from .download_ref import resolve_download_ref_url
 from .file_surface import write_artifact_upload_success_binding
 from .models import RunArtifact, RunResult
 from .pc_control_plane_client import PcControlPlaneClient
@@ -517,11 +518,11 @@ def run_pc_control_plane_fixture_smoke(*, output_dir: Path, run_name: str) -> di
         report_item = next((item for item in projected_items if item["artifact_id"] == "artifact-report"), None)
         if preview_item is None:
             failures.append("artifact-preview missing from projected artifact_manifest.")
-        elif preview_item.get("download_ref") != "/v1/files/file_preview_002/content":
+        elif resolve_download_ref_url(preview_item.get("download_ref")) != "/v1/files/file_preview_002/content":
             failures.append("artifact-preview did not project the latest uploaded download_ref.")
         if report_item is None:
             failures.append("artifact-report missing from projected artifact_manifest.")
-        elif report_item.get("download_ref") is not None:
+        elif resolve_download_ref_url(report_item.get("download_ref")) is not None:
             failures.append("artifact-report unexpectedly projected a download_ref without binding.")
     result_message = parse_pc_control_client_message(
         build_command_result(

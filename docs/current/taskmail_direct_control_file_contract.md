@@ -19,17 +19,17 @@
 - current-session direct `/status`
 - current-session plain direct `reply`
 - active-session detail read sidecar
-- relay `/v1/files` oversized-artifact file surface
+- relay `/v1/files` artifact file surface
 
 补充约束：
 
 - PC 仍然是 task execution truth
-- mail 仍然是默认控制面、receipt truth、artifact/history truth
+- mail 仍然是默认控制面，以及 receipt/history truth；relay `/v1/files` 是当前 relay artifact owner lane
 - `/control` 当前会为三类切片返回 direct result frame：
   - bootstrap `[SYNC]` `v2`
   - current-session direct `/status` / plain `reply` 的 bridge-result
   - relay-side `transport_probe`
-- 其中 current-session direct `/status` / plain `reply` 的 `session_action_result` 只表示 canonical mail ingress 提交与 closeout anchor snapshot，不表示 direct terminal business result
+- 其中 current-session direct `/status` / plain `reply` 的 `session_action_result` 现在表示 authoritative relay-native runtime result，并继续附带 `session_action_closeout` 作为 closeout anchor snapshot
 - 任何未在本文件中列出的 direct surface，都不应视为当前行为
 - 当 runner config 显式设置 `control_plane_mode=vps_only` 时，依赖 bot mailbox ingress 的旧 mail-bridge surface 不再应读成被 provision
 - 在该模式下，relay 侧不再 provision direct `new_task` mail bridge、current-session direct `status|reply` mail bridge、bootstrap `[SYNC]` `v1` mail bridge，以及 relay-side `transport_probe` mail harness
@@ -83,9 +83,9 @@
   - `command(status|reply) -> command_ack -> result(session_action_result)`
   - `command(sync_project_folders) -> command_ack -> result(sync_project_folders_result)`
   - `command(transport_probe) -> command_ack -> event* -> result(transport_probe_result)`
-- 当前 `/control` 上的 current-session direct `/status` / plain `reply` 仍是 bridge-to-mail：
-  - `command_ack.accepted=true` 只表示 relay 已拿到 durable accepted lane 并把 canonical mail ingress 提交结果物化到 replay authority
-  - 后续 `result(session_action_result)` 只回告 `mail_ingress_submission` 与 `session_action_closeout` snapshot，不替代 canonical status/terminal mail
+- 当前 `/control` 上的 current-session direct `/status` / plain `reply` 已切到 relay-native runtime execution：
+  - `command_ack.accepted=true` 表示 relay/pc-control 已接受这条 current-session command
+  - 后续 `result(session_action_result)` 回告 `runtime_execution` 结果与 `session_action_closeout` snapshot
 - 当前 `/control` 的 bootstrap `command` 语义仍映射到 `taskmail-bootstrap-control-contract-v2`
 - 当前 `/control transport_probe` 的 direct result 仍只落 relay-side mail-bridge harness：
   - 只支持 `scenario=android_direct_ping_to_vps_to_pc`
@@ -120,13 +120,11 @@
   - `workspace_id`
   - `session_id`
   - 可选 `thread_id`
-- accepted path 是 bridge-to-mail，不是 direct terminal-result API：
-  - relay 先接受 packet
-  - 再把请求桥接进 canonical mail status/reply 路径
-  - user-visible 结果仍由正常状态邮件或 terminal mail 给出
+- accepted path 已切到 relay-native runtime execution，不再桥接进 canonical mail status/reply 路径
 - 当 shared `/control` 当前切片被 provision 时，同一 schema 也可投影为：
   - `command(status|reply) -> command_ack -> result(session_action_result)`
-  - `session_action_result.payload.session_action_result.result_scope = mail_ingress_submission`
+  - `session_action_result.payload.session_action_result.result_scope = runtime_execution`
+  - `session_action_result.payload.session_action_result.canonical_outcome_via = relay_runtime`
   - `session_action_result.payload.session_action_result.session_action_closeout` 当前回告：
     - `action_type`
     - `target_session_identity`
@@ -137,7 +135,7 @@
     - `last_summary`
     - `terminal_mail_message_id`
     - `terminal_mail_subject`
-  - 这些字段是 replay/closeout 锚点，不是 direct terminal business result
+  - 这些字段仍是 replay/closeout 锚点；authoritative business result 则由同 payload 内的 runtime-execution 字段给出
 
 resolver 规则：
 
@@ -167,14 +165,13 @@ plain `reply` 当前边界：
 - relay 当前仍可在显式 provision 后接受 `subscribe_session_detail`
 - 这一路径仍是 read-side only
 - 当前只用于一个 active session detail view 的 `session_snapshot` / `session_delta` 新鲜度
-- 这一路径不改变 mail 作为 receipt/artifact/history truth 的角色
+- 这一路径不改变 mail 作为 receipt/history truth 的角色；artifact owner lane 仍是 relay `/v1/files`
 
-### 2.6 Relay `/v1/files` File Surface
+### 2.6 Relay `/v1/files` Artifact Surface
 
-- 当 `outbound_transport=relay` 且存在 `relay_url + relay_transport_token` 时，repo-side 默认 owner lane 当前就是 relay host 的 `/v1/files`
-- `external_delivery_backend_preference=auto` 当前只保留为显式 legacy 兼容语义；如果 COS 仍保留配置，它会继续维持旧的 `COS`-first 选择
-- `external_delivery_backend_preference=cos` 当前表示显式固定走 `COS`
-- 如果 artifact 超过当前 live `/v1/files` 单文件上限，且 COS 仍可用，cutover 期间 runtime 当前会只对这类 oversize artifact 保留 `COS` 兼容交付，而不是让整条 owner lane 退回 `COS`
+- 当 `outbound_transport=relay` 且存在 `relay_url + relay_transport_token` 时，repo-side 当前会把所有 attachable run artifact 统一送到 relay host 的 `/v1/files`
+- 这条 relay artifact owner lane 不再按 `external_delivery_threshold_mb` 做“小文件继续走 MIME”分流
+- 这条 relay artifact owner lane 也不再对 oversize artifact 回退到 `COS`
 - file-surface URL 当前由 `ws(s)://<relay-host>/relay` 派生为 `http(s)://<relay-host>/v1/files`
 - 当前 schema version 是 `taskmail-control-artifact-contract-v1`
 - 当前单文件上传上限是 `32 MiB`
@@ -187,8 +184,9 @@ plain `reply` 当前边界：
 - 因此当前文本文件或 JSON sidecar 若走 `/v1/files`，应使用 `kind=file`，同时保留准确 `mime_type`
 - local artifact truth 仍是 `RunArtifact` + `artifact_index.json`
 - transport-facing `artifact_id -> file_id` 绑定不会污染 `artifact_index.json`，而是单独写入 `artifact_file_binding_index.json`
-- 成功的 oversized external delivery 现在还会单独写入 `external_delivery_index.json`，保留 provider/url/expires_at 级别的 user-facing evidence，而不反向改写 `artifact_index.json`
-- user-visible 邮件当前仍保留 `Artifacts` 区域，并额外生成 `External Deliveries` 区域；超大文件不再继续作为 MIME 附件发送
+- 成功的 relay external delivery 现在还会单独写入 `external_delivery_index.json`，保留 provider/url/expires_at 级别的 user-facing evidence，而不反向改写 `artifact_index.json`
+- user-visible 邮件当前仍保留 `Artifacts` 区域，并额外生成 `External Deliveries` 区域；relay owner lane 下 attachable artifact 不再继续作为 MIME 附件发送
+- 如果 relay `/v1/files` 上传失败，runtime 会保留 artifact 条目与 failure notice，但不会默默回退到 MIME 附件或 COS
 
 - 该 Bearer transport token 当前也与 shared `/control` 复用同一认证路径
 - Android 真机 debug smoke 已正向证明当前单样本闭环：

@@ -211,7 +211,7 @@ class AndroidCreateSessionCommand:
     pc_id: str
     workspace_id: str
     prompt: str
-    canonical_reply_recipient: str
+    canonical_reply_recipient: str | None
     execution_policy: dict[str, Any]
     mode: str | None = None
     timeout_seconds: int | None = None
@@ -229,7 +229,7 @@ class AndroidCreateSessionCommand:
             pc_id=_require_text(payload.get("pc_id"), "pc_id"),
             workspace_id=_require_text(payload.get("workspace_id"), "workspace_id"),
             prompt=_require_text(payload.get("prompt"), "prompt"),
-            canonical_reply_recipient=_require_text(
+            canonical_reply_recipient=_optional_text(
                 payload.get("canonical_reply_recipient"),
                 "canonical_reply_recipient",
             ),
@@ -247,8 +247,9 @@ class AndroidCreateSessionCommand:
         payload: dict[str, Any] = {
             "task_text": self.prompt,
             "source": self.source or "android",
-            "canonical_reply_recipient": self.canonical_reply_recipient,
         }
+        if self.canonical_reply_recipient is not None:
+            payload["canonical_reply_recipient"] = self.canonical_reply_recipient
         if self.mode is not None:
             payload["mode"] = self.mode
         if self.timeout_seconds is not None:

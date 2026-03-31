@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ..download_ref import normalize_download_ref
+
 
 PC_CONTROL_SCHEMA_VERSION = "v1"
 _SERVER_MESSAGE_TYPES = {
@@ -12,6 +14,7 @@ _SERVER_MESSAGE_TYPES = {
     "error",
     "command_dispatch",
     "output_resume_request",
+    "delivery_ack",
     "mailbox_lease_ack",
     "ingress_decision",
     "thread_binding_ack",
@@ -21,6 +24,7 @@ _CLIENT_MESSAGE_TYPES = {
     "pc_hello",
     "heartbeat",
     "workspace_snapshot",
+    "projection_batch",
     "command_ack",
     "event",
     "result",
@@ -54,6 +58,9 @@ _INGRESS_CANDIDATE_STATUSES = {"ready", "stale", "invalid", "ignored"}
 _INGRESS_CLASSIFICATIONS = {"new_task", "reply", "sync", "direct_kill", "system_mail", "unsupported"}
 _THREAD_BINDING_STATUSES = {"committed", "duplicate", "denied"}
 _TERMINAL_OUTCOME_STATUSES = {"committed", "denied"}
+_PROJECTION_SCOPES = {"session", "probe"}
+_DELIVERY_ACK_MESSAGE_TYPES = {"projection_batch", "result"}
+_DELIVERY_ACK_STATUSES = {"committed"}
 
 
 class PcControlProtocolError(ValueError):
@@ -70,6 +77,21 @@ def _require_optional_text(value: Any, field_name: str) -> str | None:
     if value is None:
         return None
     return _require_text(value, field_name)
+
+
+def _require_optional_chunk_text(value: Any, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise PcControlProtocolError(f"{field_name} must be a string")
+    return value if value else None
+
+
+def _validate_optional_download_ref(value: Any, field_name: str) -> dict[str, Any] | None:
+    try:
+        return normalize_download_ref(value, field_name=field_name)
+    except ValueError as exc:
+        raise PcControlProtocolError(str(exc)) from exc
 
 
 def _require_mapping(value: Any, field_name: str) -> dict[str, Any]:
@@ -239,7 +261,7 @@ def _validate_artifact_manifest_items(value: Any, field_name: str) -> list[dict[
                 "name": _require_text(data.get("name"), f"{item_field}.name"),
                 "content_type": _require_text(data.get("content_type"), f"{item_field}.content_type"),
                 "size": _require_int(data.get("size"), f"{item_field}.size", minimum=0),
-                "download_ref": _require_optional_text(data.get("download_ref"), f"{item_field}.download_ref"),
+                "download_ref": _validate_optional_download_ref(data.get("download_ref"), f"{item_field}.download_ref"),
                 "download_ref_source": _require_optional_text(
                     data.get("download_ref_source"),
                     f"{item_field}.download_ref_source",
@@ -304,6 +326,46 @@ def _validate_terminal_outcome_status(value: Any, field_name: str) -> str:
             f"{field_name} must be one of: {', '.join(sorted(_TERMINAL_OUTCOME_STATUSES))}"
         )
     return status
+
+
+def _validate_projection_scope(value: Any, field_name: str) -> str:
+    scope = _require_text(value, field_name)
+    if scope not in _PROJECTION_SCOPES:
+        raise PcControlProtocolError(f"{field_name} must be one of: {', '.join(sorted(_PROJECTION_SCOPES))}")
+    return scope
+
+
+def _validate_delivery_ack_message_type(value: Any, field_name: str) -> str:
+    message_type = _require_text(value, field_name)
+    if message_type not in _DELIVERY_ACK_MESSAGE_TYPES:
+        raise PcControlProtocolError(
+            f"{field_name} must be one of: {', '.join(sorted(_DELIVERY_ACK_MESSAGE_TYPES))}"
+        )
+    return message_type
+
+
+def _validate_delivery_ack_status(value: Any, field_name: str) -> str:
+    status = _require_text(value, field_name)
+    if status not in _DELIVERY_ACK_STATUSES:
+        raise PcControlProtocolError(f"{field_name} must be one of: {', '.join(sorted(_DELIVERY_ACK_STATUSES))}")
+    return status
+
+
+def _validate_projection_items(value: Any, field_name: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        raise PcControlProtocolError(f"{field_name} must be a non-empty list[dict]")
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(value):
+        item_field = f"{field_name}[{index}]"
+        data = _require_mapping(item, item_field)
+        normalized_item = dict(data)
+        normalized_item["family"] = _require_text(data.get("family"), f"{item_field}.family")
+        normalized_item["idempotency_key"] = _require_text(
+            data.get("idempotency_key"),
+            f"{item_field}.idempotency_key",
+        )
+        normalized.append(normalized_item)
+    return normalized
 
 
 def _validate_envelope(data: dict[str, Any], *, expected_type: str, minimum_epoch: int) -> dict[str, Any]:
@@ -617,8 +679,8 @@ class PcOutputChunkMessage:
             minimum_epoch=1,
         )
         payload = envelope["payload"]
-        text = _require_optional_text(payload.get("text"), "payload.text")
-        delta = _require_optional_text(payload.get("delta"), "payload.delta")
+        text = _require_optional_chunk_text(payload.get("text"), "payload.text")
+        delta = _require_optional_chunk_text(payload.get("delta"), "payload.delta")
         if text is None and delta is None:
             raise PcControlProtocolError("payload.text or payload.delta is required")
         self.schema_version = envelope["schema_version"]
@@ -905,10 +967,75 @@ class PcTerminalOutcomeMessage:
         }
 
 
+@dataclass(slots=True)
+class PcProjectionBatchMessage:
+    schema_version: str
+    type: str
+    message_id: str
+    trace_id: str
+    pc_id: str
+    connection_epoch: int
+    sent_at: str
+    payload: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        envelope = _validate_envelope(
+            {
+                "schema_version": self.schema_version,
+                "type": self.type,
+                "message_id": self.message_id,
+                "trace_id": self.trace_id,
+                "pc_id": self.pc_id,
+                "connection_epoch": self.connection_epoch,
+                "sent_at": self.sent_at,
+                "payload": self.payload,
+            },
+            expected_type="projection_batch",
+            minimum_epoch=1,
+        )
+        payload = envelope["payload"]
+        scope = _validate_projection_scope(payload.get("scope"), "payload.scope")
+        self.schema_version = envelope["schema_version"]
+        self.type = envelope["type"]
+        self.message_id = envelope["message_id"]
+        self.trace_id = envelope["trace_id"]
+        self.pc_id = envelope["pc_id"]
+        self.connection_epoch = envelope["connection_epoch"]
+        self.sent_at = envelope["sent_at"]
+        self.payload = {
+            "batch_id": _require_text(payload.get("batch_id"), "payload.batch_id"),
+            "scope": scope,
+            "workspace_id": _require_optional_text(payload.get("workspace_id"), "payload.workspace_id"),
+            "session_id": _require_optional_text(payload.get("session_id"), "payload.session_id"),
+            "thread_id": _require_optional_text(payload.get("thread_id"), "payload.thread_id"),
+            "projection_version": _require_optional_int(
+                payload.get("projection_version"),
+                "payload.projection_version",
+                minimum=1,
+            ),
+            "items": _validate_projection_items(payload.get("items"), "payload.items"),
+        }
+        if scope == "session":
+            if self.payload["workspace_id"] is None:
+                raise PcControlProtocolError("payload.workspace_id is required for session projection batches")
+            if self.payload["session_id"] is None:
+                raise PcControlProtocolError("payload.session_id is required for session projection batches")
+            if self.payload["thread_id"] is None:
+                raise PcControlProtocolError("payload.thread_id is required for session projection batches")
+            if self.payload["projection_version"] is None:
+                raise PcControlProtocolError("payload.projection_version is required for session projection batches")
+        else:
+            self.payload["workspace_id"] = None
+            self.payload["session_id"] = None
+            self.payload["thread_id"] = None
+            self.payload["projection_version"] = None
+
+
 PcControlClientMessage = (
     PcHelloMessage
     | PcHeartbeatMessage
     | PcWorkspaceSnapshotMessage
+    | PcProjectionBatchMessage
     | PcCommandAckMessage
     | PcCommandEventMessage
     | PcCommandResultMessage
@@ -1130,6 +1257,48 @@ class PcMailboxLeaseAckMessage:
 
 
 @dataclass(slots=True)
+class PcDeliveryAckMessage:
+    schema_version: str
+    type: str
+    message_id: str
+    trace_id: str
+    pc_id: str
+    connection_epoch: int
+    sent_at: str
+    payload: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        envelope = _validate_envelope(
+            {
+                "schema_version": self.schema_version,
+                "type": self.type,
+                "message_id": self.message_id,
+                "trace_id": self.trace_id,
+                "pc_id": self.pc_id,
+                "connection_epoch": self.connection_epoch,
+                "sent_at": self.sent_at,
+                "payload": self.payload,
+            },
+            expected_type="delivery_ack",
+            minimum_epoch=1,
+        )
+        payload = envelope["payload"]
+        self.schema_version = envelope["schema_version"]
+        self.type = envelope["type"]
+        self.message_id = envelope["message_id"]
+        self.trace_id = envelope["trace_id"]
+        self.pc_id = envelope["pc_id"]
+        self.connection_epoch = envelope["connection_epoch"]
+        self.sent_at = envelope["sent_at"]
+        self.payload = {
+            "request_id": _require_text(payload.get("request_id"), "payload.request_id"),
+            "message_type": _validate_delivery_ack_message_type(payload.get("message_type"), "payload.message_type"),
+            "delivery_status": _validate_delivery_ack_status(payload.get("delivery_status"), "payload.delivery_status"),
+            "reason": _require_optional_text(payload.get("reason"), "payload.reason"),
+        }
+
+
+@dataclass(slots=True)
 class PcIngressDecisionMessage:
     schema_version: str
     type: str
@@ -1273,6 +1442,7 @@ PcControlServerMessage = (
     | PcErrorMessage
     | PcCommandDispatchMessage
     | PcOutputResumeRequestMessage
+    | PcDeliveryAckMessage
     | PcMailboxLeaseAckMessage
     | PcIngressDecisionMessage
     | PcThreadBindingAckMessage
@@ -1291,6 +1461,8 @@ def parse_pc_control_client_message(payload: dict[str, Any]) -> PcControlClientM
         return PcHeartbeatMessage(**data)
     if message_type == "workspace_snapshot":
         return PcWorkspaceSnapshotMessage(**data)
+    if message_type == "projection_batch":
+        return PcProjectionBatchMessage(**data)
     if message_type == "command_ack":
         return PcCommandAckMessage(**data)
     if message_type == "event":
@@ -1323,6 +1495,8 @@ def parse_pc_control_server_message(payload: dict[str, Any]) -> PcControlServerM
         return PcCommandDispatchMessage(**data)
     if message_type == "output_resume_request":
         return PcOutputResumeRequestMessage(**data)
+    if message_type == "delivery_ack":
+        return PcDeliveryAckMessage(**data)
     if message_type == "mailbox_lease_ack":
         return PcMailboxLeaseAckMessage(**data)
     if message_type == "ingress_decision":
@@ -1567,8 +1741,8 @@ def build_output_chunk(
             "stream_id_source": _require_optional_text(stream_id_source, "payload.stream_id_source"),
             "seq": _require_int(seq, "payload.seq", minimum=1),
             "kind": _require_text(kind, "payload.kind"),
-            "text": _require_optional_text(text, "payload.text"),
-            "delta": _require_optional_text(delta, "payload.delta"),
+            "text": _require_optional_chunk_text(text, "payload.text"),
+            "delta": _require_optional_chunk_text(delta, "payload.delta"),
             "item_type": _require_optional_text(item_type, "payload.item_type"),
             "status": _require_optional_text(status, "payload.status"),
         },
@@ -1610,6 +1784,47 @@ def build_artifact_manifest(
     return payload
 
 
+def build_projection_batch(
+    *,
+    message_id: str,
+    trace_id: str,
+    pc_id: str,
+    connection_epoch: int,
+    sent_at: str,
+    batch_id: str,
+    scope: str,
+    items: list[dict[str, Any]],
+    workspace_id: str | None = None,
+    session_id: str | None = None,
+    thread_id: str | None = None,
+    projection_version: int | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": PC_CONTROL_SCHEMA_VERSION,
+        "type": "projection_batch",
+        "message_id": _require_text(message_id, "message_id"),
+        "trace_id": _require_text(trace_id, "trace_id"),
+        "pc_id": _require_text(pc_id, "pc_id"),
+        "connection_epoch": _require_int(connection_epoch, "connection_epoch", minimum=1),
+        "sent_at": _require_text(sent_at, "sent_at"),
+        "payload": {
+            "batch_id": _require_text(batch_id, "payload.batch_id"),
+            "scope": _validate_projection_scope(scope, "payload.scope"),
+            "workspace_id": _require_optional_text(workspace_id, "payload.workspace_id"),
+            "session_id": _require_optional_text(session_id, "payload.session_id"),
+            "thread_id": _require_optional_text(thread_id, "payload.thread_id"),
+            "projection_version": _require_optional_int(
+                projection_version,
+                "payload.projection_version",
+                minimum=1,
+            ),
+            "items": _validate_projection_items(items, "payload.items"),
+        },
+    }
+    PcProjectionBatchMessage(**payload)
+    return payload
+
+
 def build_pc_hello_ack(
     *,
     message_id: str,
@@ -1633,6 +1848,37 @@ def build_pc_hello_ack(
         },
     }
     PcHelloAckMessage(**payload)
+    return payload
+
+
+def build_delivery_ack(
+    *,
+    message_id: str,
+    trace_id: str,
+    pc_id: str,
+    connection_epoch: int,
+    sent_at: str,
+    request_id: str,
+    message_type: str,
+    delivery_status: str,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": PC_CONTROL_SCHEMA_VERSION,
+        "type": "delivery_ack",
+        "message_id": _require_text(message_id, "message_id"),
+        "trace_id": _require_text(trace_id, "trace_id"),
+        "pc_id": _require_text(pc_id, "pc_id"),
+        "connection_epoch": _require_int(connection_epoch, "connection_epoch", minimum=1),
+        "sent_at": _require_text(sent_at, "sent_at"),
+        "payload": {
+            "request_id": _require_text(request_id, "payload.request_id"),
+            "message_type": _validate_delivery_ack_message_type(message_type, "payload.message_type"),
+            "delivery_status": _validate_delivery_ack_status(delivery_status, "payload.delivery_status"),
+            "reason": _require_optional_text(reason, "payload.reason"),
+        },
+    }
+    PcDeliveryAckMessage(**payload)
     return payload
 
 

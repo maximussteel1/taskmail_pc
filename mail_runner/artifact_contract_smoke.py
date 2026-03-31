@@ -15,6 +15,7 @@ import requests
 
 from .artifact_resolver import project_run_artifacts_to_outgoing_attachments, resolve_run_artifacts, write_artifact_index
 from .config import AppConfig, load_config
+from .download_ref import resolve_download_ref_url
 from .external_delivery import prepare_external_deliveries
 from .external_delivery_index import EXTERNAL_DELIVERY_INDEX_FILENAME
 from .file_surface import ARTIFACT_FILE_BINDING_INDEX_FILENAME, derive_file_surface_url
@@ -328,13 +329,13 @@ def run_artifact_contract_smoke(
 
     if preview_item is None:
         failures.append("artifact-preview did not appear in projected artifact_manifest.")
-    elif preview_item.get("download_ref") != expected_preview_url:
+    elif resolve_download_ref_url(preview_item.get("download_ref")) != expected_preview_url:
         failures.append("artifact-preview download_ref did not match the live relay file-surface URL.")
     elif preview_item.get("download_ref_source") != "external_delivery_index.file_surface":
         failures.append("artifact-preview download_ref_source did not reflect live external_delivery_index evidence.")
     if report_item is None:
         failures.append("artifact-report did not appear in projected artifact_manifest.")
-    elif report_item.get("download_ref") is not None:
+    elif resolve_download_ref_url(report_item.get("download_ref")) is not None:
         failures.append("Non-uploaded artifact unexpectedly has a download_ref.")
 
     smoke_result = {

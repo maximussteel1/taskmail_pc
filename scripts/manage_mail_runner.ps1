@@ -1225,6 +1225,64 @@ function Wait-ForStableHostState {
     return $false
 }
 
+function Get-ObserveRunningSessions {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PythonPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedConfigPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedRuntimeDir
+    )
+
+    $observeOutput = & $PythonPath `
+        -m mail_runner.observe `
+        --config $ResolvedConfigPath `
+        --runtime-dir $ResolvedRuntimeDir `
+        list-running 2>&1
+    $observeExitCode = $LASTEXITCODE
+    if ($observeExitCode -ne 0) {
+        $detail = if ($observeOutput) { ($observeOutput -join [Environment]::NewLine) } else { "(no output)" }
+        throw ("Unable to inspect running sessions before restart. observe exit=" + $observeExitCode + [Environment]::NewLine + $detail)
+    }
+
+    $runningLines = New-Object System.Collections.Generic.List[string]
+    foreach ($item in @($observeOutput)) {
+        $text = ("" + $item).Trim()
+        if ([string]::IsNullOrWhiteSpace($text) -or $text -eq "(none)") {
+            continue
+        }
+        $runningLines.Add($text)
+    }
+    return @($runningLines)
+}
+
+function Assert-NoRunningSessionsForDirectRestart {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PythonPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedConfigPath,
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedRuntimeDir
+    )
+
+    $runningSessions = @(Get-ObserveRunningSessions `
+        -PythonPath $PythonPath `
+        -ResolvedConfigPath $ResolvedConfigPath `
+        -ResolvedRuntimeDir $ResolvedRuntimeDir)
+    if ($runningSessions.Count -le 0) {
+        return
+    }
+
+    throw (
+        "Refusing to directly restart the mail runner while running sessions are active. " +
+        "Wait for them to finish or stop them explicitly before retrying." +
+        [Environment]::NewLine +
+        ($runningSessions -join [Environment]::NewLine)
+    )
+}
+
 $ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
@@ -1239,10 +1297,13 @@ $resolvedRuntimeDir = [System.IO.Path]::GetFullPath($RuntimeDir)
 New-Item -ItemType Directory -Force -Path $resolvedRuntimeDir | Out-Null
 
 if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
+    $preferredRelay = Join-Path $resolvedProjectRoot "mail_config.bot.relay.local.yaml"
     $preferred = Join-Path $resolvedRuntimeDir "mail_config.loop_30s.yaml"
     $fallbackBot = Join-Path $resolvedProjectRoot "mail_config.bot.local.yaml"
     $fallbackUser = Join-Path $resolvedProjectRoot "mail_config.local.yaml"
-    if (Test-Path $preferred) {
+    if (Test-Path $preferredRelay) {
+        $ConfigPath = $preferredRelay
+    } elseif (Test-Path $preferred) {
         $ConfigPath = $preferred
     } elseif (Test-Path $fallbackBot) {
         $ConfigPath = $fallbackBot
@@ -1278,6 +1339,21 @@ $relayTaskRootSyncSettings = Get-RelayTaskRootSyncSettings `
     -RelaySyncRepeatSeconds $RelaySyncRepeatSeconds `
     -DisableRelayTaskRootSync:$DisableRelayTaskRootSync
 $scriptPath = [System.IO.Path]::GetFullPath($MyInvocation.MyCommand.Path)
+$existingRunnerProcesses = @(
+    Get-RunnerProcesses `
+        -ResolvedProjectRoot $resolvedProjectRoot `
+        -ResolvedConfigPath $resolvedConfigPath `
+        -PidFile $pidFile `
+        -HostStatePath $hostStatePath `
+        -Kind all
+)
+
+if (($Action -in @("restart", "detach-restart")) -and $existingRunnerProcesses) {
+    Assert-NoRunningSessionsForDirectRestart `
+        -PythonPath $pythonPath `
+        -ResolvedConfigPath $resolvedConfigPath `
+        -ResolvedRuntimeDir $resolvedRuntimeDir
+}
 
 if ($Action -eq "detach-restart") {
     $launcherPath = Start-DetachedRunnerRestart `
@@ -1326,7 +1402,7 @@ if ($Action -in @("stop", "shutdown", "restart")) {
 }
 
 if ($Action -eq "status") {
-    $procs = Get-RunnerProcesses -ResolvedProjectRoot $resolvedProjectRoot -ResolvedConfigPath $resolvedConfigPath -PidFile $pidFile -HostStatePath $hostStatePath -Kind all
+    $procs = $existingRunnerProcesses
     $legacyProcs = @($procs | Where-Object { $_.RunnerKind -eq "legacy" })
     $hostState = Get-HostState -HostStatePath $hostStatePath
     $hostPid = Get-HostStatePid -HostState $hostState

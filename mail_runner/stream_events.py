@@ -77,8 +77,8 @@ def _coerce_stream_event(payload: dict[str, object], line_no: int) -> StreamEven
         backend=_required_text(payload.get("backend"), "backend", line_no),
         backend_transport=_required_text(payload.get("backend_transport"), "backend_transport", line_no),
         kind=_required_text(payload.get("kind"), "kind", line_no),
-        text=_optional_text(payload.get("text")),
-        delta=_optional_text(payload.get("delta")),
+        text=_optional_event_text(payload.get("text")),
+        delta=_optional_event_text(payload.get("delta")),
         item_type=_optional_text(payload.get("item_type")),
         status=_optional_text(payload.get("status")),
         payload={str(key): value for key, value in normalized_payload.items()},
@@ -106,3 +106,9 @@ def _optional_text(value: object) -> str | None:
         return None
     text = value.strip()
     return text or None
+
+
+def _optional_event_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return value if value else None

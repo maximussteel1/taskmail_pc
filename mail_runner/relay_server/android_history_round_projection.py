@@ -9,7 +9,10 @@ from typing import Any
 
 from ..artifact_resolver import resolve_run_artifacts
 from ..models import RunResult, SessionState, TaskSnapshot, ThreadState
+from ..pc_control_plane_projection import project_artifact_manifest
 from ..workspace import WorkspaceManager
+
+_INPUT_ATTACHMENT_SUMMARY_MARKER = "New incoming attachments materialized in workdir:"
 
 
 @dataclass(slots=True)
@@ -34,17 +37,29 @@ def build_android_history_rounds(
     if not round_sources:
         return []
 
+    resolved_task_root = Path(task_root)
     chronological_sources = sorted(round_sources.values(), key=_round_order_key)
-    rounds = [
-        _build_round_payload(
-            round_source=round_source,
-            session_state=session_state,
-            thread_state=thread_state,
-            task_root=Path(task_root),
-            round_number=index + 1,
+    previous_input_attachment_keys: set[str] = set()
+    rounds: list[dict[str, Any]] = []
+    for index, round_source in enumerate(chronological_sources, start=1):
+        input_text = _snapshot_input_text(round_source.snapshot)
+        input_attachments, previous_input_attachment_keys = _snapshot_input_attachments(
+            snapshot=round_source.snapshot,
+            task_root=resolved_task_root,
+            previous_keys=previous_input_attachment_keys,
+            input_text=input_text,
         )
-        for index, round_source in enumerate(chronological_sources)
-    ]
+        rounds.append(
+            _build_round_payload(
+                round_source=round_source,
+                session_state=session_state,
+                thread_state=thread_state,
+                task_root=resolved_task_root,
+                round_number=index,
+                input_text=input_text,
+                input_attachments=input_attachments,
+            )
+        )
     rounds.reverse()
     return rounds
 
@@ -105,6 +120,8 @@ def _build_round_payload(
     thread_state: ThreadState,
     task_root: Path,
     round_number: int,
+    input_text: str | None,
+    input_attachments: list[dict[str, Any]],
 ) -> dict[str, Any]:
     snapshot = round_source.snapshot
     result = round_source.result
@@ -128,7 +145,6 @@ def _build_round_payload(
         result=result,
     )
 
-    input_text = _snapshot_input_text(snapshot)
     result_text = _round_result_text(
         task_id=round_source.task_id,
         session_state=session_state,
@@ -142,7 +158,6 @@ def _build_round_payload(
         result=result,
         created_at=created_at,
     )
-    input_attachments = _snapshot_input_attachments(snapshot=snapshot, task_root=task_root)
     result_attachments = _result_attachments(result=result, thread_state=thread_state, task_root=task_root)
 
     return {
@@ -212,6 +227,9 @@ def _round_result_text(
     task_root: Path,
 ) -> str:
     if result is not None:
+        visible_output_text = _load_result_visible_output_text(result=result, task_root=task_root)
+        if visible_output_text is not None:
+            return visible_output_text
         summary_text = _load_result_summary_text(result=result, task_root=task_root)
         if summary_text:
             return summary_text
@@ -225,6 +243,14 @@ def _round_result_text(
             or _humanize_status(session_state.status)
         )
     return "No stable result was captured for this round."
+
+
+def _load_result_visible_output_text(*, result: RunResult, task_root: Path) -> str | None:
+    output_path = task_root / result.thread_id / result.stdout_file
+    if not output_path.exists():
+        return None
+    text = output_path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+    return text if text else None
 
 
 def _load_result_summary_text(*, result: RunResult, task_root: Path) -> str | None:
@@ -250,8 +276,10 @@ def _build_process_items(
             return [
                 {
                     "item_id": f"hist_process_{task_id}_awaiting",
+                    "kind": "system",
                     "created_at": created_at,
-                    "status": "waiting_user",
+                    "updated_at": created_at,
+                    "status": "completed",
                     "text": prompt_text,
                 }
             ]
@@ -262,8 +290,10 @@ def _build_process_items(
             return [
                 {
                     "item_id": f"hist_process_{task_id}_{session_state.status}",
+                    "kind": "system",
                     "created_at": created_at,
-                    "status": session_state.status,
+                    "updated_at": created_at,
+                    "status": "streaming",
                     "text": summary,
                 }
             ]
@@ -283,24 +313,53 @@ def _pending_question_prompt_text(result: RunResult) -> str | None:
     return None
 
 
-def _snapshot_input_attachments(*, snapshot: TaskSnapshot | None, task_root: Path) -> list[dict[str, Any]]:
-    if snapshot is None:
-        return []
+def _normalize_attachment_path_key(path: Path) -> str:
+    return str(path).replace("\\", "/").lower()
 
-    attachments: list[dict[str, Any]] = []
+
+def _snapshot_input_attachment_entries(
+    *,
+    snapshot: TaskSnapshot,
+    task_root: Path,
+) -> list[tuple[str, dict[str, Any]]]:
+    entries: list[tuple[str, dict[str, Any]]] = []
     thread_root = task_root / snapshot.thread_id
     for index, raw_path in enumerate(snapshot.attachments, start=1):
         candidate = Path(raw_path)
         resolved_path = candidate if candidate.is_absolute() else (thread_root / candidate)
-        attachments.append(
-            _build_attachment_payload(
-                attachment_id=f"hist_input_{snapshot.task_id}_{index}",
-                display_name=resolved_path.name if resolved_path.name else candidate.name or f"input-{index}",
-                content_type=_guess_content_type(resolved_path, None),
-                size_bytes=resolved_path.stat().st_size if resolved_path.exists() and resolved_path.is_file() else None,
+        entries.append(
+            (
+                _normalize_attachment_path_key(resolved_path),
+                _build_attachment_payload(
+                    attachment_id=f"hist_input_{snapshot.task_id}_{index}",
+                    display_name=resolved_path.name if resolved_path.name else candidate.name or f"input-{index}",
+                    content_type=_guess_content_type(resolved_path, None),
+                    size_bytes=resolved_path.stat().st_size if resolved_path.exists() and resolved_path.is_file() else None,
+                ),
             )
         )
-    return attachments
+    return entries
+
+
+def _snapshot_input_attachments(
+    *,
+    snapshot: TaskSnapshot | None,
+    task_root: Path,
+    previous_keys: set[str],
+    input_text: str | None,
+) -> tuple[list[dict[str, Any]], set[str]]:
+    if snapshot is None:
+        return [], previous_keys
+    entries = _snapshot_input_attachment_entries(snapshot=snapshot, task_root=task_root)
+    current_keys = {key for key, _payload in entries}
+    if previous_keys and previous_keys.issubset(current_keys):
+        if current_keys == previous_keys and _INPUT_ATTACHMENT_SUMMARY_MARKER in str(input_text or ""):
+            filtered = entries
+        else:
+            filtered = [(key, payload) for key, payload in entries if key not in previous_keys]
+    else:
+        filtered = entries
+    return [payload for _key, payload in filtered], current_keys
 
 
 def _result_attachments(
@@ -312,16 +371,24 @@ def _result_attachments(
     if result is None:
         return []
     artifacts, _skipped = resolve_run_artifacts(task_root, thread_state, result)
+    projected_manifest = project_artifact_manifest(task_root, result=result) or {}
+    projected_items_by_artifact_id = {
+        str(item.get("artifact_id") or "").strip(): item
+        for item in list(projected_manifest.get("artifacts") or [])
+        if isinstance(item, dict)
+    }
     attachments: list[dict[str, Any]] = []
     for index, artifact in enumerate(artifacts, start=1):
         artifact_path = Path(artifact.path)
         size_bytes = artifact_path.stat().st_size if artifact_path.exists() and artifact_path.is_file() else None
+        projected_item = projected_items_by_artifact_id.get(artifact.artifact_id)
         attachments.append(
             _build_attachment_payload(
                 attachment_id=f"hist_result_{result.task_id}_{index}",
                 display_name=artifact.name,
                 content_type=artifact.content_type,
                 size_bytes=size_bytes,
+                download_ref=projected_item.get("download_ref") if isinstance(projected_item, dict) else None,
             )
         )
     return attachments
@@ -333,6 +400,7 @@ def _build_attachment_payload(
     display_name: str,
     content_type: str | None,
     size_bytes: int | None,
+    download_ref: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_content_type = content_type or "application/octet-stream"
     return {
@@ -341,6 +409,7 @@ def _build_attachment_payload(
         "content_type": normalized_content_type,
         "size_bytes": size_bytes,
         "is_image": normalized_content_type.startswith("image/"),
+        "download_ref": download_ref,
     }
 
 

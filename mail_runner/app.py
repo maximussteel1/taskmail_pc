@@ -538,6 +538,18 @@ def _maybe_schedule_requested_runner_restart(runtime_dir: Path | None) -> bool:
     if not config_path.strip():
         LOGGER.error("Unable to schedule detached runner restart because %s is missing.", _CONFIG_PATH_ENV)
         return False
+    resolved_task_root = load_config(config_path).resolve_task_root(Path(config_path).resolve().parent)
+    running_thread_ids = [
+        state.thread_id
+        for state in list_all_thread_states(resolved_task_root)
+        if state.lifecycle == "active" and state.status == THREAD_STATUS_RUNNING
+    ]
+    if running_thread_ids:
+        LOGGER.info(
+            "Deferring detached runner restart because running sessions are still active: %s",
+            ", ".join(running_thread_ids),
+        )
+        return False
 
     primary_path, primary_request = valid_requests[0]
     ok, detail = _schedule_detached_runner_restart(config_path=config_path, runtime_dir=runtime_dir)
@@ -674,10 +686,10 @@ def _collect_live_assistant_output(events: list[Any]) -> str:
             continue
         if event.kind != "assistant.completed":
             continue
-        text = str(event.text or "").strip()
+        text = str(event.text or "")
         if not chunks and text:
             latest_completed_text = text
-    return "".join(chunks).strip() or latest_completed_text
+    return "".join(chunks) if chunks else latest_completed_text
 
 
 def _build_running_status_summary(task_root: Path, state: ThreadState) -> str:
@@ -749,6 +761,7 @@ def _handle_project_folder_sync(
 def _handle_transport_probe_mail(
     envelope: MailEnvelope,
     task_root: Path,
+    pc_control_client: Any | None = None,
 ) -> bool:
     try:
         observed_probe, observation_path = record_transport_probe_observation(
@@ -771,6 +784,28 @@ def _handle_transport_probe_mail(
         observed_probe.packet_id,
         observation_path,
     )
+    if pc_control_client is not None and hasattr(pc_control_client, "publish_transport_probe_observation"):
+        try:
+            observation_payload = json.loads(observation_path.read_text(encoding="utf-8"))
+            if isinstance(observation_payload, dict):
+                pc_control_client.publish_transport_probe_observation(
+                    {
+                        "probe_id": str(observation_payload.get("probe_id") or observed_probe.probe_id),
+                        "request_id": str(observation_payload.get("request_id") or observed_probe.request_id),
+                        "packet_id": str(observation_payload.get("packet_id") or observed_probe.packet_id),
+                        "receipt_id": None,
+                        "mailbox_message_id": str(observed_probe.transport_message_id or "").strip() or None,
+                        "summary_text": "Observed transport probe mail in the PC mailbox.",
+                        "observation_status": str(observation_payload.get("status") or "observed"),
+                        "observed_at": str(observation_payload.get("last_observed_at") or _timestamp()),
+                        "payload": observation_payload,
+                    }
+                )
+        except Exception:
+            LOGGER.exception(
+                "Unable to publish transport-probe projection batch. probe_id=%s",
+                observed_probe.probe_id,
+            )
     return True
 
 
@@ -1085,6 +1120,11 @@ def _start_snapshot_run(
                 accepted_state_callback(state)
             except Exception:
                 LOGGER.exception("pc-control accepted-state callback failed. thread=%s", state.thread_id)
+        if pc_control_client is not None and hasattr(pc_control_client, "publish_thread_projection"):
+            try:
+                pc_control_client.publish_thread_projection(state=state, task_snapshot=snapshot)
+            except Exception:
+                LOGGER.exception("Unable to publish accepted session projection. thread=%s", state.thread_id)
         _send_status_update(
             mail_client,
             config,
@@ -1102,6 +1142,11 @@ def _start_snapshot_run(
         )
 
     def on_running(state: ThreadState) -> None:
+        if pc_control_client is not None and hasattr(pc_control_client, "publish_thread_projection"):
+            try:
+                pc_control_client.publish_thread_projection(state=state, task_snapshot=snapshot)
+            except Exception:
+                LOGGER.exception("Unable to publish running session projection. thread=%s", state.thread_id)
         _send_status_update(
             mail_client,
             config,
@@ -1748,9 +1793,9 @@ def _handle_existing_action(
             state=state,
             task_snapshot=snapshot,
             result=latest_result,
-            intro="A local mail runner restart has been scheduled. The host will restart itself shortly via an external launcher. Any currently running sessions may be interrupted and later recover as resumable sessions.",
+            intro="A local mail runner restart has been queued. The host will wait until no sessions are running, then restart itself via an external launcher.",
             target_reply_chain=target_reply_chain,
-            summary_override="Runner restart scheduled.",
+            summary_override="Runner restart queued.",
         )
         return True
 
@@ -2179,7 +2224,7 @@ def _process_mail(
     pc_control_client: Any | None = None,
 ) -> bool:
     if is_transport_probe_mail(envelope):
-        return _handle_transport_probe_mail(envelope, task_root)
+        return _handle_transport_probe_mail(envelope, task_root, pc_control_client=pc_control_client)
 
     subject_info = parse_subject(envelope.subject)
     capsule_state = parse_state_capsule(envelope.body_text)

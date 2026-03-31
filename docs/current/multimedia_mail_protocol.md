@@ -174,56 +174,35 @@ If a manifest item points to a missing or invalid file:
 - do not fail the whole mail send
 - include a brief skipped-files note in the status mail body
 
-### Oversized artifact delivery
+### Relay owner-lane artifact delivery
 
-Current runtime behavior supports two outbound delivery paths:
+Current relay runtime behavior now treats relay `/v1/files` as the only
+user-consumable artifact lane for relay-backed outbound delivery.
 
-1. regular mail attachments for small artifacts
-2. external delivery links for oversized artifacts
+When `outbound_transport=relay` is enabled with `relay_url + relay_transport_token`:
 
-When an outgoing artifact exceeds the configured
-`external_delivery_threshold_mb`, the runtime uses one of these external
-delivery backends:
+- every attachable run artifact is uploaded to relay `/v1/files`, regardless of size
+- `external_delivery_threshold_mb` does not gate this relay owner lane
+- the relay owner lane does not fall back to COS or normal MIME attachments
+- the status mail keeps the artifact listed in the single `Artifacts` section
+- the status mail adds a separate `External Deliveries` section
+- the externally delivered file is omitted from actual MIME attachments
 
-- relay file surface, when `outbound_transport=relay` is enabled with
-  `relay_url + relay_transport_token`; this is now the repo-side default owner lane
-- COS, when `external_delivery_backend_preference=auto` explicitly keeps the
-  legacy compatibility-default `COS`-first selection and COS delivery is configured
-- COS, when `external_delivery_backend_preference=cos` explicitly forces that lane
-- during that cutover, if a concrete artifact exceeds the live `/v1/files` upload limit and COS is still available,
-  only that oversize artifact may keep using COS as a compatibility lane
+Current relay owner-lane policy:
 
-In both cases, the runtime:
-
-1. uploads that file to the selected external delivery backend
-2. generates a downloadable URL
-3. keeps the artifact listed in the single `Artifacts` section
-4. adds a separate `External Deliveries` section to the status mail body
-5. omits the oversized file from the actual MIME attachments
-
-This keeps the control protocol unchanged while avoiding mailbox size limits.
-
-Current default policy:
-
-- threshold: `20 MB`
-- COS presigned URL lifetime: `7 days`
-- COS object key shape: `mail-runner/<thread_id>/<task_id>/<filename>`
-- COS upload uses a direct HTTPS client session and does not inherit ambient `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` environment variables
 - relay file-surface upload derives `http(s)://<relay-host>/v1/files` from the configured `ws(s)://<relay-host>/relay`
 - relay file-surface upload uses the same Bearer transport token as the relay websocket bootstrap
-- `external_delivery_backend_preference` currently accepts `auto`, `cos`, or `file_surface`
-- repo-side default is now `file_surface`
-- `auto` is retained only as an explicit legacy compatibility value; when COS is configured it keeps the older COS-first selection
-- small files still remain normal mail attachments
-- for `apk` / `ipa` payloads on the COS default domain, the runtime rewrites the
-  uploaded object name to `<original_name>.bin` and emits a user-facing notice,
-  because the default COS public domain blocks direct APK/IPA distribution
+- successful relay external delivery writes both `artifact_file_binding_index.json` and `external_delivery_index.json`
+- if relay `/v1/files` upload fails, runtime keeps sending the status mail, does not silently fall back to MIME attachment, and includes a notice that the file was not attached
 
-If external delivery upload fails for an oversized file:
+Legacy note:
 
-- do not silently fall back to attaching the large file
-- keep sending the status mail
-- include a notice that external delivery failed and the file was not attached
+- repo 仍保留非 relay 路径的 threshold/COS external-delivery 实现与配置字段，但它不再是 TaskMail/VPS 主线
+- `external_delivery_threshold_mb` 在当前主线下只应读成非 relay 路径的 legacy 配置
+- COS presigned URL lifetime 仍是 `7 days`
+- COS object key shape 仍是 `mail-runner/<thread_id>/<task_id>/<filename>`
+- COS upload 仍使用直连 HTTPS session，不继承 ambient `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`
+- 对 `apk` / `ipa` payloads on the COS default domain，runtime 仍会把对象名改写为 `<original_name>.bin` 并发出 user-facing notice
 
 ## Inline Image Rules
 
@@ -265,12 +244,13 @@ Implemented runtime details:
 
 - each CLI run creates `runs/<task_id>/artifacts/`
 - each CLI run writes `runs/<task_id>/incoming_attachments.json`
-- when outgoing artifacts are resolved for status mail delivery, the runtime writes `runs/<task_id>/artifacts/artifact_index.json`
+- each completed CLI run now persists `runs/<task_id>/artifacts/artifact_index.json` from the resolved artifact truth, even when no status mail is emitted
+- status mail delivery and relay-side projection both read that same durable artifact truth
 - when relay file-surface external delivery is used, the runtime also writes `runs/<task_id>/artifacts/artifact_file_binding_index.json`
-- when any oversized artifact is successfully externalized, the runtime also writes `runs/<task_id>/artifacts/external_delivery_index.json`
+- when any relay external delivery succeeds, the runtime also writes `runs/<task_id>/artifacts/external_delivery_index.json`
 - `RunResult.artifacts_dir` points at `runs/<task_id>/artifacts`
 - prompt/runtime hints tell the backend to create outgoing files in `MAIL_RUNNER_ARTIFACTS_DIR`
-- COS oversized-delivery credentials may live in a local-only `mail_config.cos.local.yaml` file
+- legacy COS external-delivery credentials may live in a local-only `mail_config.cos.local.yaml` file
 
 ### What the backend must do to send a file
 

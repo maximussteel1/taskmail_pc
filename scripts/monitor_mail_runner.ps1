@@ -186,17 +186,6 @@ if (-not [string]::IsNullOrWhiteSpace($ThreadId)) {
         }
     }
 
-    Write-Host "Mail Runner Active Session"
-    Write-Host "Config: $resolvedConfigPath"
-    Write-Host "Runtime Dir: $resolvedRuntimeDir"
-    Write-Host "Focused Session Thread: $ThreadId"
-    Write-Host "Poll Seconds: $RefreshSeconds"
-    Write-Host "Buffer Lines: $MaxBufferLines"
-    Write-Host "History Limit: $HistoryLimit"
-    Write-Host "Close Semantics: closing this focused window requests a local close for the active session."
-    Write-Host "Kill Command: .\\scripts\\active_session_window.cmd -ThreadId $ThreadId -RequestKill"
-    Write-Host ""
-
     $followArgs = @($observeBaseArgs)
     $followArgs += @(
         "follow-thread-live",

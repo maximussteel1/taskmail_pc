@@ -70,6 +70,7 @@ def test_build_health_payload_reports_server_shape() -> None:
     assert payload["service"] == "mail-runner-relay"
     assert payload["listen"] == {"host": "127.0.0.1", "port": 9000}
     assert payload["session_count"] == 0
+    assert payload["action_logging_enabled"] is True
     assert payload["taskmail_direct_ingress_enabled"] is False
     assert payload["task_root"] == {
         "configured_path": None,
@@ -102,6 +103,19 @@ def test_build_health_payload_reports_task_root_diagnostics(tmp_path) -> None:
         "scheduler_present": True,
         "thread_count": 1,
     }
+
+
+def test_build_health_payload_reports_action_logging_disabled_when_configured() -> None:
+    config = RelayServerConfig(
+        host="127.0.0.1",
+        port=8787,
+        transport_token="secret-token",
+        action_log_enabled=False,
+    )
+
+    payload = build_health_payload(config, InMemorySessionStore())
+
+    assert payload["action_logging_enabled"] is False
 
 
 def test_build_health_payload_reports_direct_ingress_disabled_in_vps_only_mode() -> None:

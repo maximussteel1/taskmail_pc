@@ -18,7 +18,7 @@ from .config import DEFAULT_CONFIG_PATH, PROJECT_ROOT, load_config
 from .health_semantics import DerivedHealth, derive_session_health, derive_thread_health
 from .host import resolve_runtime_dir
 from .host_state import load_host_state
-from .models import RunResult, SessionState, ThreadState
+from .models import RunResult, SessionState, TaskSnapshot, ThreadState
 from .session_semantics import thread_monitor_exit_reason, thread_monitor_should_stay_open
 from .stream_events import StreamEvent, load_stream_events, stream_events_path
 from .thread_store import build_workspace_id, load_thread_state
@@ -41,8 +41,11 @@ class ThreadFollowCursor:
     last_transcript_index: int = 0
     stream_seq_by_task: dict[str, int] = field(default_factory=dict)
     current_live_task_id: str | None = None
+    live_output_started: bool = False
     assistant_stream_open: bool = False
     last_session_state: "FollowSessionState | None" = None
+    last_user_input_lines: tuple[str, ...] | None = None
+    last_result_lines: tuple[str, ...] | None = None
 
 
 @dataclass(slots=True)
@@ -350,7 +353,11 @@ def render_thread_live(context: ObserveContext, thread_id: str) -> str | None:
     else:
         lines.append("Live Stream: unavailable")
 
-    lines.extend(["", "=== TRANSCRIPT ==="])
+    lines.append("")
+    lines.extend(_render_follow_focus_section("USER INPUT", _build_user_input_lines(context, thread, transcript_turns)))
+    lines.extend(_render_follow_focus_section("RESULT", _build_result_lines(thread, latest_result, transcript_turns, stream_events)))
+
+    lines.append("=== TRANSCRIPT ===")
     if transcript_turns:
         for turn in transcript_turns:
             lines.extend(_render_transcript_turn(turn))
@@ -446,22 +453,29 @@ def _render_follow_session_state(
     *,
     initial: bool,
 ) -> list[str]:
-    prefix = "Current State" if initial else f"{state.updated_at} | Session State"
-    lines = [
-        (
-            f"{prefix}: lifecycle={state.lifecycle}"
-            f" | status={state.status}"
-            f" | task={state.task_id}"
-            f" | transport={state.backend_transport}"
-            f" | resumable={'true' if state.backend_session_resumable else 'false'}"
-            f" | host={state.host_status}"
-            f" | host_pid_alive={'yes' if state.host_pid_alive else 'no'}"
-        )
-    ]
+    if initial:
+        lines = [
+            "=== SESSION ===",
+            f"State: {state.lifecycle} / {state.status}",
+            f"Task: {state.task_id}",
+            f"Transport: {state.backend_transport}",
+            f"Resumable: {'yes' if state.backend_session_resumable else 'no'}",
+            f"Host: {state.host_status} | pid_alive={'yes' if state.host_pid_alive else 'no'}",
+        ]
+    else:
+        lines = [
+            (
+                f"{state.updated_at} | State: {state.lifecycle} / {state.status}"
+                f" | task={state.task_id}"
+                f" | transport={state.backend_transport}"
+                f" | host={state.host_status}"
+                f" | pid_alive={'yes' if state.host_pid_alive else 'no'}"
+            )
+        ]
     if state.status not in {"accepted", "running"}:
-        note_prefix = "Session Note" if initial else f"{state.updated_at} | Session Note"
+        note_prefix = "Note" if initial else f"{state.updated_at} | Note"
         lines.append(
-            f"{note_prefix}: this window stays open while lifecycle=active, even when no backend run is currently executing."
+            f"{note_prefix}: session stays visible while lifecycle=active, even when no run is executing."
         )
     lines.append("")
     return lines
@@ -478,16 +492,33 @@ def _collect_follow_chunks(
     chunks: list[str] = []
     session_state = _build_follow_session_state(context, thread)
     transcript_turns = _load_transcript_turns(context.task_root, thread.thread_id)
+    latest_result = load_latest_run_result(context.task_root, thread)
+    current_task_id = (thread.current_task_id or "").strip()
+    stream_events: list[StreamEvent] = []
+    if current_task_id:
+        stream_path = stream_events_path(context.task_root, thread.thread_id, current_task_id)
+        stream_events, _ = _load_live_stream(stream_path)
+    user_input_lines = tuple(_build_user_input_lines(context, thread, transcript_turns))
+    result_lines = tuple(_build_result_lines(thread, latest_result, transcript_turns, stream_events))
     if include_history:
         chunks.extend(_line_chunks(_render_follow_header(thread, session_state)))
         chunks.extend(_line_chunks(_render_follow_session_state(session_state, initial=True)))
+        chunks.extend(_line_chunks(_render_follow_focus_section("USER INPUT", list(user_input_lines))))
+        chunks.extend(_line_chunks(_render_follow_focus_section("RESULT", list(result_lines))))
         chunks.extend(_render_follow_history(transcript_turns, history_limit))
         if transcript_turns:
             cursor.last_transcript_index = transcript_turns[-1].index
     else:
+        section_chunks: list[str] = []
         if cursor.last_session_state != session_state:
+            section_chunks.extend(_line_chunks(_render_follow_session_state(session_state, initial=False)))
+        if cursor.last_user_input_lines != user_input_lines:
+            section_chunks.extend(_line_chunks(_render_follow_focus_section("USER INPUT", list(user_input_lines))))
+        if cursor.last_result_lines != result_lines:
+            section_chunks.extend(_line_chunks(_render_follow_focus_section("RESULT", list(result_lines))))
+        if section_chunks:
             chunks.extend(_finalize_follow_output(cursor))
-            chunks.extend(_line_chunks(_render_follow_session_state(session_state, initial=False)))
+            chunks.extend(section_chunks)
         new_turns = [turn for turn in transcript_turns if turn.index > cursor.last_transcript_index]
         if new_turns:
             chunks.extend(_finalize_follow_output(cursor))
@@ -495,11 +526,10 @@ def _collect_follow_chunks(
                 chunks.extend(_line_chunks(_render_transcript_turn(turn)))
             cursor.last_transcript_index = transcript_turns[-1].index
     cursor.last_session_state = session_state
+    cursor.last_user_input_lines = user_input_lines
+    cursor.last_result_lines = result_lines
 
-    current_task_id = (thread.current_task_id or "").strip()
     if current_task_id:
-        stream_path = stream_events_path(context.task_root, thread.thread_id, current_task_id)
-        stream_events, _ = _load_live_stream(stream_path)
         if stream_events:
             if include_history and thread.status not in {"accepted", "running"}:
                 cursor.stream_seq_by_task[current_task_id] = stream_events[-1].seq
@@ -513,28 +543,21 @@ def _collect_follow_chunks(
 
 
 def _render_follow_header(thread: ThreadState, state: FollowSessionState) -> list[str]:
+    del state
     return [
-        f"Active Session Window: {thread.thread_id}",
-        "This focused window follows one active session. Closing it requests a local close for that active session.",
-        (
-            f"Session: {_text_or_dash(thread.session_id or thread.thread_id)}"
-            f" | lifecycle={thread.lifecycle}"
-            f" | status={thread.status}"
-            f" | backend={thread.backend}/{thread.backend_transport}"
-            f" | task={thread.current_task_id}"
-            f" | resumable={'true' if thread.backend_session_resumable else 'false'}"
-        ),
-        f"Host: {state.host_status} | pid_alive={'yes' if state.host_pid_alive else 'no'}",
+        f"Active Session: {thread.thread_id}",
         f"Repo: {thread.repo_path}",
         f"Workdir: {_text_or_dash(thread.workdir or '.')}",
+        "Close: Ctrl+C requests a local close for this session.",
+        f"Kill: .\\scripts\\active_session_window.cmd -ThreadId {thread.thread_id} -RequestKill",
         "",
     ]
 
 
 def _render_follow_history(turns: list[TranscriptTurn], history_limit: int) -> list[str]:
-    lines = ["=== RECENT TRANSCRIPT ==="]
+    lines = ["=== RECENT CONTEXT ==="]
     if not turns:
-        lines.extend(["(no archived transcript)", ""])
+        lines.extend(["(no recent transcript yet)", ""])
         return _line_chunks(lines)
     recent_turns = turns[-max(1, history_limit) :]
     if len(recent_turns) < len(turns):
@@ -545,6 +568,194 @@ def _render_follow_history(turns: list[TranscriptTurn], history_limit: int) -> l
     return _line_chunks(lines)
 
 
+def _render_follow_focus_section(title: str, body_lines: list[str]) -> list[str]:
+    lines = [f"=== {title} ==="]
+    if body_lines:
+        lines.extend(body_lines)
+    else:
+        lines.append("(none)")
+    lines.append("")
+    return lines
+
+
+def _normalize_observe_text(value: str | None) -> str:
+    return str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _load_thread_snapshot(
+    workspace: WorkspaceManager,
+    thread_id: str,
+    relative_path: str | None,
+) -> TaskSnapshot | None:
+    normalized_path = str(relative_path or "").strip()
+    if not normalized_path:
+        return None
+    try:
+        return workspace.load_snapshot(thread_id, normalized_path)
+    except FileNotFoundError:
+        return None
+
+
+def _latest_transcript_turn(turns: list[TranscriptTurn], *, role: str) -> TranscriptTurn | None:
+    return next((turn for turn in reversed(turns) if turn.role == role and _normalize_observe_text(turn.content)), None)
+
+
+def _append_focus_entry(
+    lines: list[str],
+    *,
+    seen_texts: set[str],
+    label: str,
+    text: str,
+    timestamp: str | None = None,
+) -> None:
+    normalized_text = _normalize_observe_text(text)
+    if not normalized_text or normalized_text in seen_texts:
+        return
+    seen_texts.add(normalized_text)
+    rendered_timestamp = _normalize_observe_text(timestamp)
+    header = label if not rendered_timestamp else f"{label}  {rendered_timestamp}"
+    lines.extend([header, normalized_text, ""])
+
+
+def _build_user_input_lines(
+    context: ObserveContext,
+    thread: ThreadState,
+    transcript_turns: list[TranscriptTurn],
+) -> list[str]:
+    workspace = WorkspaceManager(context.task_root)
+    current_snapshot = _load_thread_snapshot(workspace, thread.thread_id, thread.last_task_snapshot_file)
+    queued_snapshot = _load_thread_snapshot(workspace, thread.thread_id, thread.queued_snapshot_file)
+    lines: list[str] = []
+    seen_texts: set[str] = set()
+
+    if queued_snapshot is not None:
+        queued_turn_text = _normalize_observe_text(queued_snapshot.turn_text)
+        queued_task_text = _normalize_observe_text(queued_snapshot.task_text)
+        current_task_text = _normalize_observe_text(current_snapshot.task_text) if current_snapshot is not None else ""
+        if queued_turn_text:
+            _append_focus_entry(
+                lines,
+                seen_texts=seen_texts,
+                label="Pending Reply",
+                text=queued_turn_text,
+                timestamp=queued_snapshot.updated_at,
+            )
+        elif queued_task_text and (
+            current_snapshot is None
+            or queued_snapshot.task_id != current_snapshot.task_id
+            or queued_task_text != current_task_text
+        ):
+            _append_focus_entry(
+                lines,
+                seen_texts=seen_texts,
+                label="Pending Task",
+                text=queued_task_text,
+                timestamp=queued_snapshot.updated_at,
+            )
+
+    if current_snapshot is not None:
+        current_turn_text = _normalize_observe_text(current_snapshot.turn_text)
+        current_task_text = _normalize_observe_text(current_snapshot.task_text)
+        if current_turn_text:
+            _append_focus_entry(
+                lines,
+                seen_texts=seen_texts,
+                label="Latest Reply",
+                text=current_turn_text,
+                timestamp=current_snapshot.updated_at,
+            )
+        if current_task_text:
+            _append_focus_entry(
+                lines,
+                seen_texts=seen_texts,
+                label="Task",
+                text=current_task_text,
+                timestamp=current_snapshot.updated_at,
+            )
+
+    if not lines:
+        latest_user_turn = _latest_transcript_turn(transcript_turns, role="user")
+        if latest_user_turn is not None:
+            _append_focus_entry(
+                lines,
+                seen_texts=seen_texts,
+                label="Latest User Mail",
+                text=latest_user_turn.content,
+                timestamp=latest_user_turn.date,
+            )
+
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def _build_result_lines(
+    thread: ThreadState,
+    latest_result: RunResult | None,
+    transcript_turns: list[TranscriptTurn],
+    stream_events: list[StreamEvent],
+) -> list[str]:
+    lines: list[str] = []
+    seen_texts: set[str] = set()
+    if thread.last_summary:
+        _append_focus_entry(
+            lines,
+            seen_texts=seen_texts,
+            label="Summary",
+            text=thread.last_summary,
+            timestamp=thread.updated_at,
+        )
+
+    latest_assistant_turn = _latest_transcript_turn(transcript_turns, role="assistant")
+    if latest_assistant_turn is not None:
+        label = "Latest Assistant Update"
+        if latest_assistant_turn.status:
+            label = f"{label} [{latest_assistant_turn.status}]"
+        _append_focus_entry(
+            lines,
+            seen_texts=seen_texts,
+            label=label,
+            text=latest_assistant_turn.content,
+            timestamp=latest_assistant_turn.date,
+        )
+
+    assistant_text, assistant_started_at, assistant_last_update_at, assistant_completed = _collect_live_assistant(stream_events)
+    if assistant_text:
+        live_label = "Live Assistant"
+        if assistant_completed:
+            live_label = f"{live_label} [completed]"
+        _append_focus_entry(
+            lines,
+            seen_texts=seen_texts,
+            label=live_label,
+            text=assistant_text,
+            timestamp=assistant_last_update_at or assistant_started_at,
+        )
+
+    if not lines and latest_result is not None:
+        detail_lines = [f"Status: {latest_result.status}"]
+        if latest_result.finished_at:
+            detail_lines.append(f"Finished At: {latest_result.finished_at}")
+        elif latest_result.started_at:
+            detail_lines.append(f"Started At: {latest_result.started_at}")
+        if latest_result.error_message:
+            detail_lines.append(f"Error: {latest_result.error_message}")
+        _append_focus_entry(
+            lines,
+            seen_texts=seen_texts,
+            label="Latest Run",
+            text="\n".join(detail_lines),
+            timestamp=latest_result.finished_at or latest_result.started_at,
+        )
+
+    if not lines:
+        lines.append("(no result yet)")
+        return lines
+    if lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def _render_follow_stream_events(
     events: list[StreamEvent],
     cursor: ThreadFollowCursor,
@@ -552,9 +763,13 @@ def _render_follow_stream_events(
     task_id: str,
 ) -> list[str]:
     chunks: list[str] = []
+    if not cursor.live_output_started:
+        chunks.extend(_finalize_follow_output(cursor))
+        chunks.append("=== LIVE OUTPUT ===\n")
+        cursor.live_output_started = True
     if task_id != cursor.current_live_task_id:
         chunks.extend(_finalize_follow_output(cursor))
-        chunks.append(f"--- live task {task_id} ---\n")
+        chunks.append(f"Task: {task_id}\n")
         cursor.current_live_task_id = task_id
     for event in events:
         if event.kind == "assistant.delta":
@@ -583,8 +798,8 @@ def _render_follow_stream_events(
         if event.kind not in {"turn.started", "turn.completed", "turn.failed"}:
             continue
         chunks.extend(_finalize_follow_output(cursor))
-        text = event.text or _payload_summary(event) or event.kind
-        chunks.append(f"{event.ts} | {event.kind} | {text}\n")
+        text = event.text or _payload_summary(event) or _default_follow_event_text(event.kind)
+        chunks.append(f"{event.ts} | {text}\n")
     return chunks
 
 
@@ -667,11 +882,25 @@ def _render_transcript_turn(turn: TranscriptTurn) -> list[str]:
     label = "User" if turn.role == "user" else "Assistant"
     if turn.status:
         label = f"{label} [{turn.status}]"
+    header = f"[{turn.index:03d}] {label}"
+    rendered_date = _text_or_dash(turn.date)
+    if rendered_date != "-":
+        header = f"{header}  {rendered_date}"
     return [
-        f"{turn.index:03d} | {_text_or_dash(turn.date)} | {label}",
+        header,
         turn.content or "(empty)",
         "",
     ]
+
+
+def _default_follow_event_text(kind: str) -> str:
+    if kind == "turn.started":
+        return "Turn started"
+    if kind == "turn.completed":
+        return "Turn completed"
+    if kind == "turn.failed":
+        return "Turn failed"
+    return kind
 
 
 def _collect_live_assistant(events: list[StreamEvent]) -> tuple[str, str | None, str | None, bool]:

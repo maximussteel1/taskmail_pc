@@ -1,4 +1,4 @@
-"""External delivery tests for oversized artifacts."""
+"""External delivery tests for outgoing artifacts."""
 
 from __future__ import annotations
 
@@ -369,7 +369,7 @@ def test_prepare_external_deliveries_prefers_file_surface_by_default_when_relay_
                 relay_url=f"ws://{host}:{port}/relay",
                 relay_transport_token="relay-secret",
                 relay_timeout_seconds=5,
-                external_delivery_threshold_mb=0,
+                external_delivery_threshold_mb=20,
                 cos_region="ap-shanghai",
                 cos_bucket="mailbot-1412015279",
                 cos_secret_id="secret-id",
@@ -397,7 +397,7 @@ def test_prepare_external_deliveries_prefers_file_surface_by_default_when_relay_
         thread.join(timeout=5)
 
 
-def test_prepare_external_deliveries_keeps_legacy_cos_first_when_auto_is_explicit(
+def test_prepare_external_deliveries_ignores_explicit_cos_preference_when_relay_owner_lane_is_active(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -441,8 +441,8 @@ def test_prepare_external_deliveries_keeps_legacy_cos_first_when_auto_is_explici
                 relay_url=f"ws://{host}:{port}/relay",
                 relay_transport_token="relay-secret",
                 relay_timeout_seconds=5,
-                external_delivery_threshold_mb=0,
-                external_delivery_backend_preference="auto",
+                external_delivery_threshold_mb=20,
+                external_delivery_backend_preference="cos",
                 cos_region="ap-shanghai",
                 cos_bucket="mailbot-1412015279",
                 cos_secret_id="secret-id",
@@ -459,22 +459,21 @@ def test_prepare_external_deliveries_keeps_legacy_cos_first_when_auto_is_explici
         assert remaining_attachments == []
         assert notices == []
         assert len(deliveries) == 1
-        assert deliveries[0].provider == "cos"
+        assert deliveries[0].provider == "file_surface"
         assert effective_artifacts[0].inline_preview is False
-        assert client.upload_calls != []
-        assert client.download_calls != []
+        assert client.upload_calls == []
+        assert client.download_calls == []
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
 
 
-def test_prepare_external_deliveries_prefers_file_surface_when_configured_for_cutover(
+def test_prepare_external_deliveries_drops_attachments_when_relay_owner_lane_is_misconfigured(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
     artifact_path = tmp_path / "preview.png"
-    artifact_path.write_bytes(b"\x89PNG\r\n\x1a\nprefer-file-surface")
+    artifact_path.write_bytes(b"\x89PNG\r\n\x1a\nmissing-file-surface")
     artifact = RunArtifact(
         artifact_id="artifact-preview",
         path=str(artifact_path),
@@ -494,55 +493,35 @@ def test_prepare_external_deliveries_prefers_file_surface_when_configured_for_cu
         inline=True,
         caption="Preview image",
     )
-    config = RelayServerConfig(
-        host="127.0.0.1",
-        port=0,
-        transport_token="relay-secret",
-        state_dir=str(tmp_path / "relay_state"),
+
+    effective_artifacts, remaining_attachments, deliveries, notices = prepare_external_deliveries(
+        AppConfig(
+            outbound_transport="relay",
+            relay_url="",
+            relay_transport_token="",
+            external_delivery_threshold_mb=20,
+            external_delivery_backend_preference="cos",
+            cos_region="ap-shanghai",
+            cos_bucket="mailbot-1412015279",
+            cos_secret_id="secret-id",
+            cos_secret_key="secret-key",
+            cos_object_prefix="mail-runner",
+        ),
+        artifacts=[artifact],
+        attachments=[attachment],
+        result=_result(),
+        task_root=tmp_path / "tasks",
+        cos_client_factory=lambda settings: (_ for _ in ()).throw(AssertionError("relay owner lane should not use COS")),
     )
-    server = build_http_server(config, session_store=InMemorySessionStore())
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    client = FakeCosClient()
-    try:
-        monkeypatch.setattr("mail_runner.external_delivery._load_local_cos_config", lambda: {})
-        host, port = server.server_address[:2]
-        effective_artifacts, remaining_attachments, deliveries, notices = prepare_external_deliveries(
-            AppConfig(
-                outbound_transport="relay",
-                relay_url=f"ws://{host}:{port}/relay",
-                relay_transport_token="relay-secret",
-                relay_timeout_seconds=5,
-                external_delivery_threshold_mb=0,
-                external_delivery_backend_preference="file_surface",
-                cos_region="ap-shanghai",
-                cos_bucket="mailbot-1412015279",
-                cos_secret_id="secret-id",
-                cos_secret_key="secret-key",
-                cos_object_prefix="mail-runner",
-            ),
-            artifacts=[artifact],
-            attachments=[attachment],
-            result=_result(),
-            task_root=tmp_path / "tasks",
-            cos_client_factory=lambda settings: client,
-        )
 
-        assert remaining_attachments == []
-        assert notices == []
-        assert len(deliveries) == 1
-        assert deliveries[0].provider == "file_surface"
-        assert deliveries[0].url.startswith(f"http://{host}:{port}/v1/files/")
-        assert effective_artifacts[0].inline_preview is False
-        assert client.upload_calls == []
-        assert client.download_calls == []
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    assert remaining_attachments == []
+    assert deliveries == []
+    assert len(notices) == 1
+    assert "relay file surface is unavailable" in notices[0]
+    assert effective_artifacts[0].inline_preview is False
 
 
-def test_prepare_external_deliveries_keeps_cos_for_oversized_artifact_during_file_surface_cutover(
+def test_prepare_external_deliveries_does_not_fallback_to_cos_for_oversized_artifact_when_relay_owner_lane_is_active(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -573,13 +552,16 @@ def test_prepare_external_deliveries_keeps_cos_for_oversized_artifact_during_fil
         transport_token="relay-secret",
         state_dir=str(tmp_path / "relay_state"),
     )
-    server = build_http_server(config, session_store=InMemorySessionStore())
+    server = build_http_server(
+        config,
+        session_store=InMemorySessionStore(),
+        file_upload_limit_bytes=4,
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     client = FakeCosClient()
     try:
         monkeypatch.setattr("mail_runner.external_delivery._load_local_cos_config", lambda: {})
-        monkeypatch.setattr("mail_runner.external_delivery.SINGLE_FILE_UPLOAD_LIMIT_BYTES", 4)
         host, port = server.server_address[:2]
         effective_artifacts, remaining_attachments, deliveries, notices = prepare_external_deliveries(
             AppConfig(
@@ -604,22 +586,17 @@ def test_prepare_external_deliveries_keeps_cos_for_oversized_artifact_during_fil
 
         assert remaining_attachments == []
         assert notices
-        assert "rename the downloaded file back to oversized.apk" in notices[0]
-        assert len(deliveries) == 1
-        assert deliveries[0].provider == "cos"
-        assert deliveries[0].object_key.endswith("oversized.apk.bin")
+        assert "single_file_upload_limit_bytes exceeded" in notices[0]
+        assert deliveries == []
         assert effective_artifacts[0].inline_preview is False
-        assert client.upload_calls != []
-        assert client.download_calls != []
+        assert client.upload_calls == []
+        assert client.download_calls == []
 
         binding_path = tmp_path / "tasks" / "thread_001" / "runs" / "task_001" / "artifacts" / ARTIFACT_FILE_BINDING_INDEX_FILENAME
-        assert binding_path.exists() is False
-        delivery_sidecar_path = (
-            tmp_path / "tasks" / "thread_001" / "runs" / "task_001" / "artifacts" / EXTERNAL_DELIVERY_INDEX_FILENAME
-        )
-        delivery_payload = json.loads(delivery_sidecar_path.read_text(encoding="utf-8"))
-        delivery = delivery_payload["items"][0]["deliveries"][0]
-        assert delivery["provider"] == "cos"
+        payload = json.loads(binding_path.read_text(encoding="utf-8"))
+        binding = payload["items"][0]["bindings"][0]
+        assert binding["status"] == "failed"
+        assert binding["error_code"] == "payload_too_large"
     finally:
         server.shutdown()
         server.server_close()

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .download_ref import build_vps_file_download_ref
 from .external_delivery_index import EXTERNAL_DELIVERY_INDEX_FILENAME
 from .file_surface import ARTIFACT_FILE_BINDING_INDEX_FILENAME
 from .models import RunResult
@@ -73,11 +74,26 @@ def project_artifact_manifest(task_root: str | Path, *, result: RunResult) -> di
         latest_delivery = _latest_delivered_external_delivery(external_delivery_items.get(artifact_id))
         latest_uploaded = _latest_uploaded_binding(binding_items.get(artifact_id))
         if latest_delivery is not None:
-            download_ref = latest_delivery.get("url")
             provider = str(latest_delivery.get("provider") or "").strip()
             download_ref_source = f"external_delivery_index.{provider}" if provider else "external_delivery_index"
+            if provider == "file_surface":
+                download_ref = build_vps_file_download_ref(
+                    file_id=str(latest_delivery.get("object_key") or "").strip() or None,
+                    content_url=str(latest_delivery.get("url") or "").strip() or None,
+                    content_type=str(latest_delivery.get("content_type") or "").strip() or None,
+                )
+            else:
+                download_ref = None
         else:
-            download_ref = latest_uploaded.get("download_url") if latest_uploaded is not None else None
+            download_ref = (
+                build_vps_file_download_ref(
+                    file_id=str(latest_uploaded.get("file_id") or "").strip() or None,
+                    metadata_url=str(latest_uploaded.get("metadata_url") or "").strip() or None,
+                    content_url=str(latest_uploaded.get("download_url") or "").strip() or None,
+                )
+                if latest_uploaded is not None
+                else None
+            )
             download_ref_source = "artifact_file_binding_index" if latest_uploaded is not None else None
         projected_items.append(
             {

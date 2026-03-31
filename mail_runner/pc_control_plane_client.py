@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import concurrent.futures
 import hashlib
 import inspect
 import json
 import logging
+import mimetypes
 import secrets
 import socket
 import ssl
@@ -26,10 +28,15 @@ from .config import AppConfig
 from .mail_io import MailClient
 from .mail_attachments import materialize_incoming_attachments
 from .models import MailAttachment, MailEnvelope, RunResult, TaskSnapshot, ThreadState
-from .parser import parse_subject
 from .pc_control_plane_projection import project_artifact_manifest, project_output_chunks
+from .pc_projection_publisher import build_session_projection_batch, build_transport_probe_batch
 from .pc_workspace_inventory import build_execution_capabilities, collect_workspace_inventory
 from .question_utils import effective_pending_questions
+from .relay_native_session_actions import (
+    RelayNativeSessionActionResult,
+    execute_relay_native_session_action,
+    materialize_session_action_attachments,
+)
 from .relay_server.auth import token_fingerprint
 from .relay_server.control_protocol import (
     CONTROL_CHANNEL,
@@ -37,21 +44,16 @@ from .relay_server.control_protocol import (
     CONTROL_POST_CREATION_PAYLOAD_SCHEMA,
     CONTROL_SESSION_ACTION_RESULT_TYPE,
 )
-from .relay_server.direct_actions import RelayDirectActionError, RelayDirectActionResult
-from .relay_server.packet_store import AcceptedRelayPacket
+from .relay_server.direct_actions import RelayDirectActionError
 from .relay_server.post_creation_actions import (
-    RelayTaskMailDirectCurrentSessionReplyHandler,
-    RelayTaskMailDirectCurrentSessionStatusHandler,
-    _build_direct_message_id,
-    _build_post_creation_headers,
-    _build_thread_reply_chain,
     _resolve_current_session_thread_state,
-    _subject_text_for_target_state,
     _validate_plain_reply_target_state,
 )
 from .relay_server.pc_control_protocol import (
+    PC_CONTROL_SCHEMA_VERSION,
     PcCommandDispatchMessage,
     PcControlProtocolError,
+    PcDeliveryAckMessage,
     PcErrorMessage,
     PcHelloAckMessage,
     PcIngressDecisionMessage,
@@ -79,12 +81,17 @@ from .status import (
     RUN_STATUS_KILLED,
     RUN_STATUS_PAUSED,
     RUN_STATUS_SUCCESS,
+    THREAD_STATUS_AWAITING_USER_INPUT,
+    THREAD_STATUS_PAUSED,
 )
-from .thread_store import load_thread_state, save_thread_state
 from .session_action_closeout import build_target_session_identity, load_session_action_closeout
+from .thread_store import build_workspace_id
+from .workspace import WorkspaceManager
 
 LOGGER = logging.getLogger(__name__)
 _WEBSOCKETS_CONNECT_SUPPORTS_PROXY = "proxy" in inspect.signature(websockets.connect).parameters
+_PC_CONTROL_WEBSOCKET_MAX_SIZE_BYTES = 32 * 1024 * 1024
+_OUTPUT_CHUNK_POLL_INTERVAL_SECONDS = 0.5
 _CONTROL_PLANE_ATTACHMENT_PREFIX = "_ctrlin_"
 _SESSION_ACTION_COMMAND_TYPES = frozenset(
     {"reply", "status", "pause", "resume", "kill", "end", "answers", "attachment_continuation"}
@@ -103,6 +110,13 @@ class _SessionActionCommand:
     thread_id: str | None
     task_run_packet: dict[str, Any]
     dispatch_metadata: dict[str, Any]
+
+
+@dataclass(slots=True)
+class _ReliableClientPayload:
+    payload: dict[str, Any]
+    request_id: str
+    message_type: str
 
 
 def _normalize_session_action_question_answers(value: Any) -> list[dict[str, str]]:
@@ -272,10 +286,17 @@ class PcControlPlaneClient:
         self._control_lock = threading.Lock()
         self._command_ack_cache: dict[str, dict[str, Any]] = {}
         self._pending_client_messages: list[dict[str, Any]] = []
+        self._pending_reliable_client_messages: list[_ReliableClientPayload] = []
         self._launched_command_ids: set[str] = set()
         self._command_contexts: dict[str, dict[str, Any]] = {}
         self._output_chunk_replay_contexts: dict[str, dict[str, Any]] = {}
+        self._output_chunk_streamers: dict[str, Any] = {}
+        self._output_chunk_poll_interval_seconds = _OUTPUT_CHUNK_POLL_INTERVAL_SECONDS
+        self._projection_versions: dict[str, int] = {}
+        self._projection_fingerprints: dict[str, str] = {}
         self._pending_rpc_requests: dict[str, asyncio.Future] = {}
+        self._pending_delivery_acks: dict[str, asyncio.Future] = {}
+        self._reliable_sender = None
         self._lease_state: dict[str, Any] = {
             "mode": self._lease_mode,
             "mailbox_key": self._mailbox_key,
@@ -483,6 +504,63 @@ class PcControlPlaneClient:
             ),
         )
 
+    def publish_thread_projection(
+        self,
+        *,
+        state: ThreadState,
+        task_snapshot: TaskSnapshot | None = None,
+        result: RunResult | None = None,
+        closeouts: list[dict[str, Any]] | None = None,
+    ) -> None:
+        try:
+            batch = self._build_session_projection_batch(
+                state=state,
+                task_snapshot=task_snapshot,
+                result=result,
+                closeouts=closeouts or [],
+                closeout_only=False,
+            )
+        except Exception:
+            LOGGER.warning("Unable to build session projection batch thread_id=%s", state.thread_id, exc_info=True)
+            return
+        if batch is None:
+            return
+        self._queue_client_payload(self._wire_projection_batch(batch))
+
+    def publish_session_closeout(
+        self,
+        *,
+        state: ThreadState,
+        closeout: dict[str, Any],
+    ) -> None:
+        try:
+            batch = self._build_session_projection_batch(
+                state=state,
+                task_snapshot=None,
+                result=None,
+                closeouts=[self._normalize_projection_closeout(closeout, state=state)],
+                closeout_only=True,
+            )
+        except Exception:
+            LOGGER.warning("Unable to build session closeout batch thread_id=%s", state.thread_id, exc_info=True)
+            return
+        if batch is None:
+            return
+        self._queue_client_payload(self._wire_projection_batch(batch))
+
+    def publish_transport_probe_observation(self, observation: dict[str, Any]) -> None:
+        try:
+            batch = build_transport_probe_batch(
+                pc_id=self._pc_id,
+                connection_epoch=self._current_connection_epoch or 1,
+                observation=observation,
+                sent_at=self._clock(),
+            )
+        except Exception:
+            LOGGER.warning("Unable to build transport probe projection batch", exc_info=True)
+            return
+        self._queue_client_payload(self._wire_projection_batch(batch))
+
     def start(self) -> None:
         if not self.is_configured:
             return
@@ -646,10 +724,32 @@ class PcControlPlaneClient:
         future.set_result(payload)
         return True
 
+    def _resolve_delivery_ack(self, parsed) -> bool:
+        if not isinstance(parsed, PcDeliveryAckMessage):
+            return False
+        request_id = str(parsed.payload.get("request_id") or "").strip()
+        if not request_id:
+            return False
+        with self._control_lock:
+            future = self._pending_delivery_acks.get(request_id)
+        if future is None or future.done():
+            return False
+        payload = {"type": parsed.type, **dict(parsed.payload)}
+        future.set_result(payload)
+        return True
+
     def _fail_pending_rpc_requests(self, exc: Exception) -> None:
         with self._control_lock:
             pending = list(self._pending_rpc_requests.values())
             self._pending_rpc_requests = {}
+        for future in pending:
+            if not future.done():
+                future.set_exception(exc)
+
+    def _fail_pending_delivery_acks(self, exc: Exception) -> None:
+        with self._control_lock:
+            pending = list(self._pending_delivery_acks.values())
+            self._pending_delivery_acks = {}
         for future in pending:
             if not future.done():
                 future.set_exception(exc)
@@ -735,7 +835,7 @@ class PcControlPlaneClient:
             open_timeout=max(1, self._heartbeat_interval_seconds),
             close_timeout=max(1, self._heartbeat_interval_seconds),
             extra_headers={"Authorization": f"Bearer {self._transport_token}"},
-            max_size=4 * 1024 * 1024,
+            max_size=_PC_CONTROL_WEBSOCKET_MAX_SIZE_BYTES,
             **_direct_websocket_connect_kwargs(),
         ) as websocket:
             self._websocket = websocket
@@ -745,8 +845,6 @@ class PcControlPlaneClient:
             self._current_connection_epoch = connection_epoch
             self._set_connection_state(connected=True)
             await self._send_workspace_snapshot(websocket, connection_epoch, send_lock)
-            await self._flush_pending_client_messages(websocket, send_lock)
-            await self._replay_output_chunks_after_reconnect(websocket, send_lock)
             receiver_task = asyncio.create_task(
                 self._receive_loop(
                     websocket,
@@ -754,6 +852,9 @@ class PcControlPlaneClient:
                     send_lock=send_lock,
                 )
             )
+            await self._flush_pending_reliable_client_messages(websocket, send_lock)
+            await self._flush_pending_client_messages(websocket, send_lock)
+            await self._replay_output_chunks_after_reconnect(websocket, send_lock)
             if self.mailbox_lease_enabled:
                 await self._maintain_mailbox_lease()
             last_snapshot_at = self._monotonic()
@@ -780,6 +881,7 @@ class PcControlPlaneClient:
                     pass
                 self._set_connection_state(connected=False)
                 self._fail_pending_rpc_requests(RuntimeError("pc-control sidecar disconnected"))
+                self._fail_pending_delivery_acks(RuntimeError("pc-control sidecar disconnected"))
                 self._mark_output_chunk_replay_needed()
                 self._websocket = None
                 self._send_lock = None
@@ -858,6 +960,8 @@ class PcControlPlaneClient:
                 if isinstance(parsed, PcMailboxLeaseAckMessage):
                     self._update_lease_state_from_ack(parsed.payload)
                 continue
+            if self._resolve_delivery_ack(parsed):
+                continue
             if isinstance(parsed, PcCommandDispatchMessage):
                 await self._handle_command_dispatch(
                     websocket,
@@ -927,7 +1031,7 @@ class PcControlPlaneClient:
                 "error_code": error_code,
             }
         command_type = str(message.payload["command_type"] or "").strip().lower()
-        if command_type == "status":
+        if command_type in {"status", "pause", "end", "kill"}:
             return {
                 "ack_status": "accepted",
                 "queue_position": None,
@@ -1041,19 +1145,9 @@ class PcControlPlaneClient:
                 "direct_temporarily_unavailable",
                 "runner task_root is unavailable for current-session action handling",
             )
-        if self._session_action_bot_mailbox_addr() is None:
-            return (
-                "direct_temporarily_unavailable",
-                "bot mailbox address is not configured for current-session action handling",
-            )
         try:
             command = self._build_session_action_command(message)
-            target_state = self._resolve_session_action_target_state(command, task_root=task_root)
-            if self._resolve_session_action_recipient(task_root=task_root, state=target_state) is None:
-                return (
-                    "session_recipient_unresolved",
-                    "could not resolve a durable canonical reply recipient for the requested session action",
-                )
+            self._resolve_session_action_target_state(command, task_root=task_root)
         except RelayDirectActionError as exc:
             return exc.code, exc.message
         except ValueError as exc:
@@ -1191,28 +1285,6 @@ class PcControlPlaneClient:
             self._validate_answers_target_state(command, target_state=target_state)
         return target_state
 
-    def _resolve_session_action_recipient(self, *, task_root: str, state: ThreadState) -> str | None:
-        from .app import _resolve_recovery_recipient
-
-        normalized = str(state.canonical_reply_recipient or "").strip()
-        if normalized:
-            return normalized
-        recipient = _resolve_recovery_recipient(Path(task_root), state)
-        normalized = str(recipient or "").strip()
-        if not normalized:
-            return None
-        state.canonical_reply_recipient = normalized
-        state.updated_at = self._clock()
-        save_thread_state(state, task_root)
-        return normalized
-
-    def _session_action_bot_mailbox_addr(self) -> str | None:
-        for candidate in (self._config.from_addr, self._config.smtp_user, self._config.imap_user):
-            normalized = str(candidate or "").strip()
-            if normalized:
-                return normalized
-        return None
-
     def _resolve_profile_model(self, backend: str, profile: str) -> str | None:
         if not profile or profile == "default":
             return None
@@ -1279,12 +1351,7 @@ class PcControlPlaneClient:
             with self._control_lock:
                 self._launched_command_ids.add(command_id)
                 self._command_contexts[command_id] = {**base_context, "snapshot": snapshot}
-            self._remember_output_chunk_replay_context(
-                command_id,
-                trace_id=message.trace_id,
-                thread_id=snapshot.thread_id,
-                task_id=snapshot.task_id,
-            )
+            self._remember_command_snapshot(command_id, snapshot=snapshot, trace_id=message.trace_id)
 
             runner_start(
                 snapshot,
@@ -1292,12 +1359,7 @@ class PcControlPlaneClient:
                 latest_message_id=f"<pc-control-{self._sanitize_identifier(command_id, prefix='latest')}@local>",
                 subject_norm=f"pc-control:{snapshot.thread_id}",
                 session_name=str(message.payload.get("session_id") or snapshot.thread_id),
-                on_accepted=lambda _state: self._emit_command_event(
-                    command_id,
-                    event_type="accepted",
-                    summary="command accepted by the local runner",
-                    effective_execution=self._effective_execution(command_id),
-                ),
+                on_accepted=lambda state: self._on_runner_accepted(command_id, state, snapshot=snapshot),
                 on_running=lambda state: self._on_runner_running(command_id, state),
                 on_finished=lambda state, result: self._on_runner_finished(command_id, state, result),
             )
@@ -1348,13 +1410,64 @@ class PcControlPlaneClient:
                 return
             self._launched_command_ids.add(command_id)
             self._command_contexts[command_id] = dict(base_context)
+        keep_command_context = False
+        deferred_finish: dict[str, Any] = {"armed": False, "captured": None}
         try:
             command = self._build_session_action_command(message)
-            structured_payload = self._dispatch_session_action_command(command)
+            execution = self._dispatch_session_action_command(
+                command,
+                finished_state_callback=lambda state, snapshot, result: (
+                    deferred_finish.__setitem__("captured", (state, snapshot, result))
+                    if not deferred_finish["armed"]
+                    else self._on_session_action_runner_finished(
+                        command_id,
+                        command,
+                        state,
+                        snapshot,
+                        result,
+                    )
+                ),
+            )
+            if execution.started_snapshot is not None:
+                self._remember_command_snapshot(
+                    command_id,
+                    snapshot=execution.started_snapshot,
+                    trace_id=message.trace_id,
+                )
+            if execution.execution_status == "accepted" and execution.latest_result is None:
+                if execution.state_changed:
+                    self.publish_thread_projection(
+                        state=execution.target_state,
+                        task_snapshot=execution.started_snapshot,
+                    )
+                deferred_finish["armed"] = True
+                captured_finish = deferred_finish.get("captured")
+                if isinstance(captured_finish, tuple) and len(captured_finish) == 3:
+                    state, snapshot, result = captured_finish
+                    self._on_session_action_runner_finished(
+                        command_id,
+                        command,
+                        state,
+                        snapshot,
+                        result,
+                    )
+                keep_command_context = True
+                return
+            structured_payload = self._structured_session_action_payload(command, execution=execution)
+            session_action_result = structured_payload.get("session_action_result")
+            if isinstance(session_action_result, dict):
+                closeout_payload = session_action_result.get("session_action_closeout")
+                if execution.state_changed or execution.latest_result is not None:
+                    self.publish_thread_projection(
+                        state=execution.target_state,
+                        result=execution.latest_result,
+                    )
+                if isinstance(closeout_payload, dict):
+                    self.publish_session_closeout(state=execution.target_state, closeout=closeout_payload)
             self._emit_command_result(
                 command_id,
                 final_status="done",
-                summary=f"{command.action_type} mail ingress submitted",
+                summary=execution.summary,
                 structured_payload=structured_payload,
                 effective_execution=self._effective_execution(command_id),
             )
@@ -1395,11 +1508,15 @@ class PcControlPlaneClient:
                 error_message=error_text,
             )
         finally:
-            with self._control_lock:
-                self._launched_command_ids.discard(command_id)
-                self._command_contexts.pop(command_id, None)
+            if not keep_command_context:
+                self._clear_command_execution(command_id)
 
-    def _dispatch_session_action_command(self, command: _SessionActionCommand) -> dict[str, Any]:
+    def _dispatch_session_action_command(
+        self,
+        command: _SessionActionCommand,
+        *,
+        finished_state_callback: Callable[[ThreadState, TaskSnapshot, RunResult], None] | None = None,
+    ) -> RelayNativeSessionActionResult:
         task_root = self._runner_task_root()
         if task_root is None:
             raise RelayDirectActionError(
@@ -1407,151 +1524,83 @@ class PcControlPlaneClient:
                 "runner task_root is unavailable for current-session action handling",
             )
         target_state = self._resolve_session_action_target_state(command, task_root=task_root)
-        recipient_addr = self._resolve_session_action_recipient(task_root=task_root, state=target_state)
-        if recipient_addr is None:
-            raise RelayDirectActionError(
-                "session_recipient_unresolved",
-                "could not resolve a durable canonical reply recipient for the requested session action",
-            )
-        if command.action_type == "status":
-            handler = RelayTaskMailDirectCurrentSessionStatusHandler(
-                config=self._config,
-                task_root=task_root,
-                mail_client=self._mail_client,
-                runner=self._runner,
-                recipient_addr=recipient_addr,
-                background=True,
-            )
-            result = handler.handle_accepted_packet(
-                AcceptedRelayPacket(
-                    packet_id=command.packet_id,
-                    receipt_id=command.receipt_id,
-                    connection_id=self._runner_id,
-                    client_id="pc_control",
-                    client_trace_id=command.request_id,
-                    received_at=self._clock(),
-                    task_run_packet=command.task_run_packet,
-                    dispatch_metadata=command.dispatch_metadata,
-                )
-            )
-            server_messages = result.server_messages if isinstance(result, RelayDirectActionResult) else []
-        elif command.action_type == "reply":
-            handler = RelayTaskMailDirectCurrentSessionReplyHandler(
-                config=self._config,
-                task_root=task_root,
-                mail_client=self._mail_client,
-                runner=self._runner,
-                recipient_addr=recipient_addr,
-                background=True,
-            )
-            result = handler.handle_accepted_packet(
-                AcceptedRelayPacket(
-                    packet_id=command.packet_id,
-                    receipt_id=command.receipt_id,
-                    connection_id=self._runner_id,
-                    client_id="pc_control",
-                    client_trace_id=command.request_id,
-                    received_at=self._clock(),
-                    task_run_packet=command.task_run_packet,
-                    dispatch_metadata=command.dispatch_metadata,
-                )
-            )
-            server_messages = result.server_messages if isinstance(result, RelayDirectActionResult) else []
-        else:
-            self._dispatch_session_action_via_existing_thread_mail(
+        incoming_attachment_paths: list[str] = []
+        if command.action_type == "attachment_continuation":
+            incoming_attachment_paths = self._materialize_session_action_attachments(
                 command,
-                task_root=task_root,
                 target_state=target_state,
-                recipient_addr=recipient_addr,
             )
-            server_messages = []
-        return self._structured_session_action_payload(
-            command,
-            task_root=task_root,
+        return execute_relay_native_session_action(
+            action_type=command.action_type,
+            action_payload=self._session_action_business_payload(command),
             target_state=target_state,
-            server_messages=server_messages,
+            config=self._config,
+            task_root=task_root,
+            runner=self._runner,
+            incoming_attachment_paths=incoming_attachment_paths,
+            finished_state_callback=finished_state_callback,
         )
 
-    def _dispatch_session_action_via_existing_thread_mail(
+    def _on_session_action_runner_finished(
         self,
+        command_id: str,
         command: _SessionActionCommand,
-        *,
-        task_root: str,
-        target_state: ThreadState,
-        recipient_addr: str,
+        state: ThreadState,
+        snapshot: TaskSnapshot,
+        result: RunResult,
     ) -> None:
-        from .app import _process_existing_thread_mail
-
-        bot_addr = self._session_action_bot_mailbox_addr()
-        if bot_addr is None:
-            raise RelayDirectActionError(
-                "direct_temporarily_unavailable",
-                "bot mailbox address is not configured for current-session action handling",
+        summary = str(state.last_summary or result.error_message or f"{command.action_type} completed locally.").strip() or (
+            f"{command.action_type} completed locally."
+        )
+        execution = RelayNativeSessionActionResult(
+            action_type=command.action_type,
+            execution_status="completed",
+            summary=summary,
+            state_changed=True,
+            target_state=state,
+            task_snapshot=snapshot,
+            latest_result=result,
+            started_snapshot=snapshot,
+        )
+        try:
+            self._remember_command_snapshot(command_id, snapshot=snapshot)
+            self._stop_output_chunk_streaming(command_id)
+            try:
+                self._emit_output_chunks(command_id, result=result)
+            except Exception:
+                LOGGER.warning(
+                    "Unable to emit pc-control output chunks for session-action command_id=%s",
+                    command_id,
+                    exc_info=True,
+                )
+            try:
+                self._emit_artifact_manifest(command_id, result=result)
+            except Exception:
+                LOGGER.warning(
+                    "Unable to emit pc-control artifact manifest for session-action command_id=%s",
+                    command_id,
+                    exc_info=True,
+                )
+            self.publish_thread_projection(
+                state=state,
+                task_snapshot=snapshot,
+                result=result,
             )
-        if command.action_type not in {"pause", "resume", "kill"}:
-            if command.action_type not in {"end", "answers", "attachment_continuation"}:
-                raise ValueError(f"unsupported local current-session action: {command.action_type}")
-
-        target_session_identity = build_target_session_identity(
-            workspace_id=target_state.workspace_id,
-            session_id=target_state.session_id or target_state.thread_id,
-            thread_id=target_state.thread_id,
-        )
-        subject_text = _subject_text_for_target_state(target_state)
-        reply_to, references = _build_thread_reply_chain(target_state)
-        subject = f"Re: [S:{command.session_id}] {subject_text}".strip()
-        envelope = MailEnvelope(
-            message_id=_build_direct_message_id(command.packet_id),
-            subject=subject,
-            from_addr=recipient_addr,
-            to_addr=bot_addr,
-            date=self._clock(),
-            in_reply_to=reply_to,
-            references=references,
-            body_text=self._build_session_action_mail_body(command, target_state=target_state),
-            attachments=self._build_session_action_mail_attachments(command),
-            raw_headers={
-                "Subject": subject,
-                **_build_post_creation_headers(
-                    packet_id=command.packet_id,
-                    receipt_id=command.receipt_id,
-                    request_id=command.request_id,
-                    action_type=command.action_type,
-                    target_session_identity=target_session_identity,
-                ),
-            },
-        )
-        subject_info = parse_subject(envelope.subject)
-        handled = _process_existing_thread_mail(
-            envelope,
-            subject_info,
-            {
-                "workspace_id": target_state.workspace_id,
-                "session_id": target_state.session_id,
-                "thread_id": target_state.thread_id,
-            },
-            self._config,
-            Path(task_root),
-            self._mail_client,
-            self._runner,
-            background=True,
-        )
-        if not handled:
-            raise RelayDirectActionError(
-                "direct_temporarily_unavailable",
-                f"direct TaskMail current-session {command.action_type} could not be processed",
+            structured_payload = self._structured_session_action_payload(command, execution=execution)
+            session_action_result = structured_payload.get("session_action_result")
+            if isinstance(session_action_result, dict):
+                closeout_payload = session_action_result.get("session_action_closeout")
+                if isinstance(closeout_payload, dict):
+                    self.publish_session_closeout(state=state, closeout=closeout_payload)
+            self._emit_command_result(
+                command_id,
+                final_status="done",
+                summary=summary,
+                structured_payload=structured_payload,
+                effective_execution=self._effective_execution(command_id, result=result),
             )
-
-    def _build_session_action_mail_attachments(self, command: _SessionActionCommand) -> list[MailAttachment]:
-        if command.action_type != "attachment_continuation":
-            return []
-        attachment_payload = dict(command.task_run_packet.get("attachment_continuation") or {})
-        attachments = attachment_payload.get("attachments") or []
-        return [
-            self._build_command_mail_attachment(item=dict(item), index=index)
-            for index, item in enumerate(attachments, start=1)
-            if isinstance(item, dict)
-        ]
+        finally:
+            self._clear_command_execution(command_id)
 
     def _validate_answers_target_state(
         self,
@@ -1565,7 +1614,7 @@ class PcControlPlaneClient:
                 "validation_failed",
                 "direct answers action requires the target session to have a pending question set",
             )
-        if target_state.status not in {RUN_STATUS_AWAITING_USER_INPUT, RUN_STATUS_PAUSED}:
+        if target_state.status not in {THREAD_STATUS_AWAITING_USER_INPUT, THREAD_STATUS_PAUSED}:
             raise RelayDirectActionError(
                 "validation_failed",
                 "direct answers action is only available while the session is awaiting user input or paused",
@@ -1594,76 +1643,46 @@ class PcControlPlaneClient:
                 "direct answers action must include at least one matching question answer",
             )
 
-    def _build_session_action_mail_body(
+    def _session_action_business_payload(self, command: _SessionActionCommand) -> dict[str, Any]:
+        if command.action_type == "reply":
+            return dict(command.task_run_packet.get("reply") or {})
+        if command.action_type == "status":
+            return dict(command.task_run_packet.get("status") or {})
+        if command.action_type == "answers":
+            return dict(command.task_run_packet.get("answers") or {})
+        if command.action_type == "attachment_continuation":
+            return dict(command.task_run_packet.get("attachment_continuation") or {})
+        return dict(command.task_run_packet.get(command.action_type) or {})
+
+    def _materialize_session_action_attachments(
         self,
         command: _SessionActionCommand,
         *,
         target_state: ThreadState,
-    ) -> str:
-        if command.action_type in _EMPTY_BODY_SESSION_ACTION_TYPES:
-            return f"/{command.action_type}\n"
-        if command.action_type == "attachment_continuation":
-            attachment_payload = dict(command.task_run_packet.get("attachment_continuation") or {})
-            reply_text = str(attachment_payload.get("reply_text") or "").strip()
-            return f"{reply_text.rstrip()}\n" if reply_text else ""
-        if command.action_type != "answers":
-            raise ValueError(f"unsupported local current-session body action: {command.action_type}")
-
-        pending_questions = effective_pending_questions(target_state, fallback_task_id=target_state.current_task_id)
-        pending_questions_by_id = {item.question_id: item for item in pending_questions}
-        answer_map = {
-            str(item.get("question_id") or "").strip(): str(item.get("value") or "").strip()
-            for item in list(dict(command.task_run_packet.get("answers") or {}).get("question_answers") or [])
-        }
-        rendered_answers: list[str] = []
-        for question in pending_questions:
-            answer_value = answer_map.get(question.question_id)
-            if answer_value is None:
-                continue
-            if len(pending_questions) > 1 and ("\n" in answer_value or "\r" in answer_value):
-                raise RelayDirectActionError(
-                    "validation_failed",
-                    f"direct answers action must keep multi-question answer values single-line: {question.question_id}",
-                )
-            rendered_answers.append(f"{question.question_id}: {answer_value}")
-        if not rendered_answers:
-            raise RelayDirectActionError(
-                "validation_failed",
-                "direct answers action must include at least one matching question answer",
-            )
-        if len(pending_questions) == 1:
-            single_answer_value = answer_map.get(pending_questions[0].question_id)
-            if single_answer_value is None:
-                raise RelayDirectActionError(
-                    "validation_failed",
-                    "direct answers action must include the current pending question answer",
-                )
-            body = single_answer_value
-        else:
-            body = "Answers:\n" + "\n".join(rendered_answers)
-        if target_state.status == RUN_STATUS_PAUSED:
-            body = f"/resume\n{body}"
-        return body.rstrip() + "\n"
+    ) -> list[str]:
+        attachment_payload = dict(command.task_run_packet.get("attachment_continuation") or {})
+        attachments = [
+            self._build_command_mail_attachment(item=dict(item), index=index)
+            for index, item in enumerate(list(attachment_payload.get("attachments") or []), start=1)
+            if isinstance(item, dict)
+        ]
+        return materialize_session_action_attachments(
+            task_root=self._runner_task_root() or "",
+            repo_path=target_state.repo_path,
+            workdir=target_state.workdir,
+            attachments=attachments,
+            filename_prefix=_CONTROL_PLANE_ATTACHMENT_PREFIX,
+        )
 
     def _structured_session_action_payload(
         self,
         command: _SessionActionCommand,
         *,
-        task_root: str,
-        target_state: ThreadState,
-        server_messages: list[dict[str, Any]],
+        execution: RelayNativeSessionActionResult,
     ) -> dict[str, Any]:
-        if server_messages:
-            payload = server_messages[0].get("payload")
-            if isinstance(payload, dict) and payload:
-                return {
-                    "kind": CONTROL_SESSION_ACTION_RESULT_TYPE,
-                    **dict(payload),
-                }
-
-        updated_state = load_thread_state(target_state.thread_id, task_root)
+        updated_state = execution.target_state
         closeout_payload = load_session_action_closeout(
-            task_root,
+            self._runner_task_root() or "",
             thread_id=updated_state.thread_id,
             request_id=command.request_id,
         ) or {
@@ -1673,7 +1692,7 @@ class PcControlPlaneClient:
                 session_id=updated_state.session_id or updated_state.thread_id,
                 thread_id=updated_state.thread_id,
             ),
-            "ingress_type": "direct_bridge",
+            "ingress_type": "relay_runtime",
             "request_id": command.request_id,
             "ingress_message_id": None,
             "packet_id": command.packet_id,
@@ -1686,11 +1705,30 @@ class PcControlPlaneClient:
             "kind": CONTROL_SESSION_ACTION_RESULT_TYPE,
             "session_action_result": {
                 "action_type": command.action_type,
-                "result_scope": "mail_ingress_submission",
-                "canonical_outcome_via": "mail",
-                "delivery_status": "submitted",
-                "submitted_at": self._clock(),
-                "transport_message_id": None,
+                "result_scope": "runtime_execution",
+                "canonical_outcome_via": "relay_runtime",
+                "execution_status": execution.execution_status,
+                "executed_at": self._clock(),
+                "state_changed": execution.state_changed,
+                "summary": execution.summary,
+                "thread_status": updated_state.status,
+                "lifecycle": updated_state.lifecycle,
+                "current_task_id": updated_state.current_task_id,
+                "queued_task_id": updated_state.queued_task_id,
+                "last_summary": updated_state.last_summary,
+                "pending_question_ids": [item.question_id for item in list(updated_state.pending_questions or [])],
+                "run_result": (
+                    None
+                    if execution.latest_result is None
+                    else {
+                        "task_id": execution.latest_result.task_id,
+                        "run_status": execution.latest_result.status,
+                        "backend_session_id": execution.latest_result.backend_session_id,
+                        "backend_session_resumable": execution.latest_result.backend_session_resumable,
+                        "summary_file": execution.latest_result.summary_file,
+                        "artifacts_dir": execution.latest_result.artifacts_dir,
+                    }
+                ),
                 "session_action_closeout": closeout_payload,
             },
         }
@@ -1835,6 +1873,406 @@ class PcControlPlaneClient:
             cleaned = secrets.token_hex(4)
         return cleaned if cleaned.startswith(prefix) else f"{prefix}_{cleaned}"
 
+    def _build_session_projection_batch(
+        self,
+        *,
+        state: ThreadState,
+        task_snapshot: TaskSnapshot | None,
+        result: RunResult | None,
+        closeouts: list[dict[str, Any]],
+        closeout_only: bool,
+    ) -> dict[str, Any] | None:
+        session_state = self._normalized_projection_session_state(state)
+        resolved_snapshot = task_snapshot or self._resolve_projection_task_snapshot(state)
+        current_round = None if closeout_only else self._build_projection_round(state, resolved_snapshot, result)
+        cache_key = self._projection_cache_key(session_state)
+        projection_floor = self._projection_version_floor(
+            state.updated_at,
+            state.last_progress_at,
+            None if current_round is None else current_round.get("round_sort_at"),
+            self._clock(),
+        )
+        if closeout_only:
+            projection_version = max(self._projection_versions.get(cache_key, 0), projection_floor, 1)
+        else:
+            fingerprint = self._projection_fingerprint(
+                {
+                    "session_state": session_state,
+                    "thread_status": state.status,
+                    "thread_summary": state.last_summary,
+                    "thread_progress": state.last_progress_at,
+                    "thread_updated_at": state.updated_at,
+                    "current_round": current_round,
+                }
+            )
+            if self._projection_fingerprints.get(cache_key) == fingerprint:
+                return None
+            projection_version = max(self._projection_versions.get(cache_key, 0) + 1, projection_floor, 1)
+        batch = build_session_projection_batch(
+            pc_id=self._pc_id,
+            connection_epoch=self._current_connection_epoch or 1,
+            session_state=session_state,
+            thread_state=state,
+            projection_version=projection_version,
+            current_round=current_round,
+            closeouts=closeouts,
+            include_round=(not closeout_only and current_round is not None),
+            sent_at=self._clock(),
+            source_updated_at=state.updated_at,
+        )
+        if not closeout_only:
+            self._projection_versions[cache_key] = projection_version
+            self._projection_fingerprints[cache_key] = fingerprint
+        return batch
+
+    @staticmethod
+    def _normalize_projection_closeout(closeout: dict[str, Any], *, state: ThreadState) -> dict[str, Any]:
+        normalized = dict(closeout)
+        closeout_key = str(normalized.get("closeout_key") or "").strip()
+        if not closeout_key:
+            request_id = str(normalized.get("request_id") or "").strip()
+            task_id = str(normalized.get("task_id") or state.current_task_id or "").strip()
+            closeout_key = f"closeout:{request_id or state.thread_id}:{task_id or 'session'}"
+            normalized["closeout_key"] = closeout_key
+        return normalized
+
+    def _normalized_projection_session_state(self, state: ThreadState) -> dict[str, Any]:
+        workspace_id = state.workspace_id or build_workspace_id(state.repo_path, state.workdir)
+        session_id = state.session_id or state.thread_id
+        session_name = state.session_name or state.subject_norm or session_id
+        if state.status == "accepted":
+            session_status = "queued"
+        elif state.status == "awaiting_user_input":
+            session_status = "waiting_user"
+        else:
+            session_status = state.status
+        if state.queued_task_id and state.status not in {"running", "awaiting_user_input"}:
+            session_status = "queued"
+        return {
+            "pc_id": self._pc_id,
+            "workspace_id": workspace_id,
+            "session_id": session_id,
+            "thread_id": state.thread_id,
+            "session_name": session_name,
+            "backend": state.backend,
+            "backend_transport": state.backend_transport,
+            "profile": state.profile or "default",
+            "permission": state.permission or "default",
+            "repo_path": state.repo_path,
+            "workdir": state.workdir,
+            "status": session_status,
+            "current_task_id": state.current_task_id,
+            "queued_task_id": state.queued_task_id,
+            "pending_task_count": 1 if state.queued_task_id else 0,
+            "last_summary": state.last_summary,
+            "lifecycle": state.lifecycle,
+            "last_active_at": state.last_active_at,
+            "last_progress_at": state.last_progress_at,
+            "backend_session_id": state.backend_session_id,
+            "backend_session_resumable": state.backend_session_resumable,
+            "created_at": state.created_at,
+            "updated_at": state.updated_at,
+        }
+
+    @staticmethod
+    def _projection_cache_key(session_state: dict[str, Any]) -> str:
+        return "::".join(
+            [
+                str(session_state.get("pc_id") or "").strip(),
+                str(session_state.get("workspace_id") or "").strip(),
+                str(session_state.get("session_id") or "").strip(),
+                str(session_state.get("thread_id") or "").strip(),
+            ]
+        )
+
+    @staticmethod
+    def _projection_fingerprint(payload: dict[str, Any]) -> str:
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    @classmethod
+    def _projection_version_floor(cls, *timestamps: object) -> int:
+        best = 0
+        for value in timestamps:
+            parsed = cls._parse_projection_timestamp(value)
+            if parsed is None:
+                continue
+            candidate = int(parsed.strftime("%Y%m%d%H%M%S")) * 1000
+            if candidate > best:
+                best = candidate
+        return best
+
+    @staticmethod
+    def _parse_projection_timestamp(value: object) -> datetime | None:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return None
+        try:
+            parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+        return parsed
+
+    def _wire_projection_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
+        items: list[dict[str, Any]] = []
+        for item in list(batch.get("items") or []):
+            if not isinstance(item, dict):
+                continue
+            normalized_item = dict(item)
+            family = str(normalized_item.get("family") or normalized_item.get("type") or "").strip()
+            if family:
+                normalized_item["family"] = family
+            items.append(normalized_item)
+        payload = {
+            key: value
+            for key, value in dict(batch).items()
+            if key
+            in {
+                "batch_id",
+                "scope",
+                "workspace_id",
+                "session_id",
+                "thread_id",
+                "projection_version",
+            }
+        }
+        payload["items"] = items
+        return {
+            "schema_version": PC_CONTROL_SCHEMA_VERSION,
+            "type": "projection_batch",
+            "message_id": self._next_message_id("projection_batch"),
+            "trace_id": self._next_trace_id("projection_batch"),
+            "pc_id": self._pc_id,
+            "connection_epoch": int(batch.get("connection_epoch") or self._current_connection_epoch or 1),
+            "sent_at": str(batch.get("sent_at") or self._clock()),
+            "payload": payload,
+        }
+
+    def _resolve_projection_task_snapshot(self, state: ThreadState) -> TaskSnapshot | None:
+        task_root = self._runner_task_root()
+        if task_root is None:
+            return None
+        workspace = WorkspaceManager(task_root)
+        snapshot_rel = state.last_task_snapshot_file
+        if state.status == "running" and state.queued_snapshot_file:
+            snapshot_rel = state.queued_snapshot_file
+        if not snapshot_rel:
+            return None
+        try:
+            return workspace.load_snapshot(state.thread_id, snapshot_rel)
+        except Exception:
+            LOGGER.debug("Unable to load task snapshot for projection publish", exc_info=True)
+            return None
+
+    def _build_projection_round(
+        self,
+        state: ThreadState,
+        snapshot: TaskSnapshot | None,
+        result: RunResult | None,
+    ) -> dict[str, Any] | None:
+        task_id = result.task_id if result is not None else (snapshot.task_id if snapshot is not None else state.current_task_id)
+        if not task_id:
+            return None
+        round_status = self._projection_round_status(state, result)
+        current_round: dict[str, Any] = {
+            "task_id": task_id,
+            "round_sort_at": (
+                (result.finished_at if result is not None else None)
+                or state.last_progress_at
+                or state.updated_at
+                or self._clock()
+            ),
+            "status": round_status,
+            "speaker_label": ("OpenCode" if state.backend == "opencode" else state.backend.capitalize()),
+            "input_text": self._projection_round_input_text(snapshot),
+            "input_attachments": (self._snapshot_attachment_payloads(snapshot) if snapshot is not None else []),
+            "process_items": self._projection_process_items(state, result),
+            "result_text": self._projection_round_result_text(state=state, task_id=task_id, result=result),
+            "result_attachments": self._result_attachment_payloads(result),
+        }
+        return current_round
+
+    @staticmethod
+    def _projection_round_input_text(snapshot: TaskSnapshot | None) -> str | None:
+        if snapshot is None:
+            return None
+        turn_text = str(snapshot.turn_text or "").strip()
+        if turn_text:
+            return turn_text
+        task_text = str(snapshot.task_text or "").strip()
+        return task_text or None
+
+    def _projection_round_result_text(
+        self,
+        *,
+        state: ThreadState,
+        task_id: str,
+        result: RunResult | None,
+    ) -> str:
+        if result is not None:
+            visible_output = self._load_projection_result_visible_output_text(result)
+            if visible_output is not None:
+                return visible_output
+            summary_text = self._load_projection_result_summary_text(result)
+            if summary_text:
+                return summary_text
+            error_text = str(result.error_message or "").strip()
+            if error_text:
+                return error_text
+            return self._humanize_projection_status(result.status)
+        summary = str(state.last_summary or "").strip()
+        if task_id == state.current_task_id and summary:
+            return summary
+        if task_id == state.current_task_id:
+            return self._humanize_projection_status(state.status)
+        return "No stable result was captured for this round."
+
+    def _load_projection_result_visible_output_text(self, result: RunResult) -> str | None:
+        task_root = self._runner_task_root()
+        if not task_root:
+            return None
+        output_path = Path(str(result.stdout_file))
+        if not output_path.is_absolute():
+            output_path = Path(task_root) / result.thread_id / output_path
+        if not output_path.exists() or not output_path.is_file():
+            return None
+        try:
+            text = output_path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+        except OSError:
+            LOGGER.debug("Unable to read projection visible output task_id=%s", result.task_id, exc_info=True)
+            return None
+        return text if text else None
+
+    def _load_projection_result_summary_text(self, result: RunResult) -> str | None:
+        if not result.summary_file:
+            return None
+        task_root = self._runner_task_root()
+        if not task_root:
+            return None
+        summary_path = Path(str(result.summary_file))
+        if not summary_path.is_absolute():
+            summary_path = Path(task_root) / result.thread_id / summary_path
+        if not summary_path.exists() or not summary_path.is_file():
+            return None
+        try:
+            text = summary_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            LOGGER.debug("Unable to read projection summary text task_id=%s", result.task_id, exc_info=True)
+            return None
+        return text or None
+
+    @staticmethod
+    def _humanize_projection_status(status: str | None) -> str:
+        normalized = str(status or "").strip()
+        if not normalized:
+            return "Unknown status."
+        return normalized.replace("_", " ").strip().capitalize() + "."
+
+    @staticmethod
+    def _projection_round_status(state: ThreadState, result: RunResult | None) -> str:
+        if result is not None:
+            if result.status == RUN_STATUS_SUCCESS:
+                return "done"
+            if result.status == RUN_STATUS_AWAITING_USER_INPUT:
+                return "awaiting_user_input"
+            if result.status == RUN_STATUS_PAUSED:
+                return "paused"
+            if result.status == RUN_STATUS_KILLED:
+                return "killed"
+            return "failed"
+        if state.status == "accepted":
+            return "queued"
+        return state.status
+
+    @staticmethod
+    def _projection_process_items(state: ThreadState, result: RunResult | None) -> list[dict[str, Any]]:
+        if result is not None and result.status == RUN_STATUS_AWAITING_USER_INPUT:
+            prompt_text = PcControlPlaneClient._projection_pending_question_prompt_text(result)
+            if prompt_text:
+                return [
+                    {
+                        "item_id": f"projection:{state.thread_id}:{result.task_id}:awaiting",
+                        "kind": "system",
+                        "created_at": result.finished_at or result.started_at or state.last_progress_at or state.updated_at,
+                        "updated_at": result.finished_at or result.started_at or state.last_progress_at or state.updated_at,
+                        "status": "completed",
+                        "text": prompt_text,
+                    }
+                ]
+            return []
+        summary = str(state.last_summary or "").strip()
+        if not summary or result is not None:
+            return []
+        return [
+            {
+                "item_id": f"projection:{state.thread_id}:{state.current_task_id}:{state.updated_at}",
+                "kind": "system",
+                "created_at": state.last_progress_at or state.updated_at,
+                "updated_at": state.last_progress_at or state.updated_at,
+                "status": "streaming",
+                "text": summary,
+            }
+        ]
+
+    @staticmethod
+    def _projection_pending_question_prompt_text(result: RunResult) -> str | None:
+        if result.pending_questions:
+            if len(result.pending_questions) == 1:
+                return result.pending_questions[0].question_text
+            return f"Need {len(result.pending_questions)} answers before continuing."
+        question_text = str(result.question_text or "").strip()
+        if question_text:
+            return question_text
+        if result.question_set_id and result.pending_choices:
+            return f"Need one answer for question set {result.question_set_id}."
+        return None
+
+    def _snapshot_attachment_payloads(self, snapshot: TaskSnapshot) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        for index, raw_path in enumerate(snapshot.attachments, start=1):
+            path = Path(str(raw_path or "").strip())
+            if not str(path):
+                continue
+            content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            size_bytes = path.stat().st_size if path.exists() and path.is_file() else None
+            payloads.append(
+                {
+                    "attachment_id": f"input:{snapshot.task_id}:{index}",
+                    "display_name": path.name or f"attachment_{index}",
+                    "content_type": content_type,
+                    "size_bytes": size_bytes,
+                    "is_image": content_type.startswith("image/"),
+                }
+            )
+        return payloads
+
+    def _result_attachment_payloads(self, result: RunResult | None) -> list[dict[str, Any]]:
+        if result is None:
+            return []
+        task_root = self._runner_task_root()
+        if task_root is None:
+            return []
+        manifest = project_artifact_manifest(task_root, result=result)
+        if manifest is None:
+            return []
+        payloads: list[dict[str, Any]] = []
+        for index, item in enumerate(list(manifest.get("artifacts") or []), start=1):
+            if not isinstance(item, dict):
+                continue
+            content_type = str(item.get("content_type") or "").strip() or "application/octet-stream"
+            size_value = item.get("size")
+            payloads.append(
+                {
+                    "attachment_id": str(item.get("artifact_id") or f"result:{result.task_id}:{index}"),
+                    "display_name": str(item.get("name") or f"artifact_{index}"),
+                    "content_type": content_type,
+                    "size_bytes": size_value if isinstance(size_value, int) and size_value >= 0 else None,
+                    "is_image": content_type.startswith("image/"),
+                }
+            )
+        return payloads
+
     async def _handle_output_resume_request(
         self,
         websocket,
@@ -1876,11 +2314,22 @@ class PcControlPlaneClient:
             },
             effective_execution=self._effective_execution(command_id),
         )
+        self.publish_thread_projection(state=state)
+
+    def _on_runner_accepted(self, command_id: str, state: ThreadState, *, snapshot: TaskSnapshot) -> None:
+        self._emit_command_event(
+            command_id,
+            event_type="accepted",
+            summary="command accepted by the local runner",
+            effective_execution=self._effective_execution(command_id),
+        )
+        self.publish_thread_projection(state=state, task_snapshot=snapshot)
 
     def _on_runner_finished(self, command_id: str, state: ThreadState, result: RunResult) -> None:
         final_status = self._canonical_final_status(result)
         summary = str(state.last_summary or result.error_message or final_status).strip() or final_status
         structured_payload = self._structured_result_payload(state, result)
+        self._stop_output_chunk_streaming(command_id)
         try:
             self._emit_output_chunks(command_id, result=result)
         except Exception:
@@ -1908,34 +2357,58 @@ class PcControlPlaneClient:
             error_code=(str(result.error_type or "").strip() or None),
             error_message=result.error_message,
         )
-        with self._control_lock:
-            self._launched_command_ids.discard(command_id)
-            self._command_contexts.pop(command_id, None)
+        self.publish_thread_projection(state=state, result=result)
+        self._clear_command_execution(command_id)
 
     def _emit_output_chunks(self, command_id: str, *, result: RunResult) -> None:
-        context = self._command_context(command_id)
-        if context is None:
-            return
-        task_root = self._runner_task_root()
-        if task_root is None:
-            return
-        output_chunks = project_output_chunks(task_root, thread_id=result.thread_id, task_id=result.task_id)
-        if not output_chunks:
-            return
-        self._remember_output_chunk_replay_context(
+        self._emit_incremental_output_chunks(
             command_id,
-            trace_id=str(context["trace_id"]),
             thread_id=result.thread_id,
             task_id=result.task_id,
         )
+
+    def _emit_incremental_output_chunks(self, command_id: str, *, thread_id: str, task_id: str) -> int:
+        task_root = self._runner_task_root()
+        if task_root is None:
+            return 0
+        replay_context = self._output_chunk_replay_context(command_id)
+        if replay_context is None:
+            return 0
+        try:
+            output_chunks = project_output_chunks(task_root, thread_id=thread_id, task_id=task_id)
+        except (OSError, ValueError, json.JSONDecodeError):
+            LOGGER.debug(
+                "Unable to project output chunks for command_id=%s thread_id=%s task_id=%s",
+                command_id,
+                thread_id,
+                task_id,
+                exc_info=True,
+            )
+            return 0
+        if not output_chunks:
+            return 0
+        after_seq = int(replay_context.get("last_sent_seq") or 0)
+        command_context = self._command_context(command_id) or {}
+        connection_epoch = self._current_connection_epoch or int(command_context.get("connection_epoch") or 1)
+        last_sent_seq = after_seq
+        emitted = 0
         for chunk in output_chunks:
+            seq = int(chunk["seq"])
+            if seq <= after_seq:
+                continue
             payload = self._build_output_chunk_payload(
                 command_id,
-                trace_id=str(context["trace_id"]),
-                connection_epoch=(self._current_connection_epoch or context["connection_epoch"]),
+                trace_id=str(replay_context["trace_id"]),
+                connection_epoch=connection_epoch,
                 chunk=chunk,
             )
             self._queue_client_payload(payload)
+            emitted += 1
+            if seq > last_sent_seq:
+                last_sent_seq = seq
+        if emitted > 0:
+            self._remember_output_chunk_sent_seq(command_id, last_sent_seq)
+        return emitted
 
     def _emit_artifact_manifest(self, command_id: str, *, result: RunResult) -> None:
         context = self._command_context(command_id)
@@ -2018,6 +2491,40 @@ class PcControlPlaneClient:
             error_message=error_message,
         )
         self._queue_client_payload(payload)
+
+    def _remember_command_snapshot(
+        self,
+        command_id: str,
+        *,
+        snapshot: TaskSnapshot,
+        trace_id: str | None = None,
+    ) -> None:
+        with self._control_lock:
+            context = self._command_contexts.get(command_id)
+            if context is None:
+                return
+            context["snapshot"] = snapshot
+            if trace_id is not None:
+                context["trace_id"] = trace_id
+            effective_trace_id = str(context.get("trace_id") or trace_id or "").strip()
+        if effective_trace_id:
+            self._remember_output_chunk_replay_context(
+                command_id,
+                trace_id=effective_trace_id,
+                thread_id=snapshot.thread_id,
+                task_id=snapshot.task_id,
+            )
+            self._ensure_output_chunk_streaming(command_id)
+
+    def _clear_command_execution(self, command_id: str) -> None:
+        streamer = None
+        with self._control_lock:
+            self._launched_command_ids.discard(command_id)
+            self._command_contexts.pop(command_id, None)
+            self._output_chunk_replay_contexts.pop(command_id, None)
+            streamer = self._output_chunk_streamers.pop(command_id, None)
+        if streamer is not None:
+            streamer.cancel()
 
     def _command_context(self, command_id: str) -> dict[str, Any] | None:
         with self._control_lock:
@@ -2112,21 +2619,99 @@ class PcControlPlaneClient:
         task_id: str,
     ) -> None:
         with self._control_lock:
+            existing = dict(self._output_chunk_replay_contexts.get(command_id) or {})
             self._output_chunk_replay_contexts.pop(command_id, None)
             self._output_chunk_replay_contexts[command_id] = {
                 "trace_id": str(trace_id),
                 "thread_id": str(thread_id),
                 "task_id": str(task_id),
-                "needs_replay": False,
+                "needs_replay": bool(existing.get("needs_replay", False)),
+                "last_sent_seq": int(existing.get("last_sent_seq") or 0),
             }
             while len(self._output_chunk_replay_contexts) > 32:
                 oldest_command_id = next(iter(self._output_chunk_replay_contexts))
                 self._output_chunk_replay_contexts.pop(oldest_command_id, None)
 
+    def _remember_output_chunk_sent_seq(self, command_id: str, seq: int) -> None:
+        if seq <= 0:
+            return
+        with self._control_lock:
+            context = self._output_chunk_replay_contexts.get(command_id)
+            if context is None:
+                return
+            context["last_sent_seq"] = max(int(context.get("last_sent_seq") or 0), int(seq))
+
     def _mark_output_chunk_replay_needed(self) -> None:
         with self._control_lock:
             for context in self._output_chunk_replay_contexts.values():
                 context["needs_replay"] = True
+
+    def _ensure_output_chunk_streaming(self, command_id: str) -> None:
+        with self._control_lock:
+            loop = self._loop
+            streamer = self._output_chunk_streamers.get(command_id)
+        if loop is None:
+            return
+        if streamer is not None and not streamer.done():
+            return
+        coroutine = self._stream_output_chunks_live(command_id)
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        try:
+            if running_loop is loop:
+                future = asyncio.create_task(coroutine)
+            else:
+                future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        except RuntimeError:
+            coroutine.close()
+            LOGGER.warning("pc-control live output streamer scheduling failed", exc_info=True)
+            return
+        with self._control_lock:
+            current = self._output_chunk_streamers.get(command_id)
+            if current is not None and not current.done():
+                future.cancel()
+                return
+            self._output_chunk_streamers[command_id] = future
+        future.add_done_callback(
+            lambda completed, queued_command_id=command_id: self._handle_output_chunk_streamer_completion(
+                queued_command_id,
+                completed,
+            )
+        )
+
+    def _stop_output_chunk_streaming(self, command_id: str) -> None:
+        with self._control_lock:
+            streamer = self._output_chunk_streamers.pop(command_id, None)
+        if streamer is not None:
+            streamer.cancel()
+
+    def _handle_output_chunk_streamer_completion(self, command_id: str, future) -> None:
+        try:
+            future.result()
+        except (asyncio.CancelledError, concurrent.futures.CancelledError):
+            pass
+        except Exception:
+            LOGGER.warning("pc-control live output streamer failed command_id=%s", command_id, exc_info=True)
+        with self._control_lock:
+            if self._output_chunk_streamers.get(command_id) is future:
+                self._output_chunk_streamers.pop(command_id, None)
+
+    async def _stream_output_chunks_live(self, command_id: str) -> None:
+        try:
+            while True:
+                context = self._output_chunk_replay_context(command_id)
+                if context is None:
+                    return
+                self._emit_incremental_output_chunks(
+                    command_id,
+                    thread_id=str(context["thread_id"]),
+                    task_id=str(context["task_id"]),
+                )
+                await asyncio.sleep(self._output_chunk_poll_interval_seconds)
+        except asyncio.CancelledError:
+            raise
 
     async def _replay_output_chunks_after_reconnect(self, websocket, send_lock: asyncio.Lock) -> None:
         task_root = self._runner_task_root()
@@ -2216,6 +2801,7 @@ class PcControlPlaneClient:
                 "thread_id": str(snapshot.thread_id),
                 "task_id": str(snapshot.task_id),
                 "needs_replay": False,
+                "last_sent_seq": 0,
             }
             self._output_chunk_replay_contexts[command_id] = dict(derived)
             return derived
@@ -2247,6 +2833,11 @@ class PcControlPlaneClient:
         )
 
     def _queue_client_payload(self, payload: dict[str, Any]) -> None:
+        reliable_target = self._reliable_delivery_target(payload)
+        if reliable_target is not None:
+            request_id, message_type = reliable_target
+            self._queue_reliable_client_payload(payload, request_id=request_id, message_type=message_type)
+            return
         with self._control_lock:
             websocket = self._websocket
             loop = self._loop
@@ -2257,11 +2848,115 @@ class PcControlPlaneClient:
         self._schedule_payload_send(dict(payload), websocket=websocket, send_lock=send_lock, loop=loop)
 
     async def _flush_pending_client_messages(self, websocket, send_lock: asyncio.Lock) -> None:
+        await self._flush_pending_reliable_client_messages(websocket, send_lock)
         with self._control_lock:
             pending = [dict(item) for item in self._pending_client_messages]
             self._pending_client_messages = []
         for payload in pending:
             await self._send_payload_with_requeue(websocket, payload, send_lock)
+
+    def _reliable_delivery_target(self, payload: dict[str, Any]) -> tuple[str, str] | None:
+        message_type = str(payload.get("type") or "").strip()
+        nested_payload = payload.get("payload")
+        if not isinstance(nested_payload, dict):
+            return None
+        if message_type == "projection_batch":
+            request_id = str(nested_payload.get("batch_id") or "").strip()
+            return ((request_id, "projection_batch") if request_id else None)
+        if message_type == "result":
+            request_id = str(nested_payload.get("result_id") or "").strip()
+            return ((request_id, "result") if request_id else None)
+        return None
+
+    def _queue_reliable_client_payload(self, payload: dict[str, Any], *, request_id: str, message_type: str) -> None:
+        with self._control_lock:
+            self._pending_reliable_client_messages.append(
+                _ReliableClientPayload(
+                    payload=dict(payload),
+                    request_id=str(request_id),
+                    message_type=str(message_type),
+                )
+            )
+        self._kick_reliable_sender()
+
+    def _kick_reliable_sender(self) -> None:
+        with self._control_lock:
+            websocket = self._websocket
+            loop = self._loop
+            send_lock = self._send_lock
+            sender = self._reliable_sender
+            has_pending = bool(self._pending_reliable_client_messages)
+        if not has_pending or websocket is None or loop is None or send_lock is None:
+            return
+        if sender is not None and not sender.done():
+            return
+        coroutine = self._flush_pending_reliable_client_messages(websocket, send_lock)
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        try:
+            if running_loop is loop:
+                future = asyncio.create_task(coroutine)
+            else:
+                future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        except RuntimeError:
+            coroutine.close()
+            LOGGER.warning("pc-control reliable sender scheduling failed", exc_info=True)
+            return
+        with self._control_lock:
+            self._reliable_sender = future
+        future.add_done_callback(self._handle_reliable_sender_completion)
+
+    def _handle_reliable_sender_completion(self, future) -> None:
+        try:
+            future.result()
+        except (asyncio.CancelledError, concurrent.futures.CancelledError):
+            pass
+        except Exception:
+            LOGGER.warning("pc-control reliable sender failed", exc_info=True)
+        should_restart = False
+        with self._control_lock:
+            if self._reliable_sender is future:
+                self._reliable_sender = None
+            should_restart = (
+                bool(self._pending_reliable_client_messages)
+                and self._websocket is not None
+                and self._loop is not None
+                and self._send_lock is not None
+            )
+        if should_restart:
+            self._kick_reliable_sender()
+
+    async def _flush_pending_reliable_client_messages(self, websocket, send_lock: asyncio.Lock) -> None:
+        while True:
+            with self._control_lock:
+                if not self._pending_reliable_client_messages:
+                    return
+                queued = self._pending_reliable_client_messages[0]
+            try:
+                await self._send_payload_with_delivery_ack(
+                    websocket,
+                    queued.payload,
+                    send_lock,
+                    request_id=queued.request_id,
+                    message_type=queued.message_type,
+                )
+            except Exception:
+                LOGGER.warning(
+                    "pc-control reliable payload send failed; retaining for retry request_id=%s type=%s",
+                    queued.request_id,
+                    queued.message_type,
+                    exc_info=True,
+                )
+                return
+            with self._control_lock:
+                if (
+                    self._pending_reliable_client_messages
+                    and self._pending_reliable_client_messages[0].request_id == queued.request_id
+                    and self._pending_reliable_client_messages[0].message_type == queued.message_type
+                ):
+                    self._pending_reliable_client_messages.pop(0)
 
     def _schedule_payload_send(self, payload: dict[str, Any], *, websocket, send_lock: asyncio.Lock, loop) -> None:
         coroutine = self._send_payload_with_requeue(websocket, payload, send_lock)
@@ -2269,10 +2964,40 @@ class PcControlPlaneClient:
             running_loop = asyncio.get_running_loop()
         except RuntimeError:
             running_loop = None
-        if running_loop is loop:
-            asyncio.create_task(coroutine)
+        try:
+            if running_loop is loop:
+                task = asyncio.create_task(coroutine)
+                self._track_scheduled_payload_send(task, payload)
+                return
+            future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+        except RuntimeError:
+            coroutine.close()
+            LOGGER.warning("pc-control payload scheduling failed; queueing for retry", exc_info=True)
+            with self._control_lock:
+                self._pending_client_messages.append(dict(payload))
             return
-        asyncio.run_coroutine_threadsafe(coroutine, loop)
+        self._track_scheduled_payload_send(future, payload)
+
+    def _track_scheduled_payload_send(self, future, payload: dict[str, Any]) -> None:
+        original_payload = dict(payload)
+        future.add_done_callback(
+            lambda completed, queued_payload=original_payload: self._handle_scheduled_payload_completion(
+                completed,
+                queued_payload,
+            )
+        )
+
+    def _handle_scheduled_payload_completion(self, future, payload: dict[str, Any]) -> None:
+        try:
+            future.result()
+        except (asyncio.CancelledError, concurrent.futures.CancelledError):
+            LOGGER.warning("pc-control payload send cancelled; queueing for retry", exc_info=True)
+            with self._control_lock:
+                self._pending_client_messages.append(dict(payload))
+        except Exception:
+            LOGGER.warning("pc-control payload send failed after scheduling; queueing for retry", exc_info=True)
+            with self._control_lock:
+                self._pending_client_messages.append(dict(payload))
 
     async def _send_payload_with_requeue(self, websocket, payload: dict[str, Any], send_lock: asyncio.Lock) -> None:
         normalized_payload = self._rewrite_payload_for_current_connection(payload)
@@ -2282,6 +3007,35 @@ class PcControlPlaneClient:
             LOGGER.warning("pc-control payload send failed; queueing for retry", exc_info=True)
             with self._control_lock:
                 self._pending_client_messages.append(dict(payload))
+
+    async def _send_payload_with_delivery_ack(
+        self,
+        websocket,
+        payload: dict[str, Any],
+        send_lock: asyncio.Lock,
+        *,
+        request_id: str,
+        message_type: str,
+    ) -> dict[str, Any]:
+        normalized_payload = self._rewrite_payload_for_current_connection(payload)
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        with self._control_lock:
+            self._pending_delivery_acks[request_id] = future
+        try:
+            await self._send_payload(websocket, normalized_payload, send_lock)
+            resolved = await asyncio.wait_for(future, timeout=max(5.0, self._heartbeat_interval_seconds))
+        finally:
+            with self._control_lock:
+                existing = self._pending_delivery_acks.get(request_id)
+                if existing is future:
+                    self._pending_delivery_acks.pop(request_id, None)
+        resolved_payload = dict(resolved)
+        if str(resolved_payload.get("message_type") or "").strip() != str(message_type):
+            raise RuntimeError(
+                f"pc-control delivery ack type mismatch for {request_id}: expected {message_type}, got {resolved_payload.get('message_type')!r}"
+            )
+        return resolved_payload
 
     def _rewrite_payload_for_current_connection(self, payload: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(payload)
@@ -2330,6 +3084,7 @@ class PcControlPlaneClient:
         | PcErrorMessage
         | PcCommandDispatchMessage
         | PcOutputResumeRequestMessage
+        | PcDeliveryAckMessage
         | PcMailboxLeaseAckMessage
         | PcIngressDecisionMessage
         | PcThreadBindingAckMessage
@@ -2346,6 +3101,7 @@ class PcControlPlaneClient:
                 PcErrorMessage,
                 PcCommandDispatchMessage,
                 PcOutputResumeRequestMessage,
+                PcDeliveryAckMessage,
                 PcMailboxLeaseAckMessage,
                 PcIngressDecisionMessage,
                 PcThreadBindingAckMessage,

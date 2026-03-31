@@ -114,7 +114,19 @@ function Write-JsonState {
     if (-not [string]::IsNullOrWhiteSpace($parent)) {
         New-Item -ItemType Directory -Force -Path $parent | Out-Null
     }
-    ($Payload | ConvertTo-Json -Depth 4) + "`n" | Set-Content -Encoding utf8 $PathText
+    $json = ($Payload | ConvertTo-Json -Depth 4) + "`n"
+    $tempPath = Join-Path $parent ([System.IO.Path]::GetRandomFileName())
+    $utf8 = [System.Text.UTF8Encoding]::new($false)
+    try {
+        [System.IO.File]::WriteAllText($tempPath, $json, $utf8)
+        if (Test-Path $PathText) {
+            [System.IO.File]::Replace($tempPath, $PathText, $null, $true)
+        } else {
+            [System.IO.File]::Move($tempPath, $PathText)
+        }
+    } finally {
+        Remove-Item -LiteralPath $tempPath -ErrorAction SilentlyContinue
+    }
 }
 
 $ErrorActionPreference = "Stop"

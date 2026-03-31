@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+import secrets
 import ssl
 import threading
 from collections.abc import Awaitable, Callable
@@ -38,19 +39,22 @@ from .android_session_action_facade import (
     AndroidSessionActionSubmitTimeout,
     submit_android_session_action_command,
 )
+from .android_session_history_facade import ANDROID_SESSION_HISTORY_PATH
+from .android_projection_store_facade import (
+    AndroidProjectionStoreFacadeError,
+    build_android_session_history_from_projection_store,
+    build_android_session_snapshot_from_projection_store,
+    build_android_sessions_snapshot_from_projection_store,
+)
 from .android_session_action_request_store import PersistentAndroidSessionActionRequestStore
 from .android_environment_inventory_facade import (
     ANDROID_ENVIRONMENT_INVENTORY_PATH,
     build_android_environment_inventory_snapshot,
 )
-from .android_sessions_facade import (
-    ANDROID_SESSIONS_PATH,
-    build_android_sessions_snapshot,
-)
+from .android_sessions_facade import ANDROID_SESSIONS_PATH
 from .android_session_snapshot_facade import (
     ANDROID_SESSION_SNAPSHOT_PATH,
-    AndroidSessionSnapshotFacadeError,
-    build_android_session_snapshot,
+    _latest_session_action_continuity,
 )
 from .auth import token_fingerprint, validate_bearer_token, validate_transport_token
 from .config import RelayServerConfig, load_relay_server_config
@@ -78,6 +82,7 @@ from .pc_control_protocol import (
     PcArtifactManifestMessage,
     PcCommandAckMessage,
     PcCommandEventMessage,
+    PcProjectionBatchMessage,
     PcCommandResultMessage,
     PcControlProtocolError,
     PcIngressCandidateMessage,
@@ -114,8 +119,43 @@ _PC_CONTROL_OPERATOR_COMMANDS_PATH = "/debug/pc-control/commands"
 _PC_CONTROL_OPERATOR_LEASE_PATH = "/debug/pc-control/lease"
 _PC_CONTROL_OPERATOR_INGRESS_PATH = "/debug/pc-control/ingress"
 _PC_CONTROL_OPERATOR_OUTCOME_PATH = "/debug/pc-control/terminal-outcome"
+_ANDROID_SESSION_UPDATES_WEBSOCKET_PATH = "/v1/android/session-updates"
+_ANDROID_SESSION_UPDATES_SCHEMA_VERSION = "taskmail-android-session-updates-v1"
+_RELAY_ACTION_LOG_EVENT = "relay_action"
 _PC_CONTROL_PUSH_BROKERS: WeakKeyDictionary[PcControlRuntime, "_PcControlPushBroker"] = WeakKeyDictionary()
 _PC_CONTROL_PUSH_BROKERS_LOCK = threading.Lock()
+
+
+class _AndroidProjectionStoreReadAdapter:
+    def __init__(self, projection_store: Any) -> None:
+        self._projection_store = projection_store
+
+    def list_sessions(self, pc_id: str | None = None) -> list[dict[str, Any]]:
+        return self._projection_store.list_sessions(pc_id=pc_id, include_ended=True)
+
+    def list_history_rounds(self, *, session_key: str) -> list[dict[str, Any]]:
+        parts = str(session_key or "").split("::", 3)
+        if len(parts) != 4:
+            return []
+        pc_id, workspace_id, session_id, thread_id = parts
+        return self._projection_store.list_session_history_rounds(
+            pc_id=pc_id,
+            workspace_id=workspace_id,
+            session_id=session_id,
+            thread_id=thread_id,
+        )
+
+    def get_live_process(self, *, session_key: str) -> dict[str, Any] | None:
+        parts = str(session_key or "").split("::", 3)
+        if len(parts) != 4:
+            return None
+        pc_id, workspace_id, session_id, thread_id = parts
+        return self._projection_store.get_session_live_process(
+            pc_id=pc_id,
+            workspace_id=workspace_id,
+            session_id=session_id,
+            thread_id=thread_id,
+        )
 
 
 @dataclass(slots=True)
@@ -257,6 +297,166 @@ def _taskmail_direct_ingress_enabled(
     return runner_config.mail_ingress_enabled
 
 
+def _compact_locator_fields(source: dict[str, Any] | None) -> dict[str, str]:
+    if not isinstance(source, dict):
+        return {}
+    locator: dict[str, str] = {}
+    for field in ("pc_id", "workspace_id", "session_id", "thread_id"):
+        raw_value = source.get(field)
+        if isinstance(raw_value, list):
+            raw_value = raw_value[0] if raw_value else ""
+        normalized = str(raw_value or "").strip()
+        if normalized:
+            locator[field] = normalized
+    return locator
+
+
+def _android_projection_store_adapter(
+    pc_control_runtime: PcControlRuntime | None,
+) -> _AndroidProjectionStoreReadAdapter | None:
+    if pc_control_runtime is None or pc_control_runtime.projection_store is None:
+        return None
+    return _AndroidProjectionStoreReadAdapter(pc_control_runtime.projection_store)
+
+
+def _latest_session_action_resolver(
+    pc_control_runtime: PcControlRuntime | None,
+) -> Callable[[dict[str, Any]], dict[str, Any] | None] | None:
+    if pc_control_runtime is None:
+        return None
+
+    def _resolve(locator: dict[str, Any]) -> dict[str, Any] | None:
+        return _latest_session_action_continuity(
+            session_id=str(locator.get("session_id") or "").strip(),
+            workspace_id=str(locator.get("workspace_id") or "").strip(),
+            pc_control_runtime=pc_control_runtime,
+        )
+
+    return _resolve
+
+
+def _require_android_projection_store(
+    pc_control_runtime: PcControlRuntime | None,
+) -> _AndroidProjectionStoreReadAdapter:
+    adapter = _android_projection_store_adapter(pc_control_runtime)
+    if adapter is not None:
+        return adapter
+    raise AndroidProjectionStoreFacadeError(
+        status_code=503,
+        error_code="task_root_unavailable",
+        error_message="projection store is not configured",
+        retryable=True,
+    )
+
+
+def _build_android_sessions_payload(
+    *,
+    pc_control_runtime: PcControlRuntime | None,
+    include_ended: bool,
+    pc_ids: list[str],
+    workspace_ids: list[str],
+    session_ids: list[str],
+    thread_ids: list[str],
+) -> dict[str, Any]:
+    return build_android_sessions_snapshot_from_projection_store(
+        projection_store=_require_android_projection_store(pc_control_runtime),
+        include_ended=include_ended,
+        pc_ids=pc_ids,
+        workspace_ids=workspace_ids,
+        session_ids=session_ids,
+        thread_ids=thread_ids,
+    )
+
+
+def _build_android_session_snapshot_payload(
+    *,
+    pc_control_runtime: PcControlRuntime | None,
+    query: dict[str, list[str]],
+) -> dict[str, Any]:
+    return build_android_session_snapshot_from_projection_store(
+        projection_store=_require_android_projection_store(pc_control_runtime),
+        query=query,
+        latest_session_action_resolver=_latest_session_action_resolver(pc_control_runtime),
+    )
+
+
+def _build_android_session_history_payload(
+    *,
+    pc_control_runtime: PcControlRuntime | None,
+    query: dict[str, list[str]],
+) -> dict[str, Any]:
+    return build_android_session_history_from_projection_store(
+        projection_store=_require_android_projection_store(pc_control_runtime),
+        query=query,
+        latest_session_action_resolver=_latest_session_action_resolver(pc_control_runtime),
+    )
+
+
+def _project_snapshot_log_fields(snapshot_payload: dict[str, Any]) -> dict[str, Any]:
+    session_payload = snapshot_payload.get("session") if isinstance(snapshot_payload.get("session"), dict) else {}
+    detail_payload = (
+        snapshot_payload.get("session_snapshot") if isinstance(snapshot_payload.get("session_snapshot"), dict) else {}
+    )
+    latest_session_action = (
+        detail_payload.get("latest_session_action") if isinstance(detail_payload.get("latest_session_action"), dict) else {}
+    )
+    history_rounds = detail_payload.get("history_rounds")
+    return {
+        "snapshot_id": snapshot_payload.get("snapshot_id"),
+        "generated_at": snapshot_payload.get("generated_at"),
+        "session_status": session_payload.get("status"),
+        "session_lifecycle": session_payload.get("lifecycle"),
+        "detail_status": detail_payload.get("status"),
+        "latest_action_type": latest_session_action.get("action_type"),
+        "history_round_count": len(history_rounds) if isinstance(history_rounds, list) else None,
+    }
+
+
+def _log_relay_action(
+    config: RelayServerConfig,
+    *,
+    lane: str,
+    action: str,
+    subscription_id: str | None = None,
+    locator: dict[str, Any] | None = None,
+    message_type: str | None = None,
+    push_reason: str | None = None,
+    close_code: int | None = None,
+    close_reason: str | None = None,
+    error_code: str | None = None,
+    retryable: bool | None = None,
+    snapshot_payload: dict[str, Any] | None = None,
+) -> None:
+    if not config.action_log_enabled:
+        return
+
+    event: dict[str, Any] = {
+        "event": _RELAY_ACTION_LOG_EVENT,
+        "lane": lane,
+        "action": action,
+    }
+    if subscription_id:
+        event["subscription_id"] = subscription_id
+    compact_locator = _compact_locator_fields(locator)
+    if compact_locator:
+        event["locator"] = compact_locator
+    if message_type:
+        event["message_type"] = message_type
+    if push_reason:
+        event["push_reason"] = push_reason
+    if close_code is not None:
+        event["close_code"] = close_code
+    if close_reason:
+        event["close_reason"] = close_reason
+    if error_code:
+        event["error_code"] = error_code
+    if retryable is not None:
+        event["retryable"] = retryable
+    if isinstance(snapshot_payload, dict):
+        event.update(_project_snapshot_log_fields(snapshot_payload))
+    LOGGER.info("%s %s", _RELAY_ACTION_LOG_EVENT, json.dumps(event, ensure_ascii=False, sort_keys=True))
+
+
 def build_health_payload(
     config: RelayServerConfig,
     session_store,
@@ -278,6 +478,7 @@ def build_health_payload(
         "packet_count": packet_store.count() if packet_store is not None else 0,
         "state_dir": config.state_dir,
         "tls_enabled": bool(config.tls_certfile),
+        "action_logging_enabled": config.action_log_enabled,
         "taskmail_direct_ingress_enabled": _taskmail_direct_ingress_enabled(
             config,
             runner_config=runner_config,
@@ -496,60 +697,48 @@ def build_http_server(
             if path == ANDROID_SESSIONS_PATH:
                 if not self._require_android_app_token():
                     return
-                task_root = str(config.task_root or "").strip()
-                if not task_root:
-                    self._write_json(
-                        503,
-                        {
-                            "status": "error",
-                            "error_code": "task_root_unavailable",
-                            "error_message": "relay task_root is not configured for android session reads",
-                            "retryable": True,
-                        },
-                    )
-                    return
                 query = parse_qs(urlparse(self.path).query)
                 include_ended = str((query.get("include_ended") or ["false"])[0]).strip().lower() == "true"
                 pc_ids = [item.strip() for item in query.get("pc_id", []) if str(item).strip()]
                 workspace_ids = [item.strip() for item in query.get("workspace_id", []) if str(item).strip()]
                 session_ids = [item.strip() for item in query.get("session_id", []) if str(item).strip()]
                 thread_ids = [item.strip() for item in query.get("thread_id", []) if str(item).strip()]
-                self._write_json(
-                    200,
-                    build_android_sessions_snapshot(
-                        task_root=task_root,
+                try:
+                    response_payload = _build_android_sessions_payload(
                         pc_control_runtime=pc_control_runtime,
                         include_ended=include_ended,
                         pc_ids=pc_ids,
                         workspace_ids=workspace_ids,
                         session_ids=session_ids,
                         thread_ids=thread_ids,
-                    ),
-                )
+                    )
+                except AndroidProjectionStoreFacadeError as exc:
+                    self._write_json(exc.status_code, exc.to_response_payload())
+                    return
+                self._write_json(200, response_payload)
                 return
             if path == ANDROID_SESSION_SNAPSHOT_PATH:
                 if not self._require_android_app_token():
                     return
-                task_root = str(config.task_root or "").strip()
-                if not task_root:
-                    self._write_json(
-                        503,
-                        {
-                            "status": "error",
-                            "error_code": "task_root_unavailable",
-                            "error_message": "relay task_root is not configured for android session reads",
-                            "retryable": True,
-                        },
-                    )
-                    return
-                query = parse_qs(urlparse(self.path).query)
                 try:
-                    response_payload = build_android_session_snapshot(
-                        query=query,
-                        task_root=task_root,
+                    response_payload = _build_android_session_snapshot_payload(
                         pc_control_runtime=pc_control_runtime,
+                        query=parse_qs(urlparse(self.path).query),
                     )
-                except AndroidSessionSnapshotFacadeError as exc:
+                except AndroidProjectionStoreFacadeError as exc:
+                    self._write_json(exc.status_code, exc.to_response_payload())
+                    return
+                self._write_json(200, response_payload)
+                return
+            if path == ANDROID_SESSION_HISTORY_PATH:
+                if not self._require_android_app_token():
+                    return
+                try:
+                    response_payload = _build_android_session_history_payload(
+                        pc_control_runtime=pc_control_runtime,
+                        query=parse_qs(urlparse(self.path).query),
+                    )
+                except AndroidProjectionStoreFacadeError as exc:
                     self._write_json(exc.status_code, exc.to_response_payload())
                     return
                 self._write_json(200, response_payload)
@@ -1439,7 +1628,13 @@ async def _handle_unified_connection(
         request_bytes, _method, raw_path, headers = request
         normalized_path = urlparse(raw_path).path
         is_websocket_upgrade = (
-            normalized_path in {_RELAY_WEBSOCKET_PATH, _CONTROL_WEBSOCKET_PATH, _PC_CONTROL_WEBSOCKET_PATH}
+            normalized_path
+            in {
+                _RELAY_WEBSOCKET_PATH,
+                _CONTROL_WEBSOCKET_PATH,
+                _PC_CONTROL_WEBSOCKET_PATH,
+                _ANDROID_SESSION_UPDATES_WEBSOCKET_PATH,
+            }
             and headers.get("upgrade", "").lower() == "websocket"
             and "upgrade" in headers.get("connection", "").lower()
         )
@@ -1550,8 +1745,24 @@ async def _process_request(path: str, _request_headers: Any, *, config: RelaySer
     )
 
 
+def _android_session_updates_envelope(
+    *,
+    subscription_id: str,
+    message_type: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": _ANDROID_SESSION_UPDATES_SCHEMA_VERSION,
+        "subscription_id": subscription_id,
+        "message_type": message_type,
+        "sent_at": _timestamp(),
+        "payload": payload,
+    }
+
+
 async def _websocket_handler(websocket, path: str, *, relay: LoopbackRelayServer, pc_control_runtime: PcControlRuntime) -> None:
-    normalized_path = str(path or "").strip() or "/"
+    parsed_path = urlparse(str(path or "").strip() or "/")
+    normalized_path = parsed_path.path or "/"
     if normalized_path == _RELAY_WEBSOCKET_PATH:
         await _relay_websocket_handler(websocket, relay=relay)
         return
@@ -1560,6 +1771,14 @@ async def _websocket_handler(websocket, path: str, *, relay: LoopbackRelayServer
         return
     if normalized_path == _PC_CONTROL_WEBSOCKET_PATH:
         await _pc_control_websocket_handler(websocket, pc_control_runtime=pc_control_runtime)
+        return
+    if normalized_path == _ANDROID_SESSION_UPDATES_WEBSOCKET_PATH:
+        await _android_session_updates_websocket_handler(
+            websocket,
+            relay=relay,
+            pc_control_runtime=pc_control_runtime,
+            query=parse_qs(parsed_path.query),
+        )
         return
     await websocket.close(code=1008, reason="unsupported_path")
 
@@ -1804,6 +2023,243 @@ async def _control_websocket_handler(websocket, *, relay: LoopbackRelayServer) -
             relay.session_store.close_session(connection_id, closed_at=_timestamp())
 
 
+async def _android_session_updates_websocket_handler(
+    websocket,
+    *,
+    relay: LoopbackRelayServer,
+    pc_control_runtime: PcControlRuntime | None,
+    query: dict[str, list[str]],
+) -> None:
+    subscription_id = f"android-session-updates:{datetime.now().strftime('%Y%m%d_%H%M%S')}:{secrets.token_hex(3)}"
+    current_locator = _compact_locator_fields(query)
+    provided_token = _extract_bearer_token(getattr(websocket, "request_headers", {}))
+    expected_token = str(relay._config.android_app_token or "").strip()
+    if not expected_token:
+        error_payload = {
+            "status": "error",
+            "error_code": "android_app_auth_unavailable",
+            "error_message": "android app auth is not configured for this relay",
+            "retryable": True,
+        }
+        await websocket.send(
+            json.dumps(
+                _android_session_updates_envelope(
+                    subscription_id=subscription_id,
+                    message_type="error",
+                    payload=error_payload,
+                ),
+                ensure_ascii=False,
+            )
+        )
+        _log_relay_action(
+            relay._config,
+            lane="android_session_updates",
+            action="send_error",
+            subscription_id=subscription_id,
+            locator=current_locator,
+            message_type="error",
+            error_code=error_payload["error_code"],
+            retryable=error_payload["retryable"],
+        )
+        await websocket.close(code=1008, reason="android_app_auth_unavailable")
+        _log_relay_action(
+            relay._config,
+            lane="android_session_updates",
+            action="close",
+            subscription_id=subscription_id,
+            locator=current_locator,
+            close_code=1008,
+            close_reason="android_app_auth_unavailable",
+            error_code=error_payload["error_code"],
+            retryable=error_payload["retryable"],
+        )
+        return
+    if not validate_bearer_token(provided_token, expected_token):
+        error_payload = {
+            "status": "error",
+            "error_code": "unauthorized",
+            "error_message": "android app token mismatch",
+            "retryable": False,
+        }
+        await websocket.send(
+            json.dumps(
+                _android_session_updates_envelope(
+                    subscription_id=subscription_id,
+                    message_type="error",
+                    payload=error_payload,
+                ),
+                ensure_ascii=False,
+            )
+        )
+        _log_relay_action(
+            relay._config,
+            lane="android_session_updates",
+            action="send_error",
+            subscription_id=subscription_id,
+            locator=current_locator,
+            message_type="error",
+            error_code=error_payload["error_code"],
+            retryable=error_payload["retryable"],
+        )
+        await websocket.close(code=1008, reason="unauthorized")
+        _log_relay_action(
+            relay._config,
+            lane="android_session_updates",
+            action="close",
+            subscription_id=subscription_id,
+            locator=current_locator,
+            close_code=1008,
+            close_reason="unauthorized",
+            error_code=error_payload["error_code"],
+            retryable=error_payload["retryable"],
+        )
+        return
+
+    try:
+        _require_android_projection_store(pc_control_runtime)
+    except AndroidProjectionStoreFacadeError as exc:
+        error_payload = exc.to_response_payload()
+        await websocket.send(
+            json.dumps(
+                _android_session_updates_envelope(
+                    subscription_id=subscription_id,
+                    message_type="error",
+                    payload=error_payload,
+                ),
+                ensure_ascii=False,
+            )
+        )
+        _log_relay_action(
+            relay._config,
+            lane="android_session_updates",
+            action="send_error",
+            subscription_id=subscription_id,
+            locator=current_locator,
+            message_type="error",
+            error_code=error_payload["error_code"],
+            retryable=error_payload["retryable"],
+        )
+        await websocket.close(code=1011, reason=error_payload["error_code"])
+        _log_relay_action(
+            relay._config,
+            lane="android_session_updates",
+            action="close",
+            subscription_id=subscription_id,
+            locator=current_locator,
+            close_code=1011,
+            close_reason=error_payload["error_code"],
+            error_code=error_payload["error_code"],
+            retryable=error_payload["retryable"],
+        )
+        return
+
+    _log_relay_action(
+        relay._config,
+        lane="android_session_updates",
+        action="connect",
+        subscription_id=subscription_id,
+        locator=current_locator,
+    )
+    last_payload_text: str | None = None
+    poll_seconds = max(0.2, float(relay.phase3_broadcast_interval_seconds))
+    try:
+        while True:
+            try:
+                snapshot_payload = build_android_session_snapshot_from_projection_store(
+                    projection_store=_require_android_projection_store(pc_control_runtime),
+                    query=query,
+                    latest_session_action_resolver=_latest_session_action_resolver(pc_control_runtime),
+                )
+            except AndroidProjectionStoreFacadeError as exc:
+                await websocket.send(
+                    json.dumps(
+                        _android_session_updates_envelope(
+                            subscription_id=subscription_id,
+                            message_type="error",
+                            payload=exc.to_response_payload(),
+                        ),
+                        ensure_ascii=False,
+                    )
+                )
+                _log_relay_action(
+                    relay._config,
+                    lane="android_session_updates",
+                    action="send_error",
+                    subscription_id=subscription_id,
+                    locator=current_locator,
+                    message_type="error",
+                    error_code=exc.error_code,
+                    retryable=exc.retryable,
+                )
+                await websocket.close(code=1008, reason=exc.error_code)
+                _log_relay_action(
+                    relay._config,
+                    lane="android_session_updates",
+                    action="close",
+                    subscription_id=subscription_id,
+                    locator=current_locator,
+                    close_code=1008,
+                    close_reason=exc.error_code,
+                    error_code=exc.error_code,
+                    retryable=exc.retryable,
+                )
+                return
+
+            payload = _android_session_updates_envelope(
+                subscription_id=subscription_id,
+                message_type="session_snapshot",
+                payload=snapshot_payload,
+            )
+            payload_fingerprint = json.dumps(
+                {
+                    "locator": snapshot_payload.get("locator"),
+                    "session": snapshot_payload.get("session"),
+                    "session_snapshot": snapshot_payload.get("session_snapshot"),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            if payload_fingerprint != last_payload_text:
+                await websocket.send(json.dumps(payload, ensure_ascii=False))
+                current_locator = _compact_locator_fields(snapshot_payload.get("locator")) or current_locator
+                _log_relay_action(
+                    relay._config,
+                    lane="android_session_updates",
+                    action="send",
+                    subscription_id=subscription_id,
+                    locator=current_locator,
+                    message_type="session_snapshot",
+                    push_reason="initial_snapshot" if last_payload_text is None else "state_changed",
+                    snapshot_payload=snapshot_payload,
+                )
+                last_payload_text = payload_fingerprint
+            try:
+                await asyncio.wait_for(websocket.wait_closed(), timeout=poll_seconds)
+                _log_relay_action(
+                    relay._config,
+                    lane="android_session_updates",
+                    action="client_closed",
+                    subscription_id=subscription_id,
+                    locator=current_locator,
+                    close_code=getattr(websocket, "close_code", None),
+                    close_reason=getattr(websocket, "close_reason", None),
+                )
+                return
+            except asyncio.TimeoutError:
+                continue
+    except websockets.ConnectionClosed as exc:
+        _log_relay_action(
+            relay._config,
+            lane="android_session_updates",
+            action="connection_closed",
+            subscription_id=subscription_id,
+            locator=current_locator,
+            close_code=exc.code,
+            close_reason=exc.reason,
+        )
+        return
+
+
 async def _pc_control_websocket_handler(websocket, *, pc_control_runtime: PcControlRuntime) -> None:
     broker = _ensure_pc_control_push_broker(pc_control_runtime)
     provided_token = _extract_bearer_token(getattr(websocket, "request_headers", {}))
@@ -1950,6 +2406,10 @@ async def _pc_control_websocket_handler(websocket, *, pc_control_runtime: PcCont
                             response = pc_control_runtime.handle_workspace_snapshot(message, connection_id=server_connection_id)
                             responses = [] if response is None else [response]
                             allow_pending_dispatches = response is None
+                        elif isinstance(message, PcProjectionBatchMessage):
+                            response = pc_control_runtime.handle_projection_batch(message, connection_id=server_connection_id)
+                            responses = [] if response is None else [response]
+                            allow_pending_dispatches = response is None or response.get("type") != "error"
                         elif isinstance(message, PcCommandAckMessage):
                             response = pc_control_runtime.handle_command_ack(message, connection_id=server_connection_id)
                             responses = [] if response is None else [response]
@@ -1961,7 +2421,7 @@ async def _pc_control_websocket_handler(websocket, *, pc_control_runtime: PcCont
                         elif isinstance(message, PcCommandResultMessage):
                             response = pc_control_runtime.handle_result(message, connection_id=server_connection_id)
                             responses = [] if response is None else [response]
-                            allow_pending_dispatches = response is None
+                            allow_pending_dispatches = response is None or response.get("type") != "error"
                         elif isinstance(message, PcOutputChunkMessage):
                             response = pc_control_runtime.handle_output_chunk(message, connection_id=server_connection_id)
                             responses = [] if response is None else [response]

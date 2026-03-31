@@ -94,7 +94,12 @@ def test_project_artifact_manifest_uses_real_index_and_latest_uploaded_binding(t
             "name": "preview.png",
             "content_type": "image/png",
             "size": preview_path.stat().st_size,
-            "download_ref": "/v1/files/file_preview_002/content",
+            "download_ref": {
+                "kind": "vps_file",
+                "file_id": "file_preview_002",
+                "metadata_url": "/v1/files/file_preview_002",
+                "content_url": "/v1/files/file_preview_002/content",
+            },
             "download_ref_source": "artifact_file_binding_index",
         },
         {
@@ -205,7 +210,13 @@ def test_project_artifact_manifest_prefers_live_external_delivery_index_over_bin
             "name": "preview.png",
             "content_type": "image/png",
             "size": preview_path.stat().st_size,
-            "download_ref": "https://relay.example/v1/files/file_preview_001/content",
+            "download_ref": {
+                "kind": "vps_file",
+                "file_id": "file_preview_001",
+                "metadata_url": "https://relay.example/v1/files/file_preview_001",
+                "content_url": "https://relay.example/v1/files/file_preview_001/content",
+                "content_type": "image/png",
+            },
             "download_ref_source": "external_delivery_index.file_surface",
         }
     ]
@@ -260,7 +271,7 @@ def test_project_artifact_manifest_projects_cos_external_delivery_index(tmp_path
             "name": "report.md",
             "content_type": "text/markdown",
             "size": report_path.stat().st_size,
-            "download_ref": "https://cos.example/mail-runner/thread_001/task_001/report.md",
+            "download_ref": None,
             "download_ref_source": "external_delivery_index.cos",
         }
     ]

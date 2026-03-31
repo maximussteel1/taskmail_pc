@@ -68,6 +68,8 @@ Current optional direct TaskMail boundary:
 - `2026-03-29` 起，repo-side 已把 repo-internal `pc_control` current-session session-action first slice 补到了 `reply|status|pause|resume|kill|end|answers|attachment_continuation`：operator/debug `command_dispatch(reply|status|pause|resume|kill|end|answers|attachment_continuation)` 现在都会在 PC 本地复用现有 post-creation mail path，并回传 `result.structured_payload.kind=session_action_result`。其中 `attachment_continuation` 复用现有 attachment-bearing reply mail 语义，把内联附件先物化进目标 workdir，再按当前 thread 状态继续走 canonical continuation / answer recovery 逻辑。这条能力当前应读成内部 canonical command-family seam，而不是新的 app-facing transport API
 - `2026-03-29` 起，repo-side 还额外 provision 了一条 current-session session-action first slice 的 Android-facing facade：`POST /v1/android/session-action`。它当前承接 current-session `reply|status|pause|resume|kill|end|answers|attachment_continuation`，固定使用独立的 `Authorization: Bearer <android_app_token>` admission，并把 `request_id / action / target.session_id` 薄映射到内部 `pc_control_runtime -> command_dispatch(reply|status|pause|resume|kill|end|answers|attachment_continuation)`；`target.workspace_id` 与 `target.thread_id` 当前都只作 supporting identity / diagnostics。submit success/replay 当前返回 `command_id + submit_ack + target_session_identity`，其中 `pause/resume/kill/end` 当前要求空 object action body，`answers` 当前要求 `answers.question_answers[]`，而 `attachment_continuation` 当前要求 `attachment_continuation.attachments[]` 并支持可选 `reply_text`。当前 first accepted / `accepted_but_queued` / same-payload replay 固定返回 `HTTP 200`，同一 `request_id` 命中不同 canonical payload 固定返回 `HTTP 409 request_id_conflict`；当前 repo-side 已把 current-session canonical route resolve 收回服务端：`session_id` 可单独命中唯一 session，若 supporting identity 不一致则返回 conflict，若 `session_id` 多命中则返回 unresolved，而不是猜测。这条入口当前仍只应读成 current-session session-action first slice，不代表 Android 已退出 mail-first 主边界
 - 对这条 `pc_control` dispatch 路径，当前显式 `execution_policy.profile=default` 与省略 profile 的语义等价；它不会再在本地 adapter bootstrap 阶段因为“缺少 default profile mapping”而被额外打断
+- `2026-03-30` 起，repo-internal `/pc-control` websocket 对 terminal durable 消息补了一条 reliable delivery lane：PC 发出的 `projection_batch` 与 `result` 只有在 relay 已成功提交 projection store / command store 后，才会收到 `delivery_ack(request_id, message_type, delivery_status=committed)`；PC sidecar 会对这两类消息按 ack 串行出队，未收到 `delivery_ack` 时把原消息保留在进程内 reliable queue，待后续连接继续重试。`output_chunk`、`artifact_manifest`、heartbeat 与 `workspace_snapshot` 仍保持 best-effort / replay，不引入全局 stop-and-wait
+- `2026-03-30` 起，repo-internal `/pc-control` 的 `output_chunk` 发送语义也已收敛为“运行中增量投影 + 终态补尾”：PC sidecar 会持续读取本地 `runs/<task_id>/stream.events.jsonl`，按 `seq` 增量推送新 `output_chunk`；turn 结束时只补之前尚未发出的尾部 chunk。断线恢复时仍沿用现有 `replay + output_resume_request(after_seq)` 补洞，wire shape 不变
 - `/control` 首刀保留 `hello / hello_ack`，并在 `hello_ack` 里回告 `accepted_payload_schemas`
 - `/control` 当前支持四类 frame 流：
   - `ping -> pong`
@@ -85,9 +87,9 @@ Current optional direct TaskMail boundary:
 - relay 当前可接受 current-session direct `/status` 与 plain `reply`
 - 对 `post-creation-session-action-contract-v1`，`dispatch_metadata.fallback_policy` 当前接受 `mail` 与 `none`；`none` 只表示合法的 direct-only client 声明，不会在 parser 层因“不是 mail”而被直接拒绝
 - 这些 direct surface 的 task execution truth 仍留在 PC，不把 relay 提升成执行真相层
-- `/control session_action_result` 当前只回告 canonical mail ingress 已提交以及当前 `session_action_closeout` 锚点快照；user-visible final outcome 仍以正常 status / terminal mail 为准
+- `/control session_action_result` 当前回告 authoritative relay-native runtime result，并继续附带 `session_action_closeout` 锚点快照
 - `GET /v1/android/session-snapshot` 当前还会在 `session_snapshot.latest_session_action` 下保守投影最近一条 current-session `reply|status|pause|resume|kill|end|answers|attachment_continuation` command 的最小 continuity 字段，至少包含 `command_id + action_type + submit_ack`
-- direct `new_task` 与 current-session direct action 当前都走 bridge-to-mail；`/control` bootstrap `v2`、current-session direct `session_action_result` 与 relay-side `transport_probe` 是当前三类 direct result surface
+- direct `new_task` 仍是 mail-bridge；但 current-session direct action 已切到 relay-native runtime execution。当前 direct result surface 包括 `/control` bootstrap `v2`、current-session direct `session_action_result` 与 relay-side `transport_probe`
 - `/relay` 当前仍是 direct `new_task`、current-session direct `/status` / `reply` 与 Phase 3 detail sidecar 的 carrier；`/control` 现在也可承载 current-session direct `/status` / `reply`，但它仍不是这些能力的通用替代
 - 具体 schema、限制条件、closeout/evidence 与 `/v1/files` file surface 规则，以 [taskmail_direct_control_file_contract.md](taskmail_direct_control_file_contract.md) 为准
 - 当 `control_plane_mode=vps_only` 时，旧 mail-bridge control-plane surface 不再应读成被 provision：PC host 不再 consume bot mailbox，relay 侧依赖 bot mailbox ingress 的 direct `new_task` / current-session `status|reply` / bootstrap `[SYNC] v1` / `transport_probe` 也不再是 active lane
@@ -103,7 +105,7 @@ Current optional direct TaskMail active-detail sidecar boundary:
 - when the relay operator provisions the current Phase 3 direct inbound wire, the relay may also accept `subscribe_session_detail` on `/relay`
 - this direct path is read-side only and is limited to `active session detail` freshness (`session_snapshot` / `session_delta`)
 - the relay resolves the current runtime `session_state` / `thread_state` and projects them into the frozen Phase 3 wire shape
-- mail remains the receipt/artifact/attachment truth layer even when this sidecar is enabled
+- mail remains the receipt and user-visible notification truth layer even when this sidecar is enabled; when `outbound_transport=relay`, user-consumable run artifacts are projected from relay `/v1/files` rather than MIME attachments
 - direct detail sidecar 本身仍是 read-side only；其他 direct post-creation action 是否受支持，不由 sidecar 推导，而是由 [taskmail_direct_control_file_contract.md](taskmail_direct_control_file_contract.md) 单独定义
 
 ## 2. Authority
@@ -237,9 +239,10 @@ Current boundary:
 - `Codex`：`highest` 映射到 `--dangerously-bypass-approvals-and-sandbox`
 - `OpenCode`：`highest` 映射到当前 run 目录中的临时 merged config overlay，不改写用户全局配置
 
-当前 live 验证：
+当前验证：
 
 - 2026-03-16 已通过真实邮箱验证 `Codex` 和 `OpenCode` 的 `Permission: highest -> reply omit inherit -> Permission: default` 三步链路
+- 2026-03-30 已通过 `Codex` `sdk-first` 补证 `Permission: default -> reply omit inherit -> Permission: highest` 三步链路；同一 `backend_session_id` 续接成功，前两轮 `sandbox_mode=workspace-write`，最终显式切到 `danger-full-access`，三轮 `approval_policy` 都是 `never`
 - 验证范围包括状态邮件里的 `Permission` 展示、thread/session 持久化，以及 backend-specific 权限投影
 
 ## 4. Reply Routing
@@ -302,7 +305,7 @@ Current targeted routing update:
 - cross-workspace switching and hidden title-based guessing remain unsupported
 - `/status` is a current-state query only: if the session is `running`, it reports `Summary: Running.` and uses `Reply:` to show the latest local assistant-visible output from the current live session; if no assistant output is available yet, it replies with `Reply: No assistant output yet.`; if the session is not `running`, it explicitly says so and reports the current local thread state instead of replaying the previous run result
 - `/last` is a local last-result query only: it returns the latest persisted result for the session without starting a new backend run
-- `/restart-runner` is a local hosted-loop control command: it does not call the backend, it queues a local runner restart request, and the current Windows host schedules that restart through an external detached launcher so the control mail itself does not kill the host inline
+- `/restart-runner` is a local hosted-loop control command: it does not call the backend, it queues a local runner restart request, and the current Windows host only schedules the detached restart after no `running` sessions remain, so the control mail does not kill the host inline or interrupt active work
 
 ## 6. Waiting-State Protocol
 
@@ -326,6 +329,7 @@ Current targeted routing update:
 - attachment-only reply 默认走 `CONTINUE_SESSION`
 - 若线程当前在 waiting state，则 attachment-only reply 默认走 `ANSWER_QUESTION`
 - outgoing files 通过 `manifest.json` 或 artifact 目录 fallback 暴露
+- 当 `outbound_transport=relay` 且存在 `relay_url + relay_transport_token` 时，attachable run artifact 当前统一 externalize 到 relay `/v1/files`，不再按大小继续作为 MIME 附件发送
 
 专题协议：
 

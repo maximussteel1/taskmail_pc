@@ -6,6 +6,7 @@ from mail_runner.relay_server.pc_control_protocol import (
     PcArtifactManifestMessage,
     PcCommandAckMessage,
     PcCommandDispatchMessage,
+    PcDeliveryAckMessage,
     PcCommandEventMessage,
     PcCommandResultMessage,
     PcControlProtocolError,
@@ -28,6 +29,7 @@ from mail_runner.relay_server.pc_control_protocol import (
     build_command_dispatch,
     build_command_event,
     build_command_result,
+    build_delivery_ack,
     build_ingress_candidate,
     build_ingress_decision,
     build_mailbox_lease,
@@ -304,7 +306,12 @@ def test_output_chunk_and_artifact_manifest_roundtrip() -> None:
                     "name": "preview.png",
                     "content_type": "image/png",
                     "size": 8,
-                    "download_ref": "/v1/files/file_preview_001/content",
+                    "download_ref": {
+                        "kind": "vps_file",
+                        "file_id": "file_preview_001",
+                        "metadata_url": "/v1/files/file_preview_001",
+                        "content_url": "/v1/files/file_preview_001/content",
+                    },
                     "download_ref_source": "artifact_file_binding_index",
                 }
             ],
@@ -317,6 +324,29 @@ def test_output_chunk_and_artifact_manifest_roundtrip() -> None:
     assert isinstance(artifact_manifest, PcArtifactManifestMessage)
     assert artifact_manifest.payload["artifacts_root"] == "runs/task_001/artifacts"
     assert artifact_manifest.payload["artifacts"][0]["artifact_id"] == "artifact-preview"
+
+
+def test_output_chunk_roundtrip_preserves_multiline_delta() -> None:
+    output_chunk = parse_pc_control_client_message(
+        build_output_chunk(
+            message_id="msg_out_multiline_001",
+            trace_id="trace_cmd_multiline_001",
+            pc_id="pc_home",
+            connection_epoch=7,
+            sent_at="2026-03-25T10:00:26",
+            output_chunk_id="output:cmd_001:thread_001:task_001:2",
+            command_id="cmd_001",
+            stream_id="thread_001:task_001",
+            stream_id_source="derived_from_run_identity",
+            seq=2,
+            kind="assistant.delta",
+            delta="Line 1\n\nLine 2",
+            status="streaming",
+        )
+    )
+
+    assert isinstance(output_chunk, PcOutputChunkMessage)
+    assert output_chunk.payload["delta"] == "Line 1\n\nLine 2"
 
 
 def test_output_resume_request_roundtrip() -> None:
@@ -509,3 +539,23 @@ def test_thread_binding_and_terminal_outcome_roundtrip() -> None:
     assert outcome.payload["terminal_mail_message_id"] == "<done@example.com>"
     assert isinstance(outcome_ack, PcTerminalOutcomeAckMessage)
     assert outcome_ack.payload["outcome_status"] == "committed"
+
+
+def test_delivery_ack_roundtrip_parses_committed_message() -> None:
+    payload = build_delivery_ack(
+        message_id="msg_delivery_ack_001",
+        trace_id="trace_delivery_ack_001",
+        pc_id="pc_home",
+        connection_epoch=7,
+        sent_at="2026-03-25T10:00:34",
+        request_id="projection_batch:001",
+        message_type="projection_batch",
+        delivery_status="committed",
+    )
+
+    parsed = parse_pc_control_server_message(payload)
+
+    assert isinstance(parsed, PcDeliveryAckMessage)
+    assert parsed.payload["request_id"] == "projection_batch:001"
+    assert parsed.payload["message_type"] == "projection_batch"
+    assert parsed.payload["delivery_status"] == "committed"

@@ -4,6 +4,7 @@ import pytest
 
 from mail_runner.relay_server.pc_control_protocol import (
     PcCommandDispatchMessage,
+    PcDeliveryAckMessage,
     PcErrorMessage,
     PcHelloAckMessage,
     build_artifact_manifest,
@@ -11,6 +12,7 @@ from mail_runner.relay_server.pc_control_protocol import (
     build_command_dispatch,
     build_command_event,
     build_command_result,
+    build_projection_batch,
     build_ingress_candidate,
     build_mailbox_lease,
     build_output_chunk,
@@ -25,6 +27,9 @@ from mail_runner.relay_server.pc_control_protocol import (
 from mail_runner.relay_server.pc_command_store import InMemoryPcCommandStore
 from mail_runner.relay_server.pc_control_runtime import PcControlRuntime
 from mail_runner.relay_server.pc_control_runtime import PcCommandDispatchValidationError
+from mail_runner.relay_server.projection_store import ProjectionSessionBatch
+from mail_runner.relay_server.projection_store import ProjectionSessionUpsert
+from mail_runner.relay_server.projection_store import SqliteRelayProjectionStore
 from mail_runner.relay_server.pc_credential_registry import InMemoryPcCredentialRegistry
 from mail_runner.relay_server.pc_node_store import InMemoryPcNodeStore
 from mail_runner.relay_server.workspace_inventory_store import InMemoryWorkspaceInventoryStore
@@ -55,6 +60,18 @@ def _runtime() -> PcControlRuntime:
         node_store=InMemoryPcNodeStore(),
         workspace_store=InMemoryWorkspaceInventoryStore(),
         command_store=InMemoryPcCommandStore(),
+        keepalive_seconds=15,
+        clock=lambda: "2026-03-25T10:00:00",
+    )
+
+
+def _runtime_with_projection(tmp_path) -> PcControlRuntime:
+    return PcControlRuntime(
+        credential_registry=InMemoryPcCredentialRegistry(default_transport_token="relay-secret"),
+        node_store=InMemoryPcNodeStore(),
+        workspace_store=InMemoryWorkspaceInventoryStore(),
+        command_store=InMemoryPcCommandStore(),
+        projection_store=SqliteRelayProjectionStore(tmp_path / "projection.sqlite3"),
         keepalive_seconds=15,
         clock=lambda: "2026-03-25T10:00:00",
     )
@@ -98,6 +115,49 @@ def _register_online_pc(runtime: PcControlRuntime) -> tuple[str, int]:
     )
     assert runtime.handle_workspace_snapshot(snapshot, connection_id=connection_id) is None
     return connection_id, connection_epoch
+
+
+def _seed_projection_session(runtime: PcControlRuntime) -> None:
+    assert runtime.projection_store is not None
+    assert runtime.projection_store.apply_session_batch(
+        ProjectionSessionBatch(
+            batch_id="projection-batch:session",
+            connection_epoch=1,
+            sent_at="2026-03-25T10:00:09",
+            session=ProjectionSessionUpsert(
+                idempotency_key="projection-session:v1",
+                projection_version=1,
+                pc_id="pc_home",
+                workspace_id="workspace_001",
+                session_id="thread_001",
+                thread_id="thread_001",
+                session_name="thread_001",
+                backend="codex",
+                backend_transport="sdk",
+                profile="default",
+                permission="highest",
+                repo_path="E:\\projects\\repo_a",
+                workdir=None,
+                list_status="running",
+                snapshot_status="running",
+                lifecycle="active",
+                current_task_id="task_001",
+                queued_task_id=None,
+                pending_task_count=0,
+                last_summary="Running.",
+                last_active_at="2026-03-25T10:00:09",
+                last_progress_at="2026-03-25T10:00:09",
+                paused_from_status=None,
+                backend_session_id="session_001",
+                backend_session_resumable=True,
+                question_state=None,
+                timeline_items=[],
+                created_at="2026-03-25T10:00:09",
+                updated_at="2026-03-25T10:00:09",
+                source_updated_at="2026-03-25T10:00:09",
+            ),
+        )
+    )
 
 
 def test_pc_control_runtime_accepts_hello_heartbeat_and_workspace_snapshot() -> None:
@@ -433,18 +493,95 @@ def test_pc_control_runtime_records_canonical_event_and_result() -> None:
 
     assert runtime.handle_event(running_event, connection_id=connection_id) is None
     assert runtime.handle_event(duplicate_running_event, connection_id=connection_id) is None
-    assert runtime.handle_result(result, connection_id=connection_id) is None
-    assert runtime.handle_result(duplicate_result, connection_id=connection_id) is None
+    result_response = parse_pc_control_server_message(runtime.handle_result(result, connection_id=connection_id))
+    duplicate_result_response = parse_pc_control_server_message(
+        runtime.handle_result(duplicate_result, connection_id=connection_id)
+    )
 
     record = runtime.command_store.get_command("pc_home", "cmd_010")
 
+    assert isinstance(result_response, PcDeliveryAckMessage)
+    assert result_response.payload["request_id"] == "result:cmd_010"
+    assert result_response.payload["message_type"] == "result"
+    assert duplicate_result_response.payload["delivery_status"] == "committed"
     assert record is not None
     assert [item.event_type for item in record.events] == ["running"]
     assert record.final_status == "done"
     assert record.latest_event_type == "done"
     assert record.result is not None
     assert record.result.summary == "Mock run completed successfully."
-    assert record.result.effective_execution["resolved_model"] == "gpt-5-codex"
+
+
+def test_pc_control_runtime_projection_batch_returns_delivery_ack(tmp_path) -> None:
+    runtime = PcControlRuntime(
+        credential_registry=InMemoryPcCredentialRegistry(default_transport_token="relay-secret"),
+        node_store=InMemoryPcNodeStore(),
+        workspace_store=InMemoryWorkspaceInventoryStore(),
+        command_store=InMemoryPcCommandStore(),
+        projection_store=SqliteRelayProjectionStore(tmp_path / "projection.sqlite3"),
+        keepalive_seconds=15,
+        clock=lambda: "2026-03-25T10:00:00",
+    )
+    connection_id, connection_epoch = _register_online_pc(runtime)
+
+    projection = parse_pc_control_client_message(
+        build_projection_batch(
+            message_id="msg_projection_001",
+            trace_id="trace_projection_001",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:15",
+            batch_id="projection_batch:001",
+            scope="session",
+            workspace_id="workspace_001",
+            session_id="thread_001",
+            thread_id="thread_001",
+            projection_version=1,
+            items=[
+                {
+                    "type": "session_projection_upsert",
+                    "family": "session_projection_upsert",
+                    "idempotency_key": "sess_head:001",
+                    "projection_version": 1,
+                    "pc_id": "pc_home",
+                    "workspace_id": "workspace_001",
+                    "session_id": "thread_001",
+                    "thread_id": "thread_001",
+                    "session_name": "thread_001",
+                    "backend": "codex",
+                    "backend_transport": "sdk",
+                    "profile": "default",
+                    "permission": "highest",
+                    "repo_path": "E:\\projects\\repo_a",
+                    "workdir": None,
+                    "list_status": "running",
+                    "snapshot_status": "running",
+                    "lifecycle": "active",
+                    "current_task_id": "task_001",
+                    "queued_task_id": None,
+                    "pending_task_count": 0,
+                    "last_summary": "Running.",
+                    "last_active_at": "2026-03-25T10:00:15",
+                    "last_progress_at": "2026-03-25T10:00:15",
+                    "paused_from_status": None,
+                    "backend_session_id": "session_001",
+                    "backend_session_resumable": True,
+                    "question_state": None,
+                    "timeline_items": [],
+                    "created_at": "2026-03-25T10:00:15",
+                    "updated_at": "2026-03-25T10:00:15",
+                    "source_updated_at": "2026-03-25T10:00:15",
+                }
+            ],
+        )
+    )
+
+    response = parse_pc_control_server_message(runtime.handle_projection_batch(projection, connection_id=connection_id))
+
+    assert isinstance(response, PcDeliveryAckMessage)
+    assert response.payload["request_id"] == "projection_batch:001"
+    assert response.payload["message_type"] == "projection_batch"
+    assert response.payload["delivery_status"] == "committed"
 
 
 def test_pc_control_runtime_records_output_chunk_and_artifact_manifest() -> None:
@@ -518,7 +655,12 @@ def test_pc_control_runtime_records_output_chunk_and_artifact_manifest() -> None
                     "name": "preview.png",
                     "content_type": "image/png",
                     "size": 8,
-                    "download_ref": "/v1/files/file_preview_001/content",
+                    "download_ref": {
+                        "kind": "vps_file",
+                        "file_id": "file_preview_001",
+                        "metadata_url": "/v1/files/file_preview_001",
+                        "content_url": "/v1/files/file_preview_001/content",
+                    },
                     "download_ref_source": "artifact_file_binding_index",
                 }
             ],
@@ -535,6 +677,465 @@ def test_pc_control_runtime_records_output_chunk_and_artifact_manifest() -> None
     assert record.output_chunks[0].stream_id == "thread_cmd_020:task_cmd_020"
     assert record.artifact_manifest is not None
     assert record.artifact_manifest.artifacts[0]["artifact_id"] == "artifact-preview"
+
+
+def test_pc_control_runtime_preserves_multiline_output_chunk_delta() -> None:
+    runtime = _runtime()
+    connection_id, connection_epoch = _register_online_pc(runtime)
+    command = parse_pc_control_server_message(
+        build_command_dispatch(
+            message_id="msg_cmd_021",
+            trace_id="trace_cmd_021",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:10",
+            command_id="cmd_021",
+            command_type="new_task",
+            workspace_id="workspace_001",
+            execution_policy={
+                "backend": "codex",
+                "profile": "strong",
+                "permission": "highest",
+                "backend_transport": "sdk",
+            },
+            command_payload={"task_text": "Refactor floor_shear.py"},
+        )
+    )
+    runtime.enqueue_command(command)
+    ack = parse_pc_control_client_message(
+        build_command_ack(
+            message_id="msg_ack_021",
+            trace_id="trace_cmd_021",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:11",
+            command_id="cmd_021",
+            ack_status="accepted",
+        )
+    )
+    output_chunk = parse_pc_control_client_message(
+        build_output_chunk(
+            message_id="msg_out_021",
+            trace_id="trace_cmd_021",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:12",
+            output_chunk_id="output:cmd_021:thread_cmd_021:1",
+            command_id="cmd_021",
+            stream_id="thread_cmd_021:task_cmd_021",
+            stream_id_source="derived_from_run_identity",
+            seq=1,
+            kind="assistant.delta",
+            delta="Line 1\n\nLine 2",
+            status="streaming",
+        )
+    )
+
+    assert runtime.handle_command_ack(ack, connection_id=connection_id) is None
+    assert runtime.handle_output_chunk(output_chunk, connection_id=connection_id) is None
+
+    record = runtime.command_store.get_command("pc_home", "cmd_021")
+
+    assert record is not None
+    assert record.output_chunks[0].delta == "Line 1\n\nLine 2"
+
+
+def test_pc_control_runtime_rebuilds_live_process_from_command_store_with_gap_handling(tmp_path) -> None:
+    runtime = _runtime_with_projection(tmp_path)
+    connection_id, connection_epoch = _register_online_pc(runtime)
+    _seed_projection_session(runtime)
+    command = parse_pc_control_server_message(
+        build_command_dispatch(
+            message_id="msg_cmd_live_001",
+            trace_id="trace_cmd_live_001",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:10",
+            command_id="cmd_live_001",
+            command_type="reply",
+            workspace_id="workspace_001",
+            session_id="thread_001",
+            execution_policy={
+                "backend": "codex",
+                "profile": "strong",
+                "permission": "highest",
+                "backend_transport": "sdk",
+            },
+            command_payload={"reply_text": "continue"},
+        )
+    )
+    runtime.enqueue_command(command)
+    ack = parse_pc_control_client_message(
+        build_command_ack(
+            message_id="msg_ack_live_001",
+            trace_id="trace_cmd_live_001",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:11",
+            command_id="cmd_live_001",
+            ack_status="accepted",
+        )
+    )
+    assert runtime.handle_command_ack(ack, connection_id=connection_id) is None
+
+    chunk_seq1 = parse_pc_control_client_message(
+        build_output_chunk(
+            message_id="msg_out_live_001",
+            trace_id="trace_cmd_live_001",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:12",
+            output_chunk_id="output:cmd_live_001:1",
+            command_id="cmd_live_001",
+            stream_id="thread_001:task_001",
+            stream_id_source="derived_from_run_identity",
+            seq=1,
+            kind="assistant.delta",
+            delta="Hel",
+            status="streaming",
+        )
+    )
+    chunk_seq3 = parse_pc_control_client_message(
+        build_output_chunk(
+            message_id="msg_out_live_003",
+            trace_id="trace_cmd_live_001",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:14",
+            output_chunk_id="output:cmd_live_001:3",
+            command_id="cmd_live_001",
+            stream_id="thread_001:task_001",
+            stream_id_source="derived_from_run_identity",
+            seq=3,
+            kind="assistant.delta",
+            delta="!",
+            status="streaming",
+        )
+    )
+    chunk_seq2 = parse_pc_control_client_message(
+        build_output_chunk(
+            message_id="msg_out_live_002",
+            trace_id="trace_cmd_live_001",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:13",
+            output_chunk_id="output:cmd_live_001:2",
+            command_id="cmd_live_001",
+            stream_id="thread_001:task_001",
+            stream_id_source="derived_from_run_identity",
+            seq=2,
+            kind="assistant.delta",
+            delta="lo",
+            status="streaming",
+        )
+    )
+
+    assert runtime.handle_output_chunk(chunk_seq1, connection_id=connection_id) is None
+    assert runtime.handle_output_chunk(chunk_seq3, connection_id=connection_id) is None
+    live_process = runtime.projection_store.get_session_live_process(
+        pc_id="pc_home",
+        workspace_id="workspace_001",
+        session_id="thread_001",
+        thread_id="thread_001",
+    )
+    assert live_process == {
+        "status": "streaming",
+        "updated_at": "2026-03-25T10:00:12",
+        "items": [
+            {
+                "item_id": "process:thread_001:task_001:1",
+                "kind": "assistant",
+                "created_at": "2026-03-25T10:00:12",
+                "updated_at": "2026-03-25T10:00:12",
+                "status": "streaming",
+                "text": "Hel",
+            }
+        ],
+    }
+
+    assert runtime.handle_output_chunk(chunk_seq2, connection_id=connection_id) is None
+    live_process = runtime.projection_store.get_session_live_process(
+        pc_id="pc_home",
+        workspace_id="workspace_001",
+        session_id="thread_001",
+        thread_id="thread_001",
+    )
+    assert live_process == {
+        "status": "streaming",
+        "updated_at": "2026-03-25T10:00:14",
+        "items": [
+            {
+                "item_id": "process:thread_001:task_001:1",
+                "kind": "assistant",
+                "created_at": "2026-03-25T10:00:12",
+                "updated_at": "2026-03-25T10:00:14",
+                "status": "streaming",
+                "text": "Hello!",
+            }
+        ],
+    }
+
+
+def test_pc_control_runtime_preserves_prior_assistant_segments_when_later_tool_full_text_arrives(tmp_path) -> None:
+    runtime = _runtime_with_projection(tmp_path)
+    connection_id, connection_epoch = _register_online_pc(runtime)
+    _seed_projection_session(runtime)
+    command = parse_pc_control_server_message(
+        build_command_dispatch(
+            message_id="msg_cmd_live_mix_001",
+            trace_id="trace_cmd_live_mix_001",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:10",
+            command_id="cmd_live_mix_001",
+            command_type="reply",
+            workspace_id="workspace_001",
+            session_id="thread_001",
+            execution_policy={
+                "backend": "codex",
+                "profile": "strong",
+                "permission": "highest",
+                "backend_transport": "sdk",
+            },
+            command_payload={"reply_text": "continue"},
+        )
+    )
+    runtime.enqueue_command(command)
+    ack = parse_pc_control_client_message(
+        build_command_ack(
+            message_id="msg_ack_live_mix_001",
+            trace_id="trace_cmd_live_mix_001",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:11",
+            command_id="cmd_live_mix_001",
+            ack_status="accepted",
+        )
+    )
+    assert runtime.handle_command_ack(ack, connection_id=connection_id) is None
+
+    chunks = [
+        parse_pc_control_client_message(
+            build_output_chunk(
+                message_id="msg_out_live_mix_001",
+                trace_id="trace_cmd_live_mix_001",
+                pc_id="pc_home",
+                connection_epoch=connection_epoch,
+                sent_at="2026-03-25T10:00:12",
+                output_chunk_id="output:cmd_live_mix_001:1",
+                command_id="cmd_live_mix_001",
+                stream_id="thread_001:task_001",
+                stream_id_source="derived_from_run_identity",
+                seq=1,
+                kind="assistant.delta",
+                delta="先看一下旧实现。",
+                status="streaming",
+            )
+        ),
+        parse_pc_control_client_message(
+            build_output_chunk(
+                message_id="msg_out_live_mix_002",
+                trace_id="trace_cmd_live_mix_001",
+                pc_id="pc_home",
+                connection_epoch=connection_epoch,
+                sent_at="2026-03-25T10:00:13",
+                output_chunk_id="output:cmd_live_mix_001:2",
+                command_id="cmd_live_mix_001",
+                stream_id="thread_001:task_001",
+                stream_id_source="derived_from_run_identity",
+                seq=2,
+                kind="tool.completed",
+                text="rg -n \"live_process\" pc_control_runtime.py",
+                status="completed",
+            )
+        ),
+        parse_pc_control_client_message(
+            build_output_chunk(
+                message_id="msg_out_live_mix_003",
+                trace_id="trace_cmd_live_mix_001",
+                pc_id="pc_home",
+                connection_epoch=connection_epoch,
+                sent_at="2026-03-25T10:00:14",
+                output_chunk_id="output:cmd_live_mix_001:3",
+                command_id="cmd_live_mix_001",
+                stream_id="thread_001:task_001",
+                stream_id_source="derived_from_run_identity",
+                seq=3,
+                kind="assistant.delta",
+                delta="问题在 live_process 聚合这里。",
+                status="streaming",
+            )
+        ),
+        parse_pc_control_client_message(
+            build_output_chunk(
+                message_id="msg_out_live_mix_004",
+                trace_id="trace_cmd_live_mix_001",
+                pc_id="pc_home",
+                connection_epoch=connection_epoch,
+                sent_at="2026-03-25T10:00:15",
+                output_chunk_id="output:cmd_live_mix_001:4",
+                command_id="cmd_live_mix_001",
+                stream_id="thread_001:task_001",
+                stream_id_source="derived_from_run_identity",
+                seq=4,
+                kind="tool.completed",
+                text="powershell -Command \"Get-Content pc_control_runtime.py\"",
+                status="completed",
+            )
+        ),
+    ]
+
+    for chunk in chunks:
+        assert runtime.handle_output_chunk(chunk, connection_id=connection_id) is None
+
+    live_process = runtime.projection_store.get_session_live_process(
+        pc_id="pc_home",
+        workspace_id="workspace_001",
+        session_id="thread_001",
+        thread_id="thread_001",
+    )
+    assert live_process == {
+        "status": "streaming",
+        "updated_at": "2026-03-25T10:00:15",
+        "items": [
+            {
+                "item_id": "process:thread_001:task_001:1",
+                "kind": "assistant",
+                "created_at": "2026-03-25T10:00:12",
+                "updated_at": "2026-03-25T10:00:12",
+                "status": "streaming",
+                "text": "先看一下旧实现。",
+            },
+            {
+                "item_id": "process:thread_001:task_001:2",
+                "kind": "tool",
+                "created_at": "2026-03-25T10:00:13",
+                "updated_at": "2026-03-25T10:00:13",
+                "status": "completed",
+                "text": "rg -n \"live_process\" pc_control_runtime.py",
+            },
+            {
+                "item_id": "process:thread_001:task_001:3",
+                "kind": "assistant",
+                "created_at": "2026-03-25T10:00:14",
+                "updated_at": "2026-03-25T10:00:14",
+                "status": "streaming",
+                "text": "问题在 live_process 聚合这里。",
+            },
+            {
+                "item_id": "process:thread_001:task_001:4",
+                "kind": "tool",
+                "created_at": "2026-03-25T10:00:15",
+                "updated_at": "2026-03-25T10:00:15",
+                "status": "completed",
+                "text": "powershell -Command \"Get-Content pc_control_runtime.py\"",
+            },
+        ],
+    }
+
+
+def test_pc_control_runtime_freezes_live_process_to_completed_on_terminal_result(tmp_path) -> None:
+    runtime = _runtime_with_projection(tmp_path)
+    connection_id, connection_epoch = _register_online_pc(runtime)
+    _seed_projection_session(runtime)
+    command = parse_pc_control_server_message(
+        build_command_dispatch(
+            message_id="msg_cmd_live_010",
+            trace_id="trace_cmd_live_010",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:10",
+            command_id="cmd_live_010",
+            command_type="reply",
+            workspace_id="workspace_001",
+            session_id="thread_001",
+            execution_policy={
+                "backend": "codex",
+                "profile": "strong",
+                "permission": "highest",
+                "backend_transport": "sdk",
+            },
+            command_payload={"reply_text": "continue"},
+        )
+    )
+    runtime.enqueue_command(command)
+    ack = parse_pc_control_client_message(
+        build_command_ack(
+            message_id="msg_ack_live_010",
+            trace_id="trace_cmd_live_010",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:11",
+            command_id="cmd_live_010",
+            ack_status="accepted",
+        )
+    )
+    output_chunk = parse_pc_control_client_message(
+        build_output_chunk(
+            message_id="msg_out_live_010",
+            trace_id="trace_cmd_live_010",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:12",
+            output_chunk_id="output:cmd_live_010:1",
+            command_id="cmd_live_010",
+            stream_id="thread_001:task_001",
+            stream_id_source="derived_from_run_identity",
+            seq=1,
+            kind="assistant.delta",
+            delta="Hello",
+            status="streaming",
+        )
+    )
+    result = parse_pc_control_client_message(
+        build_command_result(
+            message_id="msg_res_live_010",
+            trace_id="trace_cmd_live_010",
+            pc_id="pc_home",
+            connection_epoch=connection_epoch,
+            sent_at="2026-03-25T10:00:20",
+            result_id="result:cmd_live_010",
+            command_id="cmd_live_010",
+            final_status="done",
+            summary="Completed.",
+            structured_payload={
+                "kind": "run_result",
+                "thread_id": "thread_001",
+                "task_id": "task_001",
+            },
+            effective_execution={
+                "backend": "codex",
+                "profile": "strong",
+                "permission": "highest",
+                "backend_transport": "sdk",
+            },
+        )
+    )
+
+    assert runtime.handle_command_ack(ack, connection_id=connection_id) is None
+    assert runtime.handle_output_chunk(output_chunk, connection_id=connection_id) is None
+    assert runtime.handle_result(result, connection_id=connection_id) is not None
+
+    live_process = runtime.projection_store.get_session_live_process(
+        pc_id="pc_home",
+        workspace_id="workspace_001",
+        session_id="thread_001",
+        thread_id="thread_001",
+    )
+    assert live_process == {
+        "status": "completed",
+        "updated_at": "2026-03-25T10:00:12",
+        "items": [
+            {
+                "item_id": "process:thread_001:task_001:1",
+                "kind": "assistant",
+                "created_at": "2026-03-25T10:00:12",
+                "updated_at": "2026-03-25T10:00:12",
+                "status": "completed",
+                "text": "Hello",
+            }
+        ],
+    }
 
 
 def test_pc_control_runtime_collects_output_resume_requests_from_cursor() -> None:

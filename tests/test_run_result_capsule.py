@@ -47,3 +47,24 @@ def test_strip_run_result_capsules_keeps_human_reply() -> None:
 
     assert stripped == "Implemented the requested fix."
     assert parse_run_result_capsule(stripped) is None
+
+
+def test_strip_run_result_capsules_preserves_multiline_human_reply() -> None:
+    text = "\n".join(
+        [
+            "Implemented the requested fix.",
+            "",
+            "Kept the original paragraph spacing.",
+            "",
+            RUN_RESULT_BEGIN_MARKER,
+            "changed_files: src/app.py",
+            "tests_passed: true",
+            "error_type: ",
+            "error_message: ",
+            RUN_RESULT_END_MARKER,
+        ]
+    )
+
+    stripped = strip_run_result_capsules(text)
+
+    assert stripped == "Implemented the requested fix.\n\nKept the original paragraph spacing."

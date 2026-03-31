@@ -1,595 +1,246 @@
 # Android Runner Communication Contract
 
-> Document layer: Layer 1 (current client integration contract)
+> Document layer: Layer 1 (current Android app-facing contract)
 >
 > Current path: `docs/current/android_runner_communication_contract.md`
 
-## Status
+## 状态
 
-- Date: 2026-03-29
-- Purpose: handoff document for the Android side that needs to communicate with the current `mail_based_task_manager`
-- Scope: current Android send/read contract, current relay boundary, the optional direct `new_task` ingress, the optional bootstrap `[SYNC]` direct v1/v2 slices, the optional shared `/control` bootstrap v2 slice, the optional relay-side `/control transport_probe` harness slice, the optional current-session direct `/status` / plain `reply` slice, the optional Phase 3 v1 active-session-detail direct read sidecar, and current relay-hosted file-surface delivery notes
+- 日期：2026-03-29
+- 目的：冻结当前 Android TaskMail 主链的 app-facing contract
+- 范围：`/v1/android/*` 主链、idempotency、错误面、attachment direct contract，以及 `control_plane_mode=vps_only` 下的当前事实
 
-## 1. One-Line Contract
+## 1. 一句话契约
 
-Android is still a **mail-first control-plane client**.
+当前 Android 主链已经收口到 relay-only：
 
-Even after the PC enables VPS relay, Android should continue to communicate with the system by:
+- Android 唯一正式 app-facing contract 是 `/v1/android/*`
+- Android 主链不再发送业务 reply mail，也不再等待业务 reply mail
+- create-session -> detail/read -> session-action -> result 的主链只依赖 relay-native app API
+- 在 `control_plane_mode=vps_only` 下，Android 主链不再依赖 bot mailbox ingress、`canonical_reply_recipient` 或历史 inbound mail recovery
 
-- reading task/status mail from the `user mailbox`
-- sending new mail or reply mail to the `bot mailbox`
+## 2. 当前正式入口
 
-Current direct exceptions:
+当前正式 Android app-facing surface 固定为：
 
-- when the relay operator enables TaskMail direct ingress, Android may submit the first `new_task` action to `/relay`
-- when the relay operator provisions the Android-facing create-session facade, Android may also `POST /v1/android/create-session`
-- when the relay operator provisions the Android-facing session-action facade first slice, Android may also `POST /v1/android/session-action`
-- when the relay operator enables TaskMail direct ingress, Android may also submit the bootstrap `sync_project_folders` action to `/relay`
-- when the relay operator provisions the current shared `/control` slice, Android may also submit bootstrap `sync_project_folders` to `/control`
-- when the relay operator provisions the current shared `/control` session-action slice, Android may also submit current-session direct `/status` and plain `reply` to `/control`
-- when the relay operator provisions the current shared `/control` harness slice, operator/debug builds may also submit relay-side `transport_probe` to `/control`
-- bootstrap `sync_project_folders` currently has two direct variants:
-- `taskmail-bootstrap-control-contract-v1` is bridge-to-mail; the relay bridges the accepted packet back into canonical `[SYNC]` mail ingress
-- `taskmail-bootstrap-control-contract-v2` is direct-result; when the relay is provisioned with local PC truth, the server returns `packet_ack` followed by `bootstrap_result`
-- on `/control`, the current first slice keeps `hello / hello_ack` and projects that same bootstrap v2 business action as `command -> command_ack -> result`
-- on `/control`, the current post-creation slice projects current-session direct `status|reply` as `command -> command_ack -> result(session_action_result)`
-- `/control.hello_ack.accepted_payload_schemas` now depends on the provisioned relay handlers; bootstrap clients must still gate on `taskmail-bootstrap-control-contract-v2`
-- current `/control transport_probe` is a harness/debug slice, not a normal end-user action; it currently returns `command_ack -> event* -> result(transport_probe_result)`
-- current `transport_probe_result` now distinguishes four relay-native outcomes:
-- `outcome=observed` means the relay submitted the deterministic probe mail and then read a matching PC mailbox observation from `tasks/_mailbox/transport_probes/<probe_id>.json`; this is the only `completed` outcome
-- `outcome=timed_out` means the relay submitted the mail but did not observe matching PC mailbox evidence before `timeout_seconds`; the result status is `partial`
-- `outcome=submitted` means the relay submitted the mail but could not perform PC observation lookup, typically because relay-visible `task_root` truth was not provisioned; the result status is `partial`
-- `outcome=failed` means the relay failed before mail submission completed; the result status is `failed`
-- `transport_probe_result.payload.observation` now carries either the projected PC mailbox observation summary or the current wait/skip state; Android should still treat the whole slice as operator/debug harness only
-- when the relay operator enables the current post-creation slice, Android may submit current-session direct `/status` and current-session plain direct `reply` to `/relay`
-- when the relay operator provisions the current shared `/control` session-action slice, Android may submit the same current-session `status|reply` semantics to `/control`
-- this post-creation slice is bridge-to-mail only; accepted packets still resolve to normal status or terminal mail on the canonical thread/session chain
-- `session_action_result` is not a direct terminal business result; it only confirms `mail_ingress_submission` plus the current `session_action_closeout` anchor snapshot
-- when the relay operator provisions the current Phase 3 direct inbound wire, Android may subscribe the current active session detail on `/relay`
-- this Phase 3 path is read-side only and is limited to `session_snapshot` / `session_delta` freshness for one active session detail view
-- oversized relay-hosted artifacts may now surface to Android as `/v1/files` download links inside normal task mail, but `/v1/files` is not a general Android control API
-- current `/v1/files` download links are still transport-token-protected, not anonymous public URLs; Android should only consume them inside explicitly provisioned direct/debug scopes that already own the transport token
-- current `POST /v1/android/create-session` is a thin app-facing facade, not a `/pc-control` or `/debug/pc-control/dispatch` rebranding; it accepts `pc_id / workspace_id / prompt / canonical_reply_recipient / execution_policy` plus optional `repo_path / workdir`
-- current facade success returns `command_id + submit_ack`; when `submit_ack.ack_status=accepted|accepted_but_queued`, the same submit window also returns `session_binding(session_id/pc_id/workspace_id)`
-- current create-session also writes `canonical_reply_recipient` into durable session state, so fresh Android-created sessions do not need historical inbound raw mail before the first session-action
-- current facade-facing rejected `submit_ack.error_code` is fixed to: `unsupported_backend`, `unsupported_profile`, `unsupported_permission`, `profile_model_unresolved`, `workspace_unavailable`, `pc_offline`
-- current facade auth is a dedicated `Authorization: Bearer <android_app_token>` admission, separate from the internal relay transport token
-- current `POST /v1/android/session-action` is the current-session session-action companion facade, not a `/control` or `/relay` rebranding; it currently accepts `request_id / action / target.session_id` plus optional supporting `target.workspace_id / target.thread_id`
-- current session-action facade scope is the current-session first slice `reply|status|pause|resume|kill|end|answers|attachment_continuation`
-- current `pause / resume / kill / end` first-slice body shape is an empty object at `pause` / `resume` / `kill` / `end`
-- current `answers` first-slice body shape is `answers.question_answers[]`, where each item includes canonical `question_id + value`
-- current `attachment_continuation` first-slice body shape is `attachment_continuation.attachments[]` plus optional `attachment_continuation.reply_text`
-- current `attachment_continuation` is still bridge-to-mail: the server first materializes the inline attachments into the target workdir and then reuses the canonical attachment-bearing reply mail semantics for continuation / answer recovery
-- current session-action facade success returns `command_id + submit_ack + target_session_identity(pc_id/workspace_id/session_id/thread_id)`
-- current session-action recipient resolution now reads durable `canonical_reply_recipient` first; legacy mail-born sessions may still fallback to historical inbound mail recovery
-- current rejected `submit_ack.error_code` may now also return `session_recipient_unresolved` when the target session exists but has no canonical reply-recipient binding
-- current session-action facade first slice now resolves current-session route on the server side with `session_id` as the primary target identity; `target.workspace_id` and `target.thread_id` are only supporting identity / diagnostics and are validated against the resolved canonical session when present
-- current first `accepted` and first `accepted_but_queued` both return `HTTP 200`
-- current same-`request_id` replay for the same canonical payload currently reuses the same `command_id` and submit response, and also returns `HTTP 200`
-- current same-`request_id` with a different canonical payload returns `HTTP 409 request_id_conflict`
-- current `session_id`-only lookup succeeds only when repo-side can resolve one unique canonical session; ambiguous `session_id` lookup currently returns `409 session_binding_unresolved` rather than guessing
-- current `request_id` ledger is a narrow first-slice app-facing idempotency seam for `reply|status|pause|resume|kill|end|answers|attachment_continuation`; this should still not be read as the fully frozen long-term all-action idempotency contract
-- current session-action facade auth is the same dedicated `Authorization: Bearer <android_app_token>` admission used by `create-session`, separate from the internal relay transport token
-- current `GET /v1/android/session-snapshot` also supports `session_id`-only lookup under the same rule: unique `session_id` succeeds, supporting locators are consistency checks only, and ambiguous `session_id` returns `409 session_binding_unresolved`
-- current `GET /v1/android/session-snapshot` may also include `session_snapshot.latest_session_action`, which is a conservative read-side projection of the latest current-session `reply|status|pause|resume|kill|end|answers|attachment_continuation` command continuity and exposes the minimum `command_id` join key for the app-facing first slice
+- `POST /v1/android/create-session`
+- `POST /v1/android/session-action`
+- `GET /v1/android/sessions`
+- `GET /v1/android/session-snapshot`
+- `GET /v1/android/session-history`
+- `WS /v1/android/session-updates`
 
-Android should **not** implement the VPS relay WebSocket protocol as a general-purpose or primary app protocol in the current phase.
+这些入口统一使用：
 
-## 2. Current Topology
+- `Authorization: Bearer <android_app_token>`
 
-Current deployed topology:
+它们不是 `/relay`、`/control`、`/debug/pc-control/*` 的 rebranding。
 
-```text
-Android user
-  -> user mailbox SMTP
-  -> bot mailbox
-  -> PC mail runner
-  -> direct email OR relay transport
-  -> user-facing mail
-  -> user mailbox IMAP
-  -> Android user
-```
+## 3. Create Session
 
-Optional Phase 2 v1 direct-`new_task` ingress:
+`POST /v1/android/create-session` 当前是 Android 新建 session 的唯一正式入口。
 
-```text
-Android user
-  -> ws /relay hello
-  -> ws /relay packet(new_task)
-  -> VPS relay
-  -> bot mailbox SMTP ingress
-  -> PC mail runner
-  -> direct email OR relay transport
-  -> user mailbox
-  -> Android user
-```
+当前最小业务字段：
 
-Optional Phase 3 v1 direct active-session-detail sidecar:
-
-```text
-Android user
-  -> ws /relay hello
-  -> ws /relay packet(subscribe_session_detail)
-  -> VPS relay
-  -> current runtime session_state/thread_state projection
-  -> ws /relay session_update(snapshot/delta)
-  -> Android detail view
-```
-
-Optional bootstrap v2 direct `[SYNC]` roundtrip on a local-truth relay:
-
-```text
-Android user
-  -> ws /relay hello
-  -> ws /relay packet(sync_project_folders v2)
-  -> local-truth relay runtime
-  -> ws /relay packet_ack
-  -> ws /relay bootstrap_result
-  -> Android user
-```
-
-Optional shared `/control` bootstrap v2 roundtrip:
-
-```text
-Android user
-  -> ws /control hello
-  -> ws /control hello_ack
-  -> ws /control command(sync_project_folders)
-  -> ws /control command_ack
-  -> ws /control result(sync_project_folders_result)
-  -> Android user
-```
-
-Optional shared `/control` relay-side transport-probe harness:
-
-```text
-Android operator / harness
-  -> ws /control hello
-  -> ws /control hello_ack
-  -> ws /control command(transport_probe)
-  -> ws /control command_ack
-  -> ws /control event*
-  -> ws /control result(transport_probe_result)
-```
-
-Optional shared `/control` current-session direct `status` or plain `reply`:
-
-```text
-Android user
-  -> ws /control hello
-  -> ws /control hello_ack
-  -> ws /control command(status|reply)
-  -> ws /control command_ack
-  -> ws /control result(session_action_result)
-  -> canonical mail status / terminal outcome continues on the normal mail chain
-  -> Android user
-```
-
-Optional current-session direct `/status` or plain `reply`:
-
-```text
-Android user
-  -> ws /relay hello
-  -> ws /relay packet(status|reply)
-  -> VPS relay
-  -> bot mailbox SMTP ingress
-  -> PC mail runner
-  -> user-facing status/terminal mail
-  -> user mailbox IMAP
-  -> Android user
-```
-
-When relay is enabled, only the outbound PC -> user-facing delivery path changes:
-
-```text
-PC runner
-  -> wss / relay packet
-  -> VPS relay
-  -> VPS SMTP
-  -> user mailbox
-  -> Android
-```
-
-What does not change:
-
-- Android still reads mail from the `user mailbox`
-- Android 仍以 mail 作为默认 send path；只有显式 provision 的 direct surface 才走 `/relay`
-- reply routing still depends on normal mail headers plus the current capsule rules
-- task execution truth still stays on the PC
-
-## 3. What Android Must Implement
-
-### 3.1 Read Path
-
-Android should implement a normal task-mail consumer on top of the `user mailbox`.
-
-Minimum requirements:
-
-- read `multipart/alternative` mail containing `text/plain` and `text/html`
-- prefer `text/html` for reading when present
-- when HTML is present, treat `article.task-mail` as the semantic body root
-- keep `text/plain` as the reply/parsing truth source
-- preserve normal mail metadata:
-  - `Message-ID`
-  - `In-Reply-To`
-  - `References`
-  - `Subject`
-  - `From`
-  - `To`
-  - `Date`
-- parse current task-mail facts from the received mail:
-  - visible status tag such as `[RUNNING]`, `[DONE]`, `[QUESTION]`
-  - `[S:<session_id>]` when present in subject
-  - structured run-result block
-  - state capsule
-  - question capsule set
-  - attachment list and inline preview mapping
-
-Android should treat the current outbound body contract as frozen by:
-
-- `docs/current/pc_mail_output_protocol.md`
-- `docs/current/multi_question_protocol.md`
-- `docs/current/multimedia_mail_protocol.md`
-
-Current optional direct-detail sidecar note:
-
-- if the relay operator provisions the current Phase 3 direct inbound wire and Android is explicitly provisioned for it, Android may subscribe the currently opened active session detail on `/relay`
-- this sidecar is only for detail freshness; mail remains the receipt, artifact, attachment, and history truth source
-- Android must continue to keep the mail/local-cache read path as the fallback when the sidecar is unavailable, rejected, or gapped
-
-### 3.2 Send Path
-
-Android remains mail-first. The default send path is plain RFC-compatible mail; the only current direct-relay exceptions are the first-slice `new_task` ingress, the bootstrap `[SYNC]` direct v1/v2 slices, the shared `/control` bootstrap v2 slice, the current-session direct `/status` / plain `reply` slice, and the current active-session-detail read sidecar when the relay operator explicitly enables them.
-
-Four current send modes exist.
-
-#### A. New task creation
-
-Use the current first-mail protocol:
-
-- subject prefix: `[OC]` or `[CX]`
-- required body fields:
-  - `Repo:`
-  - `Task:`
-- optional body fields:
-  - `Workdir:`
-  - `Timeout:`
-  - `Mode:`
-  - `Profile:`
-- `Permission:`
-- `Acceptance:`
-
-If the optional direct Phase 2 v1 ingress is used, Android must still compile to these same first-mail semantics. The relay currently accepts only the shared `phase2-direct-outbound-contract-v1` `new_task` packet shape and bridges it back into this existing first-mail path.
-
-Current `dispatch_metadata.fallback_policy` note for this `new_task` packet:
-
-- `mail` remains accepted as the legacy-compatible value
-- `none` is also accepted as the current no-legacy direct-only declaration
-- for this Phase 2 v1 slice, accepting `none` does not by itself change server-side runtime, canonical mail, or error-taxonomy behavior; it only removes the old parser-level hard rejection
-
-#### B. Continue or control an existing session
-
-Android must send a real reply mail that preserves:
-
-- `In-Reply-To`
-- `References`
-- original thread subject
-
-If the subject already contains `[S:<session_id>]`, keep it unchanged.
-
-#### C. Bootstrap project-folder sync
-
-Use the current canonical `[SYNC]` first-mail semantics:
-
-- subject: `[SYNC]`
-- body may be empty
-- no `In-Reply-To` / `References` required
-- no task/thread/session is created
-
-If the optional direct bootstrap ingress is used, Android must select the packet shape according to the provisioned relay capability:
-
-- `taskmail-bootstrap-control-contract-v1`
-- bridge-to-mail only
-- `packet_ack.accepted=true` means the relay successfully injected canonical `[SYNC]` mail into the bot mailbox ingress
-- it does not mean Android already has the final `[SYNC] Project Folder List`
-- Android must continue reading the final result from the mailbox, not from a relay-native result frame
-
-- `taskmail-bootstrap-control-contract-v2`
-- only valid when the relay is provisioned with local PC truth for project-folder sync
-- `packet_ack.accepted=true` means the direct result is already materialized or durably cached for replay
-- Android must then wait for the direct `bootstrap_result`
-- accepted v2 path does not create an additional `[SYNC] Project Folder List` mail
-- after `accepted=true`, Android must reconnect/replay the same `packet_id` / `request_id` before considering any fallback
-
-Current shared `/control` note:
-
-- `/control` is on the same relay host/port as `/relay`
-- `/control` and `/v1/files` reuse the same `Authorization: Bearer <transport_token>` path
-- `POST /v1/android/create-session` stays on the same host/port, but it uses a separate `Authorization: Bearer <android_app_token>` path
-- Android must still start with `hello` and wait for `hello_ack`
-- Android should read `accepted_payload_schemas` from `hello_ack`; the current slice may advertise:
-  - `post-creation-session-action-contract-v1`
-  - `taskmail-bootstrap-control-contract-v2`
-  - `taskmail-transport-probe-payload-v1`
-- current bootstrap `/control` business flow is `command(sync_project_folders) -> command_ack -> result(sync_project_folders_result)`
-- current current-session `/control` business flow is `command(status|reply) -> command_ack -> result(session_action_result)`
-- current `transport_probe` `/control` business flow is `command(transport_probe) -> command_ack -> event* -> result(transport_probe_result)`
-- current `session_action_result` means:
-  - the relay has already materialized durable accepted/result replay authority for this bridge action
-  - `payload.session_action_result.result_scope = mail_ingress_submission`
-  - `payload.session_action_result.session_action_closeout` carries the current closeout anchors such as `action_type` / `target_session_identity` / `request_id` / `ingress_message_id` / `last_summary` / `terminal_mail_subject`
-  - Android must still read the final business outcome from the normal mail chain
-- current `transport_probe` is harness/debug only; Android must not treat it as a user-facing control primitive
-- when `transport_probe_result.status=completed` and `outcome=observed`, the relay has already read a matching PC mailbox observation from `tasks/_mailbox/transport_probes/<probe_id>.json`
-- when `status=partial`, Android should read `outcome=submitted|timed_out` plus `payload.observation` as operator diagnostics rather than as business success
-- the PC host still writes the mailbox observation sidecar under `tasks/_mailbox/transport_probes/<probe_id>.json`; relay-side projection now reuses that same evidence instead of inventing a second proof surface
-- after `command_ack.accepted=true`, reconnect/replay must reuse the same `packet_id` / `request_id`
-- current `/control` does not replace `/relay` for `new_task` or Phase 3 detail subscribe, and it still does not replace mail as the final outcome truth for current-session direct `/status` / `reply`
-
-- for both v1 and v2, relay-level retry must reuse the same `packet_id` / `request_id`; only a fresh user tap creates a new pair
-
-#### D. Current-session direct relay/control actions
-
-When the relay operator enables the current post-creation slice, Android may submit a narrow current-session direct packet over `/relay`; when the shared `/control` session-action slice is also provisioned, Android may submit the same business action over `/control`.
-
-Current scope:
-
-- schema: `post-creation-session-action-contract-v1`
-- target scope: `current_session` only
-- current supported actions:
-  - `status`
-  - `reply`
-
-Current target identity:
-
+- `pc_id`
 - `workspace_id`
-- `session_id`
-- optional `thread_id`
+- `prompt`
+- `execution_policy`
 
-Current `dispatch_metadata.fallback_policy` note for this post-creation packet:
+当前可选字段：
 
-- `mail` remains accepted as the legacy-compatible value
-- `none` is also accepted as the current no-legacy direct-only declaration
-- for this current-session `status|reply` slice, accepting `none` does not by itself change server-side bridge runtime, closeout mail, canonical mail, or error-taxonomy behavior; it only removes the old parser-level hard rejection
-
-Current `status` rules:
-
-- semantic equivalent is canonical mail `/status`
-- `task_run_packet.status` must be an empty object in `v1`
-- accepted packet means the bridge mail was accepted; Android should still read the user-visible result from the normal status mail chain
-- on `/control`, accepted `status` currently continues as `command_ack -> result(session_action_result)`; that result only confirms `mail_ingress_submission` plus current closeout anchors
-
-Current plain `reply` rules:
-
-- semantic equivalent is canonical plain continuation reply
-- only plain natural-language continuation is supported in `v1`
-- Android must not send:
-  - slash-command reply text
-  - structured question answers
-  - attachments
-- if the target session is `paused` or `awaiting_user_input`, Android should stay on the current mail path instead of trying to force direct plain `reply`
-- on `/control`, accepted plain `reply` currently continues as `command_ack -> result(session_action_result)`; that result is still bridge-to-mail, not the terminal business reply result
-
-Current result reading:
-
-- accepted packet is not the final business result
-- current-session direct `/status` and plain `reply` still resolve to normal mail-visible status or terminal outcomes on the target thread/session chain
-- `session_action_result` should be read as accepted/result continuity plus closeout-anchor projection, not as a replacement for the eventual mail-visible outcome
-
-For reply body serialization:
-
-- `text/plain` is required
-- `text/html` may exist as a compose mirror, but it is not required for correctness
-- the first non-empty line must be the command if the action is command-based
-- do not rely on HTML-only structure to carry machine meaning
-
-Current command set Android should support emitting:
-
-- `/pause`
-- `/pause <session_id>`
-- `/continue <session_id>`
-- `/resume`
-- `/resume <session_id>`
-- `/end`
-- `/end <session_id>`
-- `/restart-runner`
-- `/new`
-- `/sessions`
-- `/status`
-- `/status <session_id>`
-- `/last <session_id>`
-- `/rerun`
-- `/kill`
-- `/kill <session_id>`
-
-More precise reply rules remain defined by:
-
-- `docs/current/android_reply_method_rules.md`
-- `docs/current/mail_protocol.md`
-
-### 3.3 Waiting-State Rules
-
-Android must be state-aware when composing a reply.
-
-If the thread is in `awaiting_user_input`:
-
-- single-question flow may send natural-language answer text
-- multi-question flow must send structured answers in the current capsule-defined format
-
-If the thread is `paused`:
-
-- Android must not send an implicit normal continuation
-- the first non-empty line must be `/resume`
-- if pending questions still exist, answers must follow the current resume rules after `/resume`
-
-### 3.4 Attachments And Inline Previews
-
-Android should implement the current mail attachment contract rather than invent relay-specific handling.
-
-Minimum behavior:
-
-- show normal attachments
-- resolve inline previews through `cid:` and MIME `Content-ID`
-- keep attachment handling compatible with the current `Artifacts` and `Attachment Notices` sections
-- allow plain attachment-only reply when the user is sending supplemental files
-
-## 4. What Relay Changes And What It Does Not Change
-
-Relay changes the transport path, not the Android protocol.
-
-### 4.1 What Changes
-
-- the user-facing status mail may now be sent by VPS SMTP instead of directly by the PC
-- the final delivered `Message-ID` is the VPS-delivered mail's `Message-ID`
-- the relay may now also accept a first-slice direct Android `new_task` packet and bridge it into the current bot-mailbox ingress path when explicitly configured
-- the relay may now also accept a bootstrap direct Android `sync_project_folders` packet
-- bootstrap `sync_project_folders` may run in bridge-to-mail v1 mode or in direct-result v2 mode when the relay has local PC truth available
-- the relay may now also expose a narrow shared `/control` websocket slice for bootstrap `sync_project_folders v2` and relay-side `transport_probe`
-- the relay may now also accept a narrow current-session direct `/status` and plain `reply` slice when explicitly provisioned
-- the relay may now also accept a narrow Phase 3 direct active-session-detail subscribe path and push `session_update` messages when explicitly provisioned
-- oversized outgoing artifacts may now be hosted on the relay file surface and appear to Android as relay-hosted external delivery URLs
-- VPS now persists:
-  - relay packet history
-  - delivery attempts
-  - relay session continuity
-
-### 4.2 What Does Not Change
-
-- status subject tags
-- `text/plain` and `text/html` body contract
-- state capsule and question capsule shapes
-- attachment and inline preview semantics
-- Android reply method
-- current slash-command syntax
-- task execution location
-- 绝大多数 reply/control action 在 task creation 后仍保持 mail-first；当前 direct 例外只限 current-session `/status` 与 plain `reply`
-
-The correct Android behavior is therefore:
-
-- treat relay-delivered mail exactly like direct-email-delivered mail
-- reply to the received mail normally
-- anchor continuity on the received `Message-ID`, `In-Reply-To`, and `References`
-
-## 5. What Android Must Not Do
-
-In the current phase, Android must not:
-
-- connect to the relay `/relay` WebSocket directly as the main or general-purpose app protocol
-- treat `/control` as a general-purpose or primary Android protocol
-- store or use a general-purpose relay transport token outside the narrow, operator-provisioned TaskMail direct scopes
-- treat `/healthz` or `/readyz` as app-facing business APIs
-- log into the `bot mailbox` from the Android client
-- infer session continuation only from title similarity
-- rewrite or partially edit quoted `state capsule` / `question capsules`
-- depend on relay-specific SMTP trace headers or `Received:` chain details
-- use direct relay packets for `/pause`, `/resume`, `/end`, `/kill`, `/last`, `/sessions`, structured question answers, attachment-bearing post-creation actions, or any non-`current_session` direct target
-
-## 6. Current Boundary For Future VPS APIs
-
-The current deployed VPS relay is still **not a general Android application API**.
-
-Current deployed relay-facing endpoints are operator/transport endpoints only:
-
-- `/relay`
-- `/control`
-- `/v1/files`
-- `/healthz`
-- `/readyz`
-
-Current Android-facing direct support is limited to several narrow slices plus one relay-hosted external-delivery surface:
-
-- first-scope `new_task` over the shared `phase2-direct-outbound-contract-v1` packet shape
-- only when the relay operator enables TaskMail direct ingress
-- bridge-to-mail semantics on the server side
-- bootstrap `sync_project_folders` over the shared `taskmail-bootstrap-control-contract-v1` or `taskmail-bootstrap-control-contract-v2` packet shape
-- only when the relay operator enables TaskMail direct ingress
-- v1 keeps bridge-to-mail semantics; final `[SYNC]` result is still mailbox-read
-- v2 returns `packet_ack + bootstrap_result` directly when the relay has local PC truth; it still does not create task/thread/session
-- shared `/control` bootstrap `sync_project_folders v2`
-- only when the relay operator provisions the current `/control` slice
-- current bootstrap flow is `hello -> hello_ack -> command -> command_ack -> result`
-- relay-side `/control transport_probe`
-- only for operator/debug harness use, not as a normal end-user action
-- current flow is `hello -> hello_ack -> command -> command_ack -> event* -> result`
-- current accepted payload set is runtime-dependent; bootstrap clients must still gate on `taskmail-bootstrap-control-contract-v2`, and probe clients must still gate on `taskmail-transport-probe-payload-v1`
-- current-session direct `/status` and plain `reply` over `post-creation-session-action-contract-v1`
-- only when the relay operator enables the current post-creation slice
-- this slice is bridge-to-mail only; accepted packets still resolve to canonical status/terminal mail, not a new direct terminal-result API
-- active-session-detail subscribe over the shared `phase3-direct-inbound-wire-v1` wire
-- only when the relay operator provisions the current direct detail sidecar
-- direct detail is read-side only; it is not a direct session history or control API
-- relay-hosted oversized artifact delivery via `/v1/files`
-- Android may consume those links as external delivery URLs, but `/v1/files` is not a general Android-side control or session API
-
-That means:
-
-- Android can rely on relay being present as infrastructure
-- Android cannot yet rely on a separate current API for:
-  - listing VPS-side sessions
-  - reading VPS-side packet history
-  - resuming work by talking directly to VPS instead of mail
-  - direct Android-side send/receive over relay instead of mail, except for the narrow `new_task` ingress, the narrow bootstrap `[SYNC]` v1/v2 slice, the narrow shared `/control` bootstrap v2 slice, the narrow `/control transport_probe` harness slice, the narrow current-session direct `/status` / plain `reply` slice, and the narrow active-session-detail read sidecar above
-
-If Android later needs direct session/history APIs from VPS, that must be introduced as a new documented protocol, not inferred from the current relay deployment.
-
-## 7. Recommended Android Module Split
-
-To stay compatible with the current repository, Android should split implementation into five layers:
-
-1. `mail ingress`
-   - reads task mail from the `user mailbox`
-2. `task mail parser`
-   - parses status tags, capsules, attachments, and reply metadata
-3. `local repository`
-   - caches normalized thread/session message facts for incremental refresh
-4. `reply composer`
-   - serializes new task mail, reply mail, commands, and structured answers
-5. `task UI`
-   - renders HTML/plain-text projections and drives state-aware reply actions
-
-Recommended local normalized fields:
-
-- `messageId`
-- `inReplyTo`
-- `references`
-- `subject`
-- `statusTag`
-- `sessionId`
-- `threadId` when recoverable from capsule
-- `taskId` when recoverable from capsule
-- `plainBody`
-- `htmlBody`
-- `runResult`
-- `stateCapsule`
-- `questionCapsules`
+- `canonical_reply_recipient`
+- `mode`
+- `timeout_seconds`
+- `acceptance`
 - `attachments`
-- `receivedAt`
+- `repo_path`
+- `workdir`
+- `source`
 
-## 8. Minimum Android Test Matrix
+当前事实：
 
-Before the Android side claims it can communicate with the current system, it should verify at least:
+- `canonical_reply_recipient` 已降为可选字段，不再是 Android 主链前置依赖
+- create-session 仍会把已提供的 `canonical_reply_recipient` 写入新 thread state；未提供时则保持为空
+- 成功返回 `command_id + submit_ack`
+- 当 `submit_ack.ack_status = accepted | accepted_but_queued` 时，同窗口还返回 `session_binding(session_id/pc_id/workspace_id)`
 
-1. new task mail creation with `[OC]` and `[CX]`
-2. normal reply continuation on a received status mail
-3. targeted `/continue <session_id>` and `/status <session_id>`
-4. single-question answer flow
-5. multi-question structured answer flow
-6. `/resume` flow from `paused`
-7. `DONE` mail with attachments and inline previews
-8. same user-visible behavior when PC uses:
-   - direct `email`
-   - `relay`
-9. optional Phase 2 v1 direct `new_task` ingress when the relay operator enables it
-10. optional Phase 3 v1 direct active-session-detail subscribe, including `packet_ack -> session_snapshot` and mail/local-cache fallback on reject or gap
+当前 facade-facing rejected `submit_ack.error_code` 固定收敛为：
 
-The last item is important: Android should observe that transport cutover does not require an Android protocol rewrite.
+- `unsupported_backend`
+- `unsupported_profile`
+- `unsupported_permission`
+- `profile_model_unresolved`
+- `workspace_unavailable`
+- `pc_offline`
 
-## 9. References
+## 4. Session Action
 
-- `docs/current/mail_protocol.md`
-- `docs/current/android_reply_method_rules.md`
-- `docs/current/pc_mail_output_protocol.md`
-- `docs/current/multi_question_protocol.md`
-- `docs/current/multimedia_mail_protocol.md`
-- `docs/plans/android_consumer_acceptance_requirements.md`
-- `docs/platform/relay_transport_protocol_draft.md`
+`POST /v1/android/session-action` 当前是 Android current-session action 的唯一正式入口。
+
+当前 action family 已一次收口到：
+
+- `reply`
+- `status`
+- `pause`
+- `resume`
+- `kill`
+- `end`
+- `answers`
+- `attachment_continuation`
+
+当前 locator 最小要求：
+
+- `target.session_id`
+
+当前 supporting locator / 一致性校验字段：
+
+- `target.workspace_id`
+- `target.thread_id`
+
+当前固定 body 规则：
+
+- `pause` / `resume` / `kill` / `end` 使用空 object body
+- `answers` 使用 `answers.question_answers[]`
+- `attachment_continuation` 使用 `attachment_continuation.attachments[]`，并支持可选 `attachment_continuation.reply_text`
+
+当前 session-action mainline 已切到 relay-native runtime execution：
+
+- 不再桥接到 bot mailbox ingress
+- 不再依赖 `canonical_reply_recipient`
+- 不再依赖历史 inbound mail recovery
+- `session_action_result` 现在表达 authoritative runtime result，而不是 `mail_ingress_submission`
+
+当前 `session_action_result` 关键字段固定为：
+
+- `result_scope = runtime_execution`
+- `canonical_outcome_via = relay_runtime`
+- `execution_status`
+- `state_changed`
+- `summary`
+- `thread_status`
+- `lifecycle`
+- `current_task_id`
+- `queued_task_id`
+- `pending_question_ids`
+- `run_result`
+- `session_action_closeout`
+
+## 5. Idempotency
+
+当前 app-facing idempotency seam 固定收敛在 `session-action.request_id`：
+
+- 同一 canonical payload 的 same-`request_id` replay 复用同一 submit response，并返回 `HTTP 200`
+- 同一 `request_id` 命中不同 canonical payload 固定返回 `HTTP 409 request_id_conflict`
+
+当前这条规则适用于整个已收口 action family：
+
+- `reply/status/pause/resume/kill/end/answers/attachment_continuation`
+
+## 6. 错误面
+
+### 6.1 create-session rejected submit_ack
+
+固定错误码：
+
+- `unsupported_backend`
+- `unsupported_profile`
+- `unsupported_permission`
+- `profile_model_unresolved`
+- `workspace_unavailable`
+- `pc_offline`
+
+### 6.2 session-action rejected submit_ack
+
+固定错误码：
+
+- `direct_temporarily_unavailable`
+- `invalid_command_payload`
+- `pc_offline`
+- `session_binding_unresolved`
+- `session_identity_mismatch`
+- `unsupported_backend`
+- `unsupported_permission`
+- `unsupported_profile`
+- `validation_failed`
+- `workspace_unavailable`
+
+当前 `session_recipient_unresolved` 已退出 Android 主链 contract。
+
+### 6.3 facade request / locator errors
+
+当前常见 HTTP 错误包括：
+
+- `400 invalid_json`
+- `400 invalid_payload`
+- `401 unauthorized`
+- `404 session_not_found`
+- `409 request_id_conflict`
+- `409 session_binding_unresolved`
+- `409 workspace_identity_mismatch`
+- `503 pc_control_unavailable`
+- `503 task_root_unavailable`
+- `504 submit_ack_timeout`
+
+## 7. Attachment Direct Contract
+
+当前 Android app-facing inline attachment contract 固定为对象数组，不走 mail attachment ingress。
+
+create-session `attachments[]` 与 `attachment_continuation.attachments[]` 的单项字段固定为：
+
+- `name`
+- `content_type`
+- `content_bytes_b64`
+- `size_bytes`（可选）
+
+当前 `attachment_continuation` 的业务语义是：
+
+- 服务器先把 inline attachment 物化到目标 workdir
+- 然后直接进入 relay-native runtime continuation / answer execution
+- 不再通过 attachment-bearing reply mail 做桥接
+
+## 8. Authoritative Read Surface
+
+当前 Android authoritative read surface 固定为三条：
+
+- `GET /v1/android/session-snapshot`
+- `GET /v1/android/session-history`
+- `WS /v1/android/session-updates`
+
+它们统一读取 relay-native projection store 中的 durable truth，并补充 `pc_control` ledger continuity。
+
+其中：
+
+- `session-snapshot` 面向 detail 当前态
+- `session-history` 面向 durable history rounds
+- `session-updates` 面向当前 detail 页的实时刷新
+
+当前 detail 恢复语义固定为：
+
+- Android 打开 detail 或回到前台时，连接 `WS /v1/android/session-updates`
+- 连接成功后先消费一帧完整 snapshot
+- 若连接断开、应用切后台后恢复，或客户端怀疑漏掉 push：
+  - 重新连接 `session-updates`
+  - 必要时调用 `GET /v1/android/session-snapshot` 做当前态补偿
+- 这条 lane 当前不设计“客户端 ACK 后服务端停止 push”的协议
+- 这条 lane 不再依赖 relay-visible `task_root` 镜像或 `sync companion`
+
+## 9. vps_only 当前事实
+
+在 `control_plane_mode=vps_only` 下，当前 Android 主链事实是：
+
+- create-session 仍可创建 live session
+- current-session action family 可完整工作
+- snapshot / history / updates 可读 authoritative projection truth
+- bot mailbox ingress 关闭时，Android 主链仍可完成 live smoke
+
+## 10. 非目标
+
+本文不再把以下路径视为 Android 主链：
+
+- Android 业务 reply mail send path
+- Android 业务 reply mail receive/wait path
+- `/relay subscribe_session_detail`
+- `/relay` 通用 WebSocket 协议
+- `/control` 通用 WebSocket 协议
+- `canonical_reply_recipient` / inbound raw mail recovery 作为 current-session 主链依赖

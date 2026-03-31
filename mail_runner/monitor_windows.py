@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -13,8 +14,10 @@ from typing import Callable
 from .models import RunResult, TaskSnapshot, ThreadState
 
 LOGGER = logging.getLogger(__name__)
-CREATE_NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+# The controller only coordinates the visible worker window and should not open its own console.
+HIDDEN_CONTROLLER_CREATIONFLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _WINDOW_STATE_DIRNAME = "active_session_window_state"
+_WINDOW_STATE_PARSE_GRACE_SECONDS = 5.0
 ActiveSessionWindowLauncher = Callable[[list[str], int, Path], object]
 MonitorLauncher = ActiveSessionWindowLauncher
 
@@ -27,6 +30,12 @@ if os.name == "nt":
 class _PersistedWindowState:
     controller_pid: int | None = None
     worker_pid: int | None = None
+
+
+@dataclass(slots=True)
+class _PersistedWindowStateLoadResult:
+    state: _PersistedWindowState | None = None
+    keep_for_retry: bool = False
 
 
 def _default_launcher(command: list[str], creationflags: int, cwd: Path) -> object:
@@ -85,20 +94,32 @@ def _pid_is_alive(pid: int | None) -> bool:
     return True
 
 
-def _load_persisted_window_state(path: Path) -> _PersistedWindowState | None:
+def _should_keep_retrying_parse(path: Path) -> bool:
+    try:
+        age_seconds = time.time() - path.stat().st_mtime
+    except OSError:
+        return False
+    return age_seconds < _WINDOW_STATE_PARSE_GRACE_SECONDS
+
+
+def _load_persisted_window_state(path: Path) -> _PersistedWindowStateLoadResult:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return None
+        return _PersistedWindowStateLoadResult()
     except Exception:
+        if _should_keep_retrying_parse(path):
+            return _PersistedWindowStateLoadResult(keep_for_retry=True)
         LOGGER.warning("Unable to parse active-session window state: %s", path)
-        return None
+        return _PersistedWindowStateLoadResult()
     if not isinstance(payload, dict):
         LOGGER.warning("Ignoring non-object active-session window state: %s", path)
-        return None
-    return _PersistedWindowState(
-        controller_pid=_optional_int(payload.get("controller_pid")),
-        worker_pid=_optional_int(payload.get("worker_pid")),
+        return _PersistedWindowStateLoadResult()
+    return _PersistedWindowStateLoadResult(
+        state=_PersistedWindowState(
+            controller_pid=_optional_int(payload.get("controller_pid")),
+            worker_pid=_optional_int(payload.get("worker_pid")),
+        )
     )
 
 
@@ -155,7 +176,11 @@ class ActiveSessionWindowManager:
             return
         command = self._build_command(thread_id)
         try:
-            self._windows[thread_id] = self._launcher(command, CREATE_NEW_CONSOLE, self.project_root)
+            self._windows[thread_id] = self._launcher(
+                command,
+                HIDDEN_CONTROLLER_CREATIONFLAGS,
+                self.project_root,
+            )
         except Exception:
             LOGGER.exception("Unable to open active-session window for thread %s", thread_id)
 
@@ -178,7 +203,10 @@ class ActiveSessionWindowManager:
         return state_dir / f"{thread_id}.window.json"
 
     def _persisted_window_state_is_alive(self, state_path: Path) -> bool:
-        state = _load_persisted_window_state(state_path)
+        load_result = _load_persisted_window_state(state_path)
+        if load_result.keep_for_retry:
+            return True
+        state = load_result.state
         if state is None:
             state_path.unlink(missing_ok=True)
             return False

@@ -236,7 +236,7 @@ def test_android_session_action_requires_dedicated_android_app_token(tmp_path) -
         thread.join(timeout=5)
 
 
-def test_android_session_action_rejects_missing_recipient_binding_with_fixed_error_code(tmp_path) -> None:
+def test_android_session_action_accepts_missing_recipient_binding(tmp_path) -> None:
     async def _run() -> None:
         task_root = tmp_path / "tasks"
         thread_state = _create_existing_thread(task_root)
@@ -316,9 +316,9 @@ def test_android_session_action_rejects_missing_recipient_binding_with_fixed_err
             payload = response.json()
 
             assert response.status_code == 200
-            assert payload["status"] == "rejected"
-            assert payload["submit_ack"]["ack_status"] == "rejected"
-            assert payload["submit_ack"]["error_code"] == "session_recipient_unresolved"
+            assert payload["status"] == "accepted"
+            assert payload["submit_ack"]["ack_status"] == "accepted"
+            assert payload["submit_ack"]["error_code"] is None
         finally:
             if client is not None:
                 client.stop()

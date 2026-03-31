@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 from mail_runner.adapters.mock_adapter import MockAdapter
 from mail_runner.dispatcher import Dispatcher
-from mail_runner.models import TaskSnapshot
+from mail_runner.models import RunResult, TaskSnapshot
 from mail_runner.runner import SerialTaskRunner, main
 from mail_runner.status import (
     BACKEND_CODEX,
@@ -33,6 +34,38 @@ class RecordingMonitorWindowManager:
 
     def on_run_finished(self, state, result) -> None:
         self.finished.append((state.thread_id, result.task_id, result.status))
+
+
+class ArtifactWritingAdapter:
+    def run(self, task: TaskSnapshot, run_dir: str) -> RunResult:
+        run_path = Path(run_dir)
+        run_path.mkdir(parents=True, exist_ok=True)
+        artifacts_dir = run_path / "artifacts"
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        (artifacts_dir / "preview.png").write_bytes(b"png")
+        (run_path / "stdout.log").write_text("", encoding="utf-8")
+        (run_path / "stderr.log").write_text("", encoding="utf-8")
+        (run_path / "summary.md").write_text("Artifact run completed.\n", encoding="utf-8")
+        thread_dir = run_path.parent.parent
+        return RunResult(
+            task_id=task.task_id,
+            thread_id=task.thread_id,
+            backend=task.backend,
+            status=RUN_STATUS_SUCCESS,
+            exit_code=0,
+            started_at="2026-03-30T09:00:00",
+            finished_at="2026-03-30T09:00:01",
+            stdout_file=(run_path / "stdout.log").relative_to(thread_dir).as_posix(),
+            stderr_file=(run_path / "stderr.log").relative_to(thread_dir).as_posix(),
+            summary_file=(run_path / "summary.md").relative_to(thread_dir).as_posix(),
+            artifacts_dir=f"runs/{task.task_id}/artifacts",
+            changed_files=[],
+            tests_passed=True,
+            backend_transport=task.backend_transport,
+        )
+
+    def kill(self, task_id: str) -> bool:
+        return False
 
 
 def _seed_payload() -> dict:
@@ -86,6 +119,23 @@ def test_serial_task_runner_happy_path(tmp_path) -> None:
     assert state["history_files"] == [f"runs/{result.task_id}/result.json"]
     assert (thread_dir / "snapshots" / f"{result.task_id}.json").exists()
     assert (thread_dir / "runs" / result.task_id / "result.json").exists()
+
+
+def test_serial_task_runner_persists_artifact_index_for_finished_runs(tmp_path) -> None:
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    task_root = tmp_path / "tasks"
+    runner = SerialTaskRunner(task_root, Dispatcher(ArtifactWritingAdapter(), ArtifactWritingAdapter()))
+    snapshot = _snapshot("task_artifact", "thread_artifact", repo_path=str(repo_dir), workdir=None)
+
+    result = runner.run_task_snapshot(snapshot)
+
+    artifact_index_path = task_root / snapshot.thread_id / "runs" / snapshot.task_id / "artifacts" / "artifact_index.json"
+    assert artifact_index_path.exists()
+    payload = json.loads(artifact_index_path.read_text(encoding="utf-8"))
+    assert payload["task_id"] == result.task_id
+    assert payload["artifacts_root"] == f"runs/{snapshot.task_id}/artifacts"
+    assert [item["name"] for item in payload["items"]] == ["preview.png"]
 
 
 def test_runner_main_returns_zero_for_success(tmp_path, monkeypatch) -> None:

@@ -350,6 +350,15 @@ def send_status_update(
             result=result,
             task_root=task_root,
         )
+        if result is not None and pc_control_client is not None and hasattr(pc_control_client, "publish_thread_projection"):
+            try:
+                pc_control_client.publish_thread_projection(
+                    state=state,
+                    task_snapshot=task_snapshot,
+                    result=result,
+                )
+            except Exception:
+                LOGGER.exception("Unable to publish finished session projection. thread=%s", state.thread_id)
         effective_notices = [*skipped_attachments, *delivery_notices]
         rendered_mail = render_status_mail(
             status_label=status_label,
@@ -450,6 +459,23 @@ def send_status_update(
                     summary_path=summary_path,
                     pc_control_client=pc_control_client,
                 )
+                if pc_control_client is not None and hasattr(pc_control_client, "publish_session_closeout"):
+                    try:
+                        summary_payload = json.loads(summary_path.read_text(encoding="utf-8"))
+                        if isinstance(summary_payload, dict):
+                            pc_control_client.publish_session_closeout(
+                                state=state,
+                                closeout={
+                                    "closeout_key": (
+                                        f"canonical:{str(summary_payload.get('request_id') or '').strip()}"
+                                        if str(summary_payload.get("request_id") or "").strip()
+                                        else f"canonical:{state.thread_id}:{result.task_id}"
+                                    ),
+                                    **summary_payload,
+                                },
+                            )
+                    except Exception:
+                        LOGGER.exception("Unable to publish session closeout projection. thread=%s", state.thread_id)
             except Exception:
                 LOGGER.exception("Unable to write canonical run summary for thread %s", state.thread_id)
         return sent_message_id

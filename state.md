@@ -2,7 +2,7 @@
 
 ## Current Snapshot
 
-- Updated At: 2026-03-27
+- Updated At: 2026-03-31
 - Current Runtime Stage: mail-first runtime active / post-Phase-8 direct compatibility line maintained
 - Current Planning Mainline: `VPS-first multi-PC control plane`
 - Status: Active
@@ -14,6 +14,8 @@
 - Latest Recorded Full-Suite Validation: `2026-03-24` -> `452 passed`
 - Note: `2026-03-24` 已为 shared `/control` current-session session-action 扩展补跑 `.\.venv\Scripts\python.exe -m pytest`，结果 `452 passed`
 - Note: `2026-03-24` 已在 `mail_config.bot.relay.local.yaml + _tmp_live_mail_runner` 这组 relay-enabled host 上，完成 Android 真机 `thread_023` fresh-session smoke；后续 current-session plain direct `reply` 与 current-session direct `/status` 两条样本都已收齐 Android retained send record、`session_action_closeout.json`、canonical mail 与 closeout bundle，且两条 bundle 的 `same_run_bind.effective_bind_level` 都稳定为 `request_id`
+- Note: `2026-03-30` 已补跑 `Codex` `sdk-first` 权限反向链路：`.\.venv\Scripts\python.exe .\scripts\sdk_permission_smoke.py --backend codex --initial-permission default --reset-permission highest --run-name codex-sdk-permission-smoke-20260330_default_to_highest` 结果 `success`，三轮 `backend_session_id` 一致，`initial/inherit` 的 `sandbox_mode=workspace-write`，最终 `highest` 轮切到 `danger-full-access`，`approval_policy` 三轮都为 `never`；结果路径：`_tmp_sdk_permission_smoke/codex-sdk-permission-smoke-20260330_default_to_highest/smoke_result.json`。同次真实邮箱补跑 `.\.venv\Scripts\python.exe .\scripts\live_smoke_mail_permission.py --config .\_tmp_live_mail_runner\mail_config.loop_30s.yaml --sender-config .\mail_config.local.yaml --backend codex --initial-permission default --reset-permission highest --run-name codex-permission-20260330_default_to_highest` 在 `900s` 内未等到 terminal status mail，结果路径：`_tmp_live_mail_permission_smoke/codex-permission-20260330_default_to_highest/result.json`；当前不要把 reverse-direction real-mailbox smoke 读成已闭环
+- Note: `2026-03-31` 已把 relay artifact owner lane 进一步收口到真正主线：`outbound_transport=relay` 下，attachable run artifact 现在统一 externalize 到 relay `/v1/files`，不再按 `external_delivery_threshold_mb` 继续走 MIME 附件，也不再因 oversize / `external_delivery_backend_preference=auto|cos` 回退到 `COS`。对应定向回归：`.\.venv\Scripts\python.exe -m pytest tests/test_external_delivery.py tests/test_artifact_contract_smoke.py tests/test_file_surface_consumer_smoke.py`，结果 `14 passed`
 - Note: `2026-03-25` 已在 repo-side 把 `VPS-first` Phase 1 推进到 Slice H first-pass：`pc_hello / hello_ack`、`workspace_snapshot`、`execution_policy`、`command_dispatch -> command_ack -> event -> output_chunk -> result -> artifact_manifest`、`unsupported_backend` 显式拒绝、`connection_epoch` fencing、`event_id/result_id` 去重、`effective_execution` 回填
 - Note: `2026-03-25` 已补跑定向回归 `.\.venv\Scripts\python.exe -m pytest tests/test_relay_server_pc_control_protocol.py tests/test_relay_server_pc_command_store.py tests/test_relay_server_pc_control_runtime.py tests/test_pc_control_plane_client.py tests/test_pc_control_plane_projection.py`，结果 `28 passed`
 - Note: `2026-03-25` 已补跑 PC control-plane fixture smoke，并把 `artifact_manifest` 从 synthetic payload 切到真实 `artifact_index.json + artifact_file_binding_index.json` truth-projection；结果路径：`_tmp_pc_control_plane_fixture_smoke/pc-control-plane-fixture-smoke-20260325_truth_projection/smoke_result.json`
@@ -55,16 +57,16 @@
   - current-session direct `/status`
   - current-session plain direct `reply`
   - active-session detail read sidecar
-  - relay `/v1/files` oversized-artifact file surface
+  - relay `/v1/files` artifact file surface
 - current-session direct `/status` 与 plain `reply` 当前仍是 bridge-to-mail，不是新的 direct terminal-result API
 - `/control` 当前会返回三类 direct result frame：
   - bootstrap `[SYNC]` `v2` 的 `bootstrap_result`
   - current-session direct `/status` / plain `reply` 的 `session_action_result`
   - relay-side `transport_probe` 的 `transport_probe_result`
 - 其中 `session_action_result` 当前只表示 `mail_ingress_submission` 与 `session_action_closeout` 锚点快照，不替代最终 canonical mail outcome
-- relay `/v1/files` 当前用于超阈值 artifact 的 relay-hosted external delivery；本地 artifact truth 仍保持在 `RunArtifact` + `artifact_index.json`
-- external delivery 当前支持 `external_delivery_backend_preference=auto|cos|file_surface`；repo-side 默认 owner preference 已切到 `file_surface`，而 `auto` 只保留为显式 legacy `COS`-first 兼容值
-- 成功的 oversized external delivery 当前还会在 `runs/<task_id>/artifacts/external_delivery_index.json` 下落 provider/url/expires_at 级 evidence；若走 relay `/v1/files`，`artifact_file_binding_index.json` 仍继续保留 transport-facing `artifact_id -> file_id` 绑定
+- relay `/v1/files` 当前用于 relay outbound 的 attachable artifact owner lane；本地 artifact truth 仍保持在 `RunArtifact` + `artifact_index.json`
+- relay owner lane 不再按 `external_delivery_threshold_mb`、`external_delivery_backend_preference=auto|cos` 或 oversize 条件回退到 MIME/COS；这些配置当前只应读成非 relay 路径的 legacy 语义
+- 成功的 relay external delivery 当前还会在 `runs/<task_id>/artifacts/external_delivery_index.json` 下落 provider/url/expires_at 级 evidence；若走 relay `/v1/files`，`artifact_file_binding_index.json` 仍继续保留 transport-facing `artifact_id -> file_id` 绑定
 - 每轮 run 当前会落 `runs/<task_id>/canonical_summary.json`
 - current-session direct `/status` 与 plain `reply` 当前会落 `session_actions/<request_id>/session_action_closeout.json`
 - `scripts/build_taskmail_closeout_bundle.py` 当前可组装 `taskmail_daily_closeout_bundle.json`，用于 closeout / parity / bind 证据汇总

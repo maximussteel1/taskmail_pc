@@ -19,6 +19,7 @@ from .adapters.codex_sdk_adapter import CodexSdkAdapter
 from .adapters.opencode_adapter import OpenCodeAdapter
 from .adapters.opencode_routing_adapter import OpenCodeRoutingAdapter
 from .adapters.opencode_sdk_adapter import OpenCodeSdkAdapter
+from .artifact_resolver import resolve_run_artifacts, write_artifact_index
 from .config import AppConfig, load_config
 from .dispatcher import Dispatcher
 from .models import RunResult, TaskSnapshot, ThreadState
@@ -299,6 +300,7 @@ class SerialTaskRunner:
 
             result_path = self.workspace.save_run_result(active.snapshot.thread_id, active.snapshot.task_id, active.result)
             final_state = self._finalize_thread_state(active.state, active.result, result_path)
+            self._persist_artifact_index(final_state, active.result)
             with self._lock:
                 self._active_runs.pop(active.snapshot.task_id, None)
             if active.result.status == RUN_STATUS_AWAITING_USER_INPUT:
@@ -407,6 +409,17 @@ class SerialTaskRunner:
                 queued = self._queued_runs.pop(candidate_index)
             self._start_queued_run(queued)
             started = True
+
+    def _persist_artifact_index(self, state: ThreadState, result: RunResult) -> None:
+        try:
+            artifacts, skipped = resolve_run_artifacts(self.workspace.task_root, state, result)
+            write_artifact_index(self.workspace.task_root, result, artifacts, skipped)
+        except Exception:
+            LOGGER.exception(
+                "Unable to persist artifact_index.json for thread=%s task_id=%s",
+                state.thread_id,
+                result.task_id,
+            )
 
     def next_thread_id(self) -> str:
         return self._next_thread_id()

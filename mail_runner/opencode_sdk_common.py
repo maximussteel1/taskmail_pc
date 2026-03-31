@@ -14,6 +14,12 @@ from opencode_ai import Opencode
 from .adapters.cli_common import WINDOWS, resolve_command_prefix
 
 DEFAULT_HOSTNAME = "127.0.0.1"
+_UNSUITABLE_DEFAULT_MODEL_TOKENS = (
+    "intent-detect",
+    "embedding",
+    "rerank",
+    "moderation",
+)
 
 
 @dataclass(slots=True)
@@ -31,6 +37,46 @@ def pick_free_port(hostname: str = DEFAULT_HOSTNAME) -> int:
         sock.bind((hostname, 0))
         sock.listen(1)
         return int(sock.getsockname()[1])
+
+
+def _provider_name(provider: Any) -> str:
+    if isinstance(provider, dict):
+        return str(provider.get("name") or "").strip()
+    return str(getattr(provider, "name", "") or "").strip()
+
+
+def _preferred_coding_plan_default(
+    providers: list[Any],
+    defaults: dict[str, Any],
+    provider_map: dict[str, Any],
+) -> tuple[str, str] | None:
+    best_candidate: tuple[int, int, str, str] | None = None
+    for index, (default_provider, default_model) in enumerate(defaults.items()):
+        provider_id = str(default_provider).strip()
+        model_id = str(default_model or "").strip()
+        if not provider_id or not model_id:
+            continue
+        provider = provider_map.get(provider_id)
+        if provider is None:
+            continue
+        provider_models = dict(getattr(provider, "models", {}) or {})
+        if model_id not in provider_models:
+            continue
+
+        provider_identity = f"{provider_id} {_provider_name(provider)}".lower()
+        model_identity = model_id.lower()
+        score = 0
+        if "coding-plan" in provider_identity or "coding plan" in provider_identity:
+            score += 100
+        if any(token in model_identity for token in _UNSUITABLE_DEFAULT_MODEL_TOKENS):
+            score -= 100
+        candidate = (score, -index, provider_id, model_id)
+        if best_candidate is None or candidate > best_candidate:
+            best_candidate = candidate
+
+    if best_candidate is None or best_candidate[0] <= 0:
+        return None
+    return best_candidate[2], best_candidate[3]
 
 
 def select_provider_model(
@@ -73,6 +119,10 @@ def select_provider_model(
                 f"Model '{model_id}' exists under multiple providers ({joined}); pass the provider explicitly."
             )
         return matches[0], model_id
+
+    preferred_default = _preferred_coding_plan_default(providers, defaults, provider_map)
+    if preferred_default is not None:
+        return preferred_default
 
     for default_provider, default_model in defaults.items():
         provider = provider_map.get(str(default_provider))

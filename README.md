@@ -20,9 +20,10 @@
 - 提供 `reporter.py` 的 `[ACCEPTED]` / `[RUNNING]` / `[DONE]` / `[FAILED]` / `[STATUS]` / `[KILLED]` / `[QUESTION]` 状态邮件正文生成
 - task thread 的 live mailbox 现在按三类保留：`[ACCEPTED]` / `[RUNNING]` / `[STATUS]` 只保留最新进度邮件；`[QUESTION]` / `[PAUSED]` 和 `[DONE]` / `[FAILED]` / `[KILLED]` 作为 action-required / receipt 邮件保留；完整历史仍保留在 `tasks/<thread_id>/mail/raw_*.json`
 - 真实 CLI / SDK 回复现在支持 structured run-result capsule：adapter 会回填 `RunResult.changed_files`、`tests_passed`、`error_type`、`error_message`，并把结果块从用户可见回复与状态邮件正文里剥离
-- 提供超大产物 COS 外链交付：小文件继续作为邮件附件，超阈值文件改为预签名下载链接并展示在单独的 `External Deliveries` 区域；`APK/IPA` 会自动改用 `.bin` 对象名绕过 COS 默认域名分发限制；COS 上传当前强制走直连 HTTPS，不继承宿主进程里的 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`
+- 保留 legacy COS external-delivery 实现，但它不再是 TaskMail/VPS 主线；`APK/IPA` 在该 legacy lane 上仍会自动改用 `.bin` 对象名，且 COS 上传仍强制走直连 HTTPS，不继承宿主进程里的 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`
 - 提供窄范围 TaskMail direct relay/control surface：direct `new_task`、bootstrap `[SYNC]` `v1/v2`、shared `/control` current-session direct `/status` 与 plain `reply` bridge-result、shared `/control` relay-side `transport_probe`，以及 active-session detail read sidecar
-- 提供 relay `/v1/files` external delivery：当 `outbound_transport=relay` 且未使用 COS 时，超阈值 artifact 会上传到 relay file surface，并把 `artifact_id -> file_id` 绑定单独写入 `artifact_file_binding_index.json`
+- relay 进程当前内置一个进程级 `action logging` 开关，默认开启；当前 first slice 会为 `WS /v1/android/session-updates` 输出结构化 `connect / send / send_error / close / connection_closed` 日志，便于联调时按 `subscription_id + locator` 溯源，稳定后可再显式关闭
+- 提供 relay `/v1/files` artifact owner lane：当 `outbound_transport=relay` 且存在 `relay_url + relay_transport_token` 时，attachable artifact 会统一上传到 relay file surface，并把 `artifact_id -> file_id` 绑定单独写入 `artifact_file_binding_index.json`
 - 提供 direct-action / parity closeout 证据层：每轮 run 会落 `canonical_summary.json`，current-session direct `/status` 与 plain `reply` 会落 `session_action_closeout.json`，并可由 `scripts/build_taskmail_closeout_bundle.py` 组装 `taskmail_daily_closeout_bundle.json`
 - 提供首封 `[SYNC]` 项目目录同步入口：直接回复 `D:\projects` / `E:\projects` 或配置根路径下的一级文件夹清单，不触发 backend run，也不创建 task/session
 - 提供 `[PAUSED]` 状态邮件和 `/pause`、`/resume`、`/end` 的显式控制面；paused 只阻止后续 continuation，不会暂停已经在跑的 CLI 进程
@@ -150,6 +151,8 @@ task.md
   表示默认要求 `Repo + Workdir` 已存在；若设为 `true`，当 `Repo` 已存在且 `Workdir` 是仓库内的相对路径时，会在执行前自动创建该目录。
 - `enable_web_search: false`
   表示是否给真实后端打开联网搜索能力。`Codex` 会附加 `--search`，`OpenCode` 会注入 `OPENCODE_ENABLE_EXA=1`。
+- `MAIL_RELAY_ACTION_LOG_ENABLED=1|0`
+  relay 进程级 action logging 开关，当前默认值为开启。现阶段至少会记录 `WS /v1/android/session-updates` 的 `connect / send / send_error / close / connection_closed`；若要降低日志噪音，可显式设为 `0`。当前 `/healthz` 会返回 `action_logging_enabled` 便于远端核对
 - `spawn_active_session_windows: false`
   Windows-only。设为 `true` 后，后台轮询模式会为每个进入 `running` 的 thread 自动拉起一个聚焦 active-session window。这个窗口绑定的是 active session，不是单次 run：只要该 thread 仍处于 `active` 就持续保留，即使状态已经变成 `done` / `waiting_user` / `paused` 也会继续显示当前 session state；脱离 `active` 后自动关闭。当前仍兼容 legacy 键名 `spawn_monitor_windows`。
 - `active_session_window_refresh_seconds: 5`
@@ -163,7 +166,7 @@ task.md
 - `cos_region` / `cos_bucket` / `cos_secret_id` / `cos_secret_key`
   表示 COS 外部交付所需的地域、桶和访问凭证；也可放在本地专用的 `mail_config.cos.local.yaml` 中，仅用于超大产物外链交付。
 - `external_delivery_threshold_mb: 20`
-  表示从多大开始不再把产物作为邮件附件发送，而是改走 COS 外链。
+  表示 legacy 非 relay 路径从多大开始不再把产物作为邮件附件发送；当前 relay `/v1/files` owner lane 不再使用这个阈值。
 - `cos_presign_expire_seconds: 604800`
   表示 COS 下载预签名链接的有效期，默认 7 天。
 - `cos_object_prefix: mail-runner`
@@ -200,6 +203,10 @@ task.md
 .\\.venv\\Scripts\\python.exe -m mail_runner.runtime_control request-thread-kill thread_048 --runtime-dir .\\_tmp_live_mail_runner --config .\\_tmp_live_mail_runner\\mail_config.loop_30s.yaml
 .\\.venv\\Scripts\\python.exe -m mail_runner.runner --snapshot .\\seed.json --config .\\config.yaml
 .\\.venv\\Scripts\\python.exe .\\scripts\\live_smoke_cos_roundtrip.py --cos-config .\\mail_config.cos.local.yaml --source .\\README.md
+.\\.venv\\Scripts\\python.exe -m mail_runner.android_create_session_live --base-url http://124.223.41.153:8787 --android-app-token <android_app_token> --pc-id pc-home --workspace-id <workspace_id> --prompt "Return exactly SESSION_PUSH_PROBE_READY" --output .\\_tmp_android_probe\\create_session.json
+.\\.venv\\Scripts\\python.exe -m mail_runner.android_fake_reply_live --base-url http://124.223.41.153:8787 --android-app-token <android_app_token> --workspace-id <workspace_id> --session-id <session_id> --reply-text "Return exactly SESSION_PUSH_PROBE_REPLY_ACK" --output .\\_tmp_android_probe\\fake_reply.json
+.\\.venv\\Scripts\\python.exe -m mail_runner.android_session_read_live session-history --base-url http://124.223.41.153:8787 --android-app-token <android_app_token> --thread-id <thread_id> --output .\\_tmp_android_probe\\session_history.json
+.\\.venv\\Scripts\\python.exe -m mail_runner.android_session_read_live session-snapshot --config .\\mail_config.bot.relay.local.yaml --android-app-token <android_app_token> --session-id <session_id> --output .\\_tmp_android_probe\\session_snapshot.json
 ```
 
 后台服务推荐直接使用仓库内脚本：

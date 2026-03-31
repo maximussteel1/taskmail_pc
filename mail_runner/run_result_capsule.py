@@ -87,5 +87,4 @@ def parse_run_result_capsule(text: str) -> StructuredRunResult | None:
 
 def strip_run_result_capsules(text: str) -> str:
     stripped = _RUN_RESULT_RE.sub("", text)
-    stripped = re.sub(r"\n{3,}", "\n\n", stripped)
-    return stripped.strip()
+    return stripped.rstrip()

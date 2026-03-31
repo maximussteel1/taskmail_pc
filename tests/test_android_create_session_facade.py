@@ -210,7 +210,7 @@ async def _run_create_session_roundtrip_test(
     runner: _StubRunner,
     execution_policy: dict[str, object],
     attachments: list[dict[str, object]] | None = None,
-    canonical_reply_recipient: str = "user@example.com",
+    canonical_reply_recipient: str | None = "user@example.com",
     workspace_provider=None,
     codex_profile_models: dict[str, str] | None = None,
     heartbeat_interval_seconds: int = 1,
@@ -284,22 +284,24 @@ async def _run_create_session_roundtrip_test(
         )
         workspace = pc_runtime.workspace_store.list_workspaces(pc_id="pc_home")[0]
 
+        request_payload = {
+            "pc_id": "pc_home",
+            "workspace_id": workspace.workspace_id,
+            "prompt": "Refactor floor_shear.py",
+            "execution_policy": execution_policy,
+            "mode": "modify",
+            "timeout_seconds": 181,
+            "acceptance": ["pytest passes", "brief summary"],
+            "attachments": attachments,
+            "repo_path": workspace.repo_path,
+            "source": "android-ui",
+        }
+        if canonical_reply_recipient is not None:
+            request_payload["canonical_reply_recipient"] = canonical_reply_recipient
         response = await asyncio.to_thread(
             _post_create_session,
             f"http://{host}:{port}{ANDROID_CREATE_SESSION_PATH}",
-            {
-                "pc_id": "pc_home",
-                "workspace_id": workspace.workspace_id,
-                "prompt": "Refactor floor_shear.py",
-                "canonical_reply_recipient": canonical_reply_recipient,
-                "execution_policy": execution_policy,
-                "mode": "modify",
-                "timeout_seconds": 181,
-                "acceptance": ["pytest passes", "brief summary"],
-                "attachments": attachments,
-                "repo_path": workspace.repo_path,
-                "source": "android-ui",
-            },
+            request_payload,
         )
         payload = response.json()
         await _wait_until(lambda: len(runner.snapshots) == 1 or payload["status"] == "rejected", timeout_seconds=5)
@@ -382,7 +384,7 @@ def test_android_create_session_requires_execution_policy_when_posting_http(tmp_
         thread.join(timeout=5)
 
 
-def test_android_create_session_requires_canonical_reply_recipient_when_posting_http(tmp_path) -> None:
+def test_android_create_session_allows_missing_canonical_reply_recipient_when_posting_http(tmp_path) -> None:
     config = RelayServerConfig(
         host="127.0.0.1",
         port=0,
@@ -407,8 +409,10 @@ def test_android_create_session_requires_canonical_reply_recipient_when_posting_
         )
         payload = response.json()
 
-        assert response.status_code == 400
-        assert payload["error_code"] == "invalid_payload"
+        assert response.status_code == 200
+        assert payload["status"] == "rejected"
+        assert payload["submit_ack"]["ack_status"] == "rejected"
+        assert payload["submit_ack"]["error_code"] == "pc_offline"
     finally:
         server.shutdown()
         server.server_close()
@@ -563,6 +567,32 @@ def test_android_create_session_roundtrip_returns_submit_ack_and_session_binding
     assert runner.snapshots[0].timeout_minutes == 4
     assert runner.snapshots[0].backend_transport == "sdk"
     assert runner.snapshots[0].canonical_reply_recipient == "user@example.com"
+
+
+def test_android_create_session_roundtrip_does_not_require_canonical_reply_recipient(tmp_path) -> None:
+    result = asyncio.run(
+        _run_create_session_roundtrip_test(
+            tmp_path,
+            runner=_StubRunner(),
+            canonical_reply_recipient=None,
+            execution_policy={
+                "backend": "codex",
+                "profile": "default",
+                "permission": "default",
+                "backend_transport": "sdk",
+            },
+        )
+    )
+    payload = result["payload"]
+    runtime = result["runtime"]
+    runner = result["runner"]
+
+    assert payload["status"] == "accepted"
+    record = runtime.command_store.get_command("pc_home", payload["command_id"])
+    assert record is not None
+    assert "canonical_reply_recipient" not in record.command_payload
+    assert len(runner.snapshots) == 1
+    assert runner.snapshots[0].canonical_reply_recipient is None
 
 
 def test_android_create_session_binds_canonical_reply_recipient_for_immediate_session_action(tmp_path) -> None:

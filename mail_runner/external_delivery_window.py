@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .download_ref import resolve_download_ref_url
 from .external_delivery_index import EXTERNAL_DELIVERY_INDEX_FILENAME, EXTERNAL_DELIVERY_INDEX_SCHEMA
 from .file_surface import SINGLE_FILE_UPLOAD_LIMIT_BYTES
 from .models import RunResult
@@ -90,7 +91,7 @@ def collect_external_delivery_runs(task_root: str | Path) -> list[dict[str, Any]
                 projected_download_ref = None
                 projected_download_ref_source = None
                 if projected_item is not None:
-                    projected_download_ref = str(projected_item.get("download_ref") or "").strip() or None
+                    projected_download_ref = resolve_download_ref_url(projected_item.get("download_ref"))
                     projected_download_ref_source = str(projected_item.get("download_ref_source") or "").strip() or None
                 deliveries.append(
                     {

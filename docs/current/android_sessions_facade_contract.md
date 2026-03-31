@@ -16,7 +16,7 @@
 
 - `GET /v1/android/sessions`
 - 鉴权：`Authorization: Bearer <android_app_token>`
-- 真相层：relay 可见 `task_root` 下的 `SessionState`
+- 真相层：relay-native projection store 中的 `projection_sessions`
 
 它当前是一个薄读投影，不直接暴露内部 mail thread 文件结构，也不要求 Android 自己从 command / workspace / binding 拼 session 列表。
 
@@ -106,9 +106,9 @@
 当前接口在以下情况下会直接报错而不是返回空列表：
 
 - Android app token 不匹配：`401 unauthorized`
-- relay 未配置 `task_root`：`503 task_root_unavailable`
+- relay 未配置或不可用 projection store：`503 task_root_unavailable`（兼容错误码）
 
-当前若 `task_root` 已配置但目录下暂时没有 session 数据，则返回 `200` + 空列表。
+当前若 projection store 已配置但暂时没有 session 数据，则返回 `200` + 空列表。
 
 ## 7. 非目标
 

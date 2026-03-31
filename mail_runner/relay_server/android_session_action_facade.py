@@ -39,7 +39,6 @@ _ALLOWED_REJECT_ERROR_CODES = {
     "pc_offline",
     "session_binding_unresolved",
     "session_identity_mismatch",
-    "session_recipient_unresolved",
     "unsupported_backend",
     "unsupported_permission",
     "unsupported_profile",

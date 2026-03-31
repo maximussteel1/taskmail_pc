@@ -59,7 +59,7 @@ relay_ca_file: ""
 relay_auto_fallback_email: false
 from_name: Mail Runner
 from_addr: runner@example.com
-# Optional COS delivery for oversized artifacts.
+# Optional legacy COS delivery outside the relay /v1/files owner lane.
 # Keep real credentials in a local-only file such as mail_config.cos.local.yaml.
 cos_region: ""
 cos_bucket: ""
@@ -67,4 +67,6 @@ cos_secret_id: ""
 cos_secret_key: ""
 cos_object_prefix: mail-runner
 external_delivery_threshold_mb: 20
+# In the current relay owner lane, attachable artifacts already go through /v1/files
+# regardless of size. This threshold only applies outside that relay path.
 cos_presign_expire_seconds: 604800

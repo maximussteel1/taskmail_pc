@@ -13,6 +13,7 @@ import requests
 
 from .artifact_contract_smoke import run_artifact_contract_smoke
 from .config import AppConfig, load_config
+from .download_ref import resolve_download_ref_url
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "_tmp_file_surface_consumer_smoke"
@@ -134,7 +135,7 @@ def run_file_surface_consumer_smoke(
         download_ref = ""
         download_ref_source = None
     else:
-        download_ref = str(preview_item.get("download_ref") or "").strip()
+        download_ref = resolve_download_ref_url(preview_item.get("download_ref")) or ""
         download_ref_source = str(preview_item.get("download_ref_source") or "").strip() or None
         if not download_ref:
             failures.append("artifact-preview download_ref was empty")

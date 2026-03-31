@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 
 from mail_runner import monitor_windows
@@ -136,7 +138,7 @@ def test_monitor_window_manager_launches_focused_thread_window(tmp_path: Path) -
     assert "-ExitWhenThreadNotRunning" not in command
     assert "-WindowTitle" in command
     assert "Mail Runner Active Session thread_001" in command
-    assert creationflags >= 0
+    assert creationflags == monitor_windows.HIDDEN_CONTROLLER_CREATIONFLAGS
     assert cwd == project_root.resolve()
 
 
@@ -195,3 +197,57 @@ def test_monitor_window_manager_skips_launch_when_persisted_window_is_alive(tmp_
     manager.on_run_started(_state(), _snapshot())
 
     assert launches == []
+
+
+def test_monitor_window_manager_treats_recent_invalid_persisted_state_as_alive(tmp_path: Path) -> None:
+    launches: list[tuple[list[str], int, Path]] = []
+    project_root = tmp_path / "repo"
+    runtime_dir = project_root / "_tmp_live_mail_runner"
+    state_dir = runtime_dir / "active_session_window_state"
+    script_dir = project_root / "scripts"
+    script_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    (script_dir / "monitor_mail_runner_controller.ps1").write_text("# test\n", encoding="utf-8")
+    state_path = state_dir / "thread_001.window.json"
+    state_path.write_text('{"thread_id":"thread_001"', encoding="utf-8")
+
+    manager = ActiveSessionWindowManager(
+        enabled=True,
+        project_root=project_root,
+        task_root=tmp_path / "tasks",
+        runtime_dir=runtime_dir,
+        launcher=lambda command, creationflags, cwd: launches.append((command, creationflags, cwd)),
+    )
+
+    manager.on_run_started(_state(), _snapshot())
+
+    assert launches == []
+    assert state_path.exists()
+
+
+def test_monitor_window_manager_prunes_stale_invalid_persisted_state(tmp_path: Path) -> None:
+    launches: list[tuple[list[str], int, Path]] = []
+    project_root = tmp_path / "repo"
+    runtime_dir = project_root / "_tmp_live_mail_runner"
+    state_dir = runtime_dir / "active_session_window_state"
+    script_dir = project_root / "scripts"
+    script_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True)
+    (script_dir / "monitor_mail_runner_controller.ps1").write_text("# test\n", encoding="utf-8")
+    state_path = state_dir / "thread_001.window.json"
+    state_path.write_text('{"thread_id":"thread_001"', encoding="utf-8")
+    old_time = time.time() - (monitor_windows._WINDOW_STATE_PARSE_GRACE_SECONDS + 5)
+    os.utime(state_path, (old_time, old_time))
+
+    manager = ActiveSessionWindowManager(
+        enabled=True,
+        project_root=project_root,
+        task_root=tmp_path / "tasks",
+        runtime_dir=runtime_dir,
+        launcher=lambda command, creationflags, cwd: launches.append((command, creationflags, cwd)),
+    )
+
+    manager.on_run_started(_state(), _snapshot())
+
+    assert len(launches) == 1
+    assert not state_path.exists()

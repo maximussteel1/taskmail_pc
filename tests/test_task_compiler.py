@@ -362,7 +362,7 @@ def test_compile_task_can_fallback_to_new_run_for_failed_resume_recovery() -> No
     assert "Please continue with the cleanup." in compiled.task_text
 
 
-def test_compile_task_merges_incoming_attachment_paths_into_resume_turn() -> None:
+def test_compile_task_resume_turn_uses_only_new_incoming_attachments() -> None:
     state = _thread_state()
     state.backend_session_id = "native-session-001"
     state.backend_session_resumable = True
@@ -383,12 +383,63 @@ def test_compile_task_merges_incoming_attachment_paths_into_resume_turn() -> Non
     )
 
     assert compiled is not None
-    assert compiled.attachments == [
-        "E:\\repo\\existing.txt",
-        "E:\\repo\\_mailin_20260314_001__photo.png",
-    ]
+    assert compiled.attachments == ["E:\\repo\\_mailin_20260314_001__photo.png"]
     assert "New incoming attachments materialized in workdir:" in compiled.turn_text
     assert "_mailin_20260314_001__photo.png" in compiled.turn_text
+    assert "existing.txt" not in compiled.turn_text
+
+
+def test_compile_task_resume_turn_drops_stale_attachments_without_new_incoming_attachments() -> None:
+    state = _thread_state()
+    state.backend_session_id = "native-session-001"
+    state.backend_session_resumable = True
+    snapshot = _snapshot()
+    snapshot.attachments = ["E:\\repo\\existing.txt"]
+
+    compiled = compile_task(
+        ParsedMailAction(
+            action="CONTINUE_SESSION",
+            confidence=1.0,
+            raw_user_text="Please continue with the cleanup.",
+        ),
+        state,
+        snapshot,
+        task_id="task_006b_no_attachment",
+        now="2026-03-12T12:46:10",
+    )
+
+    assert compiled is not None
+    assert compiled.attachments == []
+    assert compiled.turn_text == "Please continue with the cleanup."
+
+
+def test_compile_task_answer_turn_uses_only_new_incoming_attachments() -> None:
+    state = _thread_state()
+    state.backend_session_id = "native-session-001"
+    state.backend_session_resumable = True
+    state.pending_question_id = "question_task_001"
+    state.pending_question_text = "Should I update both modules?"
+    snapshot = _snapshot()
+    snapshot.attachments = ["E:\\repo\\existing.txt"]
+
+    compiled = compile_task(
+        ParsedMailAction(
+            action="ANSWER_QUESTION",
+            confidence=0.9,
+            raw_user_text="Yes, update both modules.",
+        ),
+        state,
+        snapshot,
+        task_id="task_006c",
+        now="2026-03-12T12:46:30",
+        incoming_attachment_paths=["E:\\repo\\_mailin_20260314_002__diagram.png"],
+    )
+
+    assert compiled is not None
+    assert compiled.attachments == ["E:\\repo\\_mailin_20260314_002__diagram.png"]
+    assert "New incoming attachments materialized in workdir:" in compiled.turn_text
+    assert "_mailin_20260314_002__diagram.png" in compiled.turn_text
+    assert "existing.txt" not in compiled.turn_text
 
 
 def test_compile_task_can_replay_answer_as_new_run_without_native_session() -> None:

@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from mail_runner.sdk_stream_smoke import _opencode_stream_contract
-from mail_runner.stream_events import StreamEvent, write_stream_events
+from mail_runner.stream_events import StreamEvent, load_stream_events, write_stream_events
 
 
 def _write_sdk_turn(path: Path, *, stream_mode: str = "event_stream_message_parts_incremental") -> None:
@@ -184,3 +184,53 @@ def test_opencode_stream_contract_records_missing_stream_gap(tmp_path: Path) -> 
     assert record["stream_exists"] is False
     assert record["supports_persisted_stream"] is False
     assert record["residual_gap"]["kind"] == "missing_same_layer_stream_evidence"
+
+
+def test_stream_events_preserve_multiline_and_newline_only_chunks(tmp_path: Path) -> None:
+    path = tmp_path / "stream.events.jsonl"
+    write_stream_events(
+        path,
+        [
+            StreamEvent(
+                ts="2026-03-30T10:00:00Z",
+                seq=1,
+                thread_id="thread_001",
+                task_id="task_001",
+                backend="codex",
+                backend_transport="sdk",
+                kind="assistant.delta",
+                delta="Line 1\n",
+                item_type="agent_message",
+                status="streaming",
+            ),
+            StreamEvent(
+                ts="2026-03-30T10:00:01Z",
+                seq=2,
+                thread_id="thread_001",
+                task_id="task_001",
+                backend="codex",
+                backend_transport="sdk",
+                kind="assistant.delta",
+                delta="\nLine 2",
+                item_type="agent_message",
+                status="streaming",
+            ),
+            StreamEvent(
+                ts="2026-03-30T10:00:02Z",
+                seq=3,
+                thread_id="thread_001",
+                task_id="task_001",
+                backend="codex",
+                backend_transport="sdk",
+                kind="assistant.completed",
+                text="Line 1\n\nLine 2",
+                item_type="agent_message",
+                status="completed",
+            ),
+        ],
+    )
+
+    events = load_stream_events(path)
+
+    assert [event.delta for event in events[:2]] == ["Line 1\n", "\nLine 2"]
+    assert events[2].text == "Line 1\n\nLine 2"

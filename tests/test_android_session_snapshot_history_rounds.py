@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from mail_runner.models import RunResult, TaskSnapshot
+from mail_runner.artifact_resolver import write_artifact_index
+from mail_runner.file_surface import write_artifact_upload_success_binding
+from mail_runner.models import RunArtifact, RunResult, TaskSnapshot
+from mail_runner.relay_server.android_session_history_facade import (
+    ANDROID_SESSION_HISTORY_SCHEMA_VERSION,
+    build_android_session_history,
+)
 from mail_runner.relay_server.android_session_snapshot_facade import build_android_session_snapshot
 from mail_runner.status import THREAD_STATUS_RUNNING
 from mail_runner.thread_store import build_workspace_id, create_thread, load_session_state, load_thread_state, save_thread_state
@@ -69,7 +75,10 @@ def test_android_session_snapshot_includes_history_rounds_from_durable_snapshots
             repo_path=repo_path,
             workdir=workdir,
             task_text="Continue the previous task.",
-            attachments=[workspace.to_thread_relative(thread_id, second_input)],
+            attachments=[
+                workspace.to_thread_relative(thread_id, first_input),
+                workspace.to_thread_relative(thread_id, second_input),
+            ],
             created_at="2026-03-27T11:00:00",
             updated_at="2026-03-27T11:01:00",
             turn_text="Review the latest homepage sketch and keep the task tree.",
@@ -83,15 +92,29 @@ def test_android_session_snapshot_includes_history_rounds_from_durable_snapshots
         "# Round 1 result\nAdded the tree-based homepage draft and updated the history card layout.\n",
         encoding="utf-8",
     )
+    stdout_path = workspace.run_file_path(thread_id, "task_001", "stdout.log")
+    stdout_path.write_text(
+        "Added the tree-based homepage draft.\n\nUpdated the history card layout.",
+        encoding="utf-8",
+    )
     artifact_dir = workspace.run_dir(thread_id, "task_001") / "artifacts"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     artifact_path = artifact_dir / "home-tree.png"
     artifact_path.write_bytes(b"png")
+    artifact = RunArtifact(
+        artifact_id="artifact-home-tree",
+        path=str(artifact_path),
+        name="home-tree.png",
+        kind="image",
+        content_type="image/png",
+        source="manifest",
+        inline_preview=True,
+    )
 
     result_path = workspace.save_run_result(
         thread_id,
         "task_001",
-        RunResult(
+        result := RunResult(
             task_id="task_001",
             thread_id=thread_id,
             backend="codex",
@@ -107,6 +130,19 @@ def test_android_session_snapshot_includes_history_rounds_from_durable_snapshots
             tests_passed=True,
             backend_transport="sdk",
         ),
+    )
+    index_path = write_artifact_index(task_root, result, [artifact], [])
+    assert index_path is not None
+    write_artifact_upload_success_binding(
+        task_root,
+        result,
+        artifact,
+        role="artifact_delivery",
+        file_id="file_home_tree_001",
+        metadata_url="/v1/files/file_home_tree_001",
+        download_url="/v1/files/file_home_tree_001/content",
+        uploaded_at="2026-03-27T10:10:01",
+        trace_id="trace_history_round_001",
     )
 
     thread_state = load_thread_state(thread_id, task_root)
@@ -133,10 +169,30 @@ def test_android_session_snapshot_includes_history_rounds_from_durable_snapshots
     assert latest_round["status"] == "running"
     assert latest_round["input"]["text"] == "Review the latest homepage sketch and keep the task tree."
     assert latest_round["process"]["items"][0]["text"] == "Still processing the latest homepage follow-up."
+    assert len(latest_round["input"]["attachments"]) == 1
     assert latest_round["input"]["attachments"][0]["display_name"] == "homepage-followup.md"
 
     older_round = history_rounds[1]
     assert older_round["status"] == "done"
-    assert older_round["result"]["text"].startswith("# Round 1 result")
+    assert older_round["result"]["text"] == "Added the tree-based homepage draft.\n\nUpdated the history card layout."
     assert older_round["input"]["attachments"][0]["display_name"] == "brief.md"
     assert older_round["result"]["attachments"][0]["display_name"] == "home-tree.png"
+    assert older_round["result"]["attachments"][0]["download_ref"] == {
+        "kind": "vps_file",
+        "file_id": "file_home_tree_001",
+        "metadata_url": "/v1/files/file_home_tree_001",
+        "content_url": "/v1/files/file_home_tree_001/content",
+    }
+
+    history_payload = build_android_session_history(
+        query={
+            "workspace_id": [workspace_id],
+            "session_id": [session_id],
+        },
+        task_root=task_root,
+    )
+
+    assert history_payload["schema_version"] == ANDROID_SESSION_HISTORY_SCHEMA_VERSION
+    assert history_payload["locator"]["workspace_id"] == workspace_id
+    assert history_payload["session"]["session_id"] == session_id
+    assert history_payload["history_rounds"] == history_rounds

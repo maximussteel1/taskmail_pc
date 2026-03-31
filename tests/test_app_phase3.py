@@ -209,6 +209,87 @@ def _setup_running_thread_with_live_assistant_output(task_root) -> None:
     )
 
 
+def _setup_running_thread_with_multiline_live_assistant_output(task_root) -> None:
+    workspace = WorkspaceManager(task_root)
+    snapshot = TaskSnapshot(
+        task_id="task_run",
+        thread_id="thread_001",
+        backend=BACKEND_CODEX,
+        profile=None,
+        repo_path="D:\\repo",
+        workdir="src",
+        task_text="Inspect the live state.",
+        acceptance=[],
+        timeout_minutes=60,
+        mode="modify",
+        attachments=[],
+        created_at="2026-03-12T12:00:00",
+        updated_at="2026-03-12T12:00:00",
+        backend_transport="sdk",
+    )
+    snapshot_path = workspace.save_snapshot(snapshot)
+    create_thread(
+        thread_id="thread_001",
+        root_message_id="<root@example.com>",
+        latest_message_id="<running@example.com>",
+        subject_norm="demo task",
+        session_name="demo task",
+        backend=BACKEND_CODEX,
+        profile=None,
+        repo_path="D:\\repo",
+        workdir="src",
+        current_task_id="task_run",
+        last_task_snapshot_file=snapshot_path.relative_to(task_root / "thread_001").as_posix(),
+        task_root=task_root,
+        status="running",
+        history_files=[],
+        last_summary="Mock run completed successfully.",
+        backend_transport="sdk",
+        created_at="2026-03-12T12:00:00",
+        updated_at="2026-03-12T12:00:00",
+    )
+    stream_path = workspace.run_file_path("thread_001", "task_run", "stream.events.jsonl")
+    stream_path.parent.mkdir(parents=True, exist_ok=True)
+    stream_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "ts": "2026-03-12T12:10:05",
+                        "seq": 1,
+                        "thread_id": "thread_001",
+                        "task_id": "task_run",
+                        "backend": "codex",
+                        "backend_transport": "sdk",
+                        "kind": "assistant.delta",
+                        "text": "Line 1\n",
+                        "delta": "Line 1\n",
+                        "item_type": "agent_message",
+                        "status": "streaming",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "ts": "2026-03-12T12:10:06",
+                        "seq": 2,
+                        "thread_id": "thread_001",
+                        "task_id": "task_run",
+                        "backend": "codex",
+                        "backend_transport": "sdk",
+                        "kind": "assistant.delta",
+                        "text": "\nLine 2",
+                        "delta": "\nLine 2",
+                        "item_type": "agent_message",
+                        "status": "streaming",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def _setup_running_thread_with_tool_only_events(task_root) -> None:
     workspace = WorkspaceManager(task_root)
     snapshot = TaskSnapshot(
@@ -582,6 +663,46 @@ def test_handle_existing_action_status_query_for_running_thread_hides_tool_only_
     assert "pytest -q" not in client.sent_messages[0]["body"]
 
 
+def test_handle_existing_action_status_query_for_running_thread_preserves_multiline_live_output(tmp_path) -> None:
+    task_root = tmp_path / "tasks"
+    _setup_running_thread_with_multiline_live_assistant_output(task_root)
+    envelope = MailEnvelope(
+        message_id="<reply-status-running-multiline@example.com>",
+        subject="Re: [RUNNING][S:thread_001] Demo task",
+        from_addr="user@example.com",
+        to_addr="user@example.com",
+        date="2026-03-12T12:10:30",
+        in_reply_to="<running@example.com>",
+        references=["<root@example.com>", "<running@example.com>"],
+        body_text="/status",
+        raw_headers={"Subject": "Re: [RUNNING][S:thread_001] Demo task"},
+    )
+    client = FakeMailClient([envelope])
+    config = AppConfig(from_addr="user@example.com", from_name="Mail Runner", task_root="tasks")
+    state = load_thread_state("thread_001", task_root)
+    workspace = WorkspaceManager(task_root)
+    snapshot = workspace.load_snapshot("thread_001", state.last_task_snapshot_file)
+
+    handled = _handle_existing_action(
+        envelope,
+        config,
+        task_root,
+        client,
+        None,
+        state=state,
+        snapshot=snapshot,
+        latest_result=None,
+        incoming_attachment_paths=[],
+        subject_text="demo task",
+        action=ParsedMailAction(action="STATUS_QUERY", confidence=1.0, raw_user_text=""),
+        background=False,
+        target_reply_chain=False,
+    )
+
+    assert handled is True
+    assert "Reply:\nLine 1\n\nLine 2" in client.sent_messages[0]["body"]
+
+
 def test_process_once_handles_last_query_reply_without_backend_call(tmp_path) -> None:
     dispatcher = Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0))
     _setup_existing_thread(tmp_path / "tasks", dispatcher)
@@ -638,6 +759,8 @@ def test_process_once_rejects_restart_runner_in_one_shot_mode(tmp_path, monkeypa
 
 def test_maybe_schedule_requested_runner_restart_uses_detached_launcher(tmp_path, monkeypatch) -> None:
     runtime_dir = tmp_path / "runtime"
+    config_path = tmp_path / "mail_config.yaml"
+    config_path.write_text("task_root: tasks\n", encoding="utf-8")
     request_path = write_runner_restart_request(
         runtime_dir,
         source="mail",
@@ -650,15 +773,87 @@ def test_maybe_schedule_requested_runner_restart_uses_detached_launcher(tmp_path
         calls.append((config_path, str(runtime_dir)))
         return True, "scheduled"
 
-    monkeypatch.setenv("MAIL_RUNNER_CONFIG", str(tmp_path / "mail_config.yaml"))
+    monkeypatch.setenv("MAIL_RUNNER_CONFIG", str(config_path))
     monkeypatch.setattr("mail_runner.app._schedule_detached_runner_restart", fake_schedule)
 
     scheduled = _maybe_schedule_requested_runner_restart(runtime_dir)
 
     assert scheduled is True
-    assert calls == [(str(tmp_path / "mail_config.yaml"), str(runtime_dir))]
+    assert calls == [(str(config_path), str(runtime_dir))]
     assert not request_path.exists()
     assert list_runner_restart_request_paths(runtime_dir) == []
+
+
+def test_maybe_schedule_requested_runner_restart_defers_while_running_session_exists(tmp_path, monkeypatch) -> None:
+    runtime_dir = tmp_path / "runtime"
+    task_root = tmp_path / "tasks"
+    config_path = tmp_path / "mail_config.yaml"
+    config_path.write_text("task_root: tasks\n", encoding="utf-8")
+    _setup_running_thread_with_live_assistant_output(task_root)
+    request_path = write_runner_restart_request(
+        runtime_dir,
+        source="mail",
+        thread_id="thread_001",
+        message_id="<reply@example.com>",
+    )
+    calls: list[tuple[str, str]] = []
+
+    def fake_schedule(*, config_path: str, runtime_dir):
+        calls.append((config_path, str(runtime_dir)))
+        return True, "scheduled"
+
+    monkeypatch.setenv("MAIL_RUNNER_CONFIG", str(config_path))
+    monkeypatch.setattr("mail_runner.app._schedule_detached_runner_restart", fake_schedule)
+
+    scheduled = _maybe_schedule_requested_runner_restart(runtime_dir)
+
+    assert scheduled is False
+    assert calls == []
+    assert request_path.exists()
+    assert list_runner_restart_request_paths(runtime_dir) == [request_path]
+
+
+def test_handle_existing_action_restart_runner_queues_deferred_restart_request(tmp_path, monkeypatch) -> None:
+    dispatcher = Dispatcher(MockAdapter(sleep_seconds=0), MockAdapter(sleep_seconds=0))
+    task_root = tmp_path / "tasks"
+    runtime_dir = tmp_path / "runtime"
+    monkeypatch.setenv("MAIL_RUNNER_RUNTIME_DIR", str(runtime_dir))
+    _setup_existing_thread(task_root, dispatcher)
+    envelope = MailEnvelope(
+        message_id="<reply-restart-background@example.com>",
+        subject="Re: [DONE] Demo task",
+        from_addr="user@example.com",
+        to_addr="user@example.com",
+        date="2026-03-12T12:10:00",
+        in_reply_to="<done@example.com>",
+        references=["<root@example.com>", "<done@example.com>"],
+        body_text="/restart-runner",
+        raw_headers={"Subject": "Re: [DONE] Demo task"},
+    )
+    client = FakeMailClient([envelope])
+    config = AppConfig(from_addr="user@example.com", from_name="Mail Runner", task_root="tasks")
+    state = load_thread_state("thread_001", task_root)
+    context = build_context(envelope, state, task_root)
+
+    handled = _handle_existing_action(
+        envelope,
+        config,
+        task_root,
+        client,
+        None,
+        state=state,
+        snapshot=context["latest_snapshot"],
+        latest_result=context["latest_result"],
+        incoming_attachment_paths=context["incoming_attachment_paths"],
+        subject_text="demo task",
+        action=ParsedMailAction(action="RESTART_RUNNER", confidence=1.0, raw_user_text=""),
+        background=True,
+    )
+
+    assert handled is True
+    assert len(list_runner_restart_request_paths(runtime_dir)) == 1
+    assert "will wait until no sessions are running" in client.sent_messages[0]["body"]
+    assert "Runner restart queued." in client.sent_messages[0]["body"]
 
 
 def test_process_once_targeted_status_query_replies_on_target_session_chain(tmp_path) -> None:

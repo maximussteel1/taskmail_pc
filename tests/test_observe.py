@@ -8,7 +8,7 @@ from pathlib import Path
 
 from mail_runner.host_state import HOST_STATUS_RUNNING, HostStateStore
 from mail_runner.mail_io import SYSTEM_MESSAGE_HEADER, SYSTEM_MESSAGE_HEADER_VALUE
-from mail_runner.models import RunResult, ThreadState
+from mail_runner.models import RunResult, TaskSnapshot, ThreadState
 from mail_runner.observe import main
 from mail_runner.thread_store import build_workspace_id, build_workspace_norm, save_raw_mail, save_thread_state
 from mail_runner.workspace import WorkspaceManager
@@ -74,6 +74,34 @@ def _thread_state(
         queued_snapshot_file=(f"snapshots/{queued_task_id}.json" if queued_task_id else None),
         created_at="2099-03-17T00:59:00",
         updated_at=updated_at,
+    )
+
+
+def _snapshot(
+    *,
+    thread_id: str,
+    task_id: str,
+    task_text: str,
+    run_mode: str = "new",
+    turn_text: str | None = None,
+    updated_at: str = "2099-03-17T01:00:00",
+) -> TaskSnapshot:
+    return TaskSnapshot(
+        task_id=task_id,
+        thread_id=thread_id,
+        backend="codex",
+        repo_path="E:\\repo",
+        workdir=".",
+        task_text=task_text,
+        acceptance=[],
+        timeout_minutes=60,
+        mode="modify",
+        attachments=[],
+        created_at=updated_at,
+        updated_at=updated_at,
+        run_mode=run_mode,
+        turn_text=turn_text,
+        backend_transport="sdk",
     )
 
 
@@ -363,7 +391,9 @@ def test_show_thread_live_merges_transcript_and_live_stream(tmp_path: Path, caps
     assert "Backend Transport: sdk" in output
     assert "Health: normal" in output
     assert "Last Progress At: 2099-03-17T01:00:06" in output
+    assert "=== USER INPUT ===" in output
     assert "Please continue the refactor." in output
+    assert "=== RESULT ===" in output
     assert "I am applying the patch now." in output
     assert "turn.started | Turn started" in output
     assert "tool.started | pytest -q" not in output
@@ -489,11 +519,78 @@ def test_follow_thread_live_replays_recent_transcript_and_live_stream(tmp_path: 
 
     output = capsys.readouterr().out
     assert exit_code == 0
-    assert "Active Session Window: thread_001" in output
-    assert "Current State: lifecycle=active | status=running | task=task_run | transport=sdk" in output
+    assert "Active Session: thread_001" in output
+    assert "=== SESSION ===" in output
+    assert "=== USER INPUT ===" in output
+    assert "=== RESULT ===" in output
+    assert "State: active / running" in output
+    assert "Task: task_run" in output
+    assert "Transport: sdk" in output
     assert "Please continue the refactor." in output
+    assert "=== LIVE OUTPUT ===" in output
     assert "I am applying the patch now." in output
     assert "tool.started | pytest -q" not in output
+
+
+def test_follow_thread_live_surfaces_snapshot_task_and_queued_reply_without_transcript(tmp_path: Path, capsys) -> None:
+    runtime_dir = tmp_path / "runtime"
+    config_path = _write_runtime_config(runtime_dir)
+    task_root = runtime_dir / "tasks"
+    workspace = WorkspaceManager(task_root)
+    thread_state = _thread_state(
+        thread_id="thread_001",
+        status="running",
+        current_task_id="task_run",
+        queued_task_id="task_reply",
+        last_summary="Monitor window summary is now visible.",
+        backend_transport="sdk",
+        updated_at="2099-03-17T01:00:08",
+    )
+    save_thread_state(thread_state, task_root)
+    workspace.save_snapshot(
+        _snapshot(
+            thread_id="thread_001",
+            task_id="task_run",
+            task_text="Refactor the active-session monitor layout.",
+            updated_at="2099-03-17T01:00:03",
+        )
+    )
+    workspace.save_snapshot(
+        _snapshot(
+            thread_id="thread_001",
+            task_id="task_reply",
+            task_text="Refactor the active-session monitor layout.",
+            run_mode="resume",
+            turn_text="Please make the user's latest reply much more visible.",
+            updated_at="2099-03-17T01:00:07",
+        )
+    )
+
+    exit_code = main(
+        [
+            "--config",
+            str(config_path),
+            "--runtime-dir",
+            str(runtime_dir),
+            "follow-thread-live",
+            "thread_001",
+            "--iterations",
+            "1",
+            "--poll-seconds",
+            "0",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "=== USER INPUT ===" in output
+    assert "Pending Reply" in output
+    assert "Please make the user's latest reply much more visible." in output
+    assert "Task" in output
+    assert "Refactor the active-session monitor layout." in output
+    assert "=== RESULT ===" in output
+    assert "Monitor window summary is now visible." in output
+    assert "(no recent transcript yet)" in output
 
 
 def test_follow_thread_live_keeps_active_done_thread_open_until_iteration_limit(tmp_path: Path, capsys) -> None:
@@ -529,8 +626,8 @@ def test_follow_thread_live_keeps_active_done_thread_open_until_iteration_limit(
 
     output = capsys.readouterr().out
     assert exit_code == 0
-    assert "Active Session Window: thread_001" in output
-    assert "Session Note: this window stays open while lifecycle=active, even when no backend run is currently executing." in output
+    assert "Active Session: thread_001" in output
+    assert "Note: session stays visible while lifecycle=active, even when no run is executing." in output
     assert "active session window closed" not in output
 
 

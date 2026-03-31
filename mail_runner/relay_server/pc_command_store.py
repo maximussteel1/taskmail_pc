@@ -8,6 +8,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from ..download_ref import normalize_download_ref
+
 
 def _require_text(value: str | None, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
@@ -19,6 +21,18 @@ def _require_optional_text(value: str | None, field_name: str) -> str | None:
     if value is None:
         return None
     return _require_text(value, field_name)
+
+
+def _require_optional_chunk_text(value: str | None, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    return value if value else None
+
+
+def _validate_optional_download_ref(value: Any, field_name: str) -> dict[str, Any] | None:
+    return normalize_download_ref(value, field_name=field_name)
 
 
 def _require_mapping(value: Any, field_name: str) -> dict[str, Any]:
@@ -296,8 +310,8 @@ class PcOutputChunkRecord:
         if not isinstance(self.seq, int) or self.seq <= 0:
             raise ValueError("seq must be a positive integer")
         self.kind = _require_text(self.kind, "kind")
-        self.text = _require_optional_text(self.text, "text")
-        self.delta = _require_optional_text(self.delta, "delta")
+        self.text = _require_optional_chunk_text(self.text, "text")
+        self.delta = _require_optional_chunk_text(self.delta, "delta")
         if self.text is None and self.delta is None:
             raise ValueError("text or delta is required")
         self.item_type = _require_optional_text(self.item_type, "item_type")
@@ -341,7 +355,7 @@ class PcArtifactManifestRecord:
                     "name": _require_text(item.get("name"), f"{item_field}.name"),
                     "content_type": _require_text(item.get("content_type"), f"{item_field}.content_type"),
                     "size": _require_optional_int(item.get("size"), f"{item_field}.size", minimum=0),
-                    "download_ref": _require_optional_text(item.get("download_ref"), f"{item_field}.download_ref"),
+                    "download_ref": _validate_optional_download_ref(item.get("download_ref"), f"{item_field}.download_ref"),
                     "download_ref_source": _require_optional_text(
                         item.get("download_ref_source"),
                         f"{item_field}.download_ref_source",

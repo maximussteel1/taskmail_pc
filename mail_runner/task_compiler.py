@@ -27,16 +27,16 @@ def _append_context_text(base_text: str, delta: str) -> str:
     return f"{base_text.rstrip()}\n\n{_APPEND_PREFIX}\n{clean_delta}"
 
 
-def _merge_attachment_paths(base_paths: list[str], incoming_paths: list[str]) -> list[str]:
-    merged = list(base_paths)
-    seen = set(base_paths)
+def _normalize_attachment_paths(incoming_paths: list[str]) -> list[str]:
+    normalized_paths: list[str] = []
+    seen: set[str] = set()
     for item in incoming_paths:
         normalized = str(item).strip()
         if not normalized or normalized in seen:
             continue
         seen.add(normalized)
-        merged.append(normalized)
-    return merged
+        normalized_paths.append(normalized)
+    return normalized_paths
 
 
 def _attachment_summary_text(paths: list[str]) -> str:
@@ -146,10 +146,8 @@ def compile_task(
     profile = action.profile if action.profile is not None else thread_state.profile
     permission = action.permission if action.permission is not None else thread_state.permission
     next_thread_id = thread_id or latest_snapshot.thread_id
-    attachment_paths = _merge_attachment_paths(
-        latest_snapshot.attachments,
-        list(incoming_attachment_paths or []),
-    )
+    new_attachment_paths = _normalize_attachment_paths(list(incoming_attachment_paths or []))
+    attachment_paths = new_attachment_paths
     backend_transport = _continued_backend_transport(
         backend=backend,
         current_backend=thread_state.backend,
@@ -272,7 +270,7 @@ def compile_task(
             attachments=attachment_paths,
             run_mode="resume",
             backend_session_id=thread_state.backend_session_id,
-            turn_text=_combine_turn_text(action.raw_user_text, attachment_paths) or "Continue the previous task.",
+            turn_text=_combine_turn_text(action.raw_user_text, new_attachment_paths) or "Continue the previous task.",
             backend_transport=backend_transport,
         )
 
@@ -325,7 +323,7 @@ def compile_task(
             attachments=attachment_paths,
             run_mode="resume",
             backend_session_id=thread_state.backend_session_id,
-            turn_text=_combine_turn_text(turn_text, attachment_paths) or turn_text,
+            turn_text=_combine_turn_text(turn_text, new_attachment_paths) or turn_text,
             backend_transport=backend_transport,
         )
 

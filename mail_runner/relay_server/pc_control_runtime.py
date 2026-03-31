@@ -27,6 +27,7 @@ from .pc_control_protocol import (
     PcCommandAckMessage,
     PcCommandDispatchMessage,
     PcCommandEventMessage,
+    PcProjectionBatchMessage,
     PcCommandResultMessage,
     PcIngressCandidateMessage,
     PcMailboxLeaseMessage,
@@ -37,6 +38,7 @@ from .pc_control_protocol import (
     PcHelloMessage,
     PcWorkspaceSnapshotMessage,
     build_command_dispatch,
+    build_delivery_ack,
     build_ingress_decision,
     build_mailbox_lease_ack,
     build_output_resume_request,
@@ -49,6 +51,15 @@ from .pc_credential_registry import InMemoryPcCredentialRegistry, PersistentPcCr
 from .pc_execution_policy import compute_effective_capabilities, validate_execution_policy
 from .pc_ingress_store import InMemoryPcIngressStore, PersistentPcIngressStore
 from .pc_node_store import InMemoryPcNodeStore, PcNodeFenceError, PcNodeRecord, PersistentPcNodeStore
+from .projection_store import (
+    ProjectionCloseoutUpsert,
+    ProjectionProbeObservationUpsert,
+    ProjectionRoundUpsert,
+    ProjectionSessionBatch,
+    ProjectionSessionUpsert,
+    ProjectionStoreConflictError,
+    RelayProjectionStore,
+)
 from .workspace_inventory_store import (
     InMemoryWorkspaceInventoryStore,
     PcWorkspaceRecord,
@@ -79,6 +90,7 @@ class PcControlRuntime:
         workspace_store: InMemoryWorkspaceInventoryStore,
         command_store: InMemoryPcCommandStore,
         ingress_store: InMemoryPcIngressStore | None = None,
+        projection_store: RelayProjectionStore | None = None,
         keepalive_seconds: int = 15,
         connection_id_factory=None,
         message_id_factory=None,
@@ -92,6 +104,7 @@ class PcControlRuntime:
         self._workspace_store = workspace_store
         self._command_store = command_store
         self._ingress_store = ingress_store or InMemoryPcIngressStore()
+        self._projection_store = projection_store
         self._keepalive_seconds = keepalive_seconds
         self._connection_id_factory = connection_id_factory or (lambda pc_id: f"pc-ctrl:{pc_id}:{secrets.token_hex(4)}")
         self._message_id_factory = message_id_factory or (lambda prefix: f"{prefix}:{secrets.token_hex(4)}")
@@ -117,6 +130,10 @@ class PcControlRuntime:
     @property
     def ingress_store(self) -> InMemoryPcIngressStore:
         return self._ingress_store
+
+    @property
+    def projection_store(self) -> RelayProjectionStore | None:
+        return self._projection_store
 
     @property
     def keepalive_seconds(self) -> int:
@@ -302,11 +319,19 @@ class PcControlRuntime:
                     error_message=message.payload["error_message"],
                 ),
             )
+            self._freeze_live_process_for_terminal_result(
+                pc_id=message.pc_id,
+                command_id=message.payload["command_id"],
+            )
+            return self._build_delivery_ack(
+                message,
+                request_id=message.payload["result_id"],
+                message_type="result",
+            )
         except PcNodeFenceError as exc:
             return self._build_error(message, code=exc.code, error_message=exc.message)
         except (PcCommandConflictError, PcCommandUnknownError) as exc:
             return self._build_error(message, code=exc.code, error_message=exc.message)
-        return None
 
     def handle_output_chunk(
         self,
@@ -339,6 +364,11 @@ class PcControlRuntime:
                     item_type=message.payload["item_type"],
                     status=message.payload["status"],
                 ),
+            )
+            self._project_live_process_from_command(
+                pc_id=message.pc_id,
+                command_id=message.payload["command_id"],
+                stream_id=message.payload["stream_id"],
             )
         except PcNodeFenceError as exc:
             return self._build_error(message, code=exc.code, error_message=exc.message)
@@ -378,6 +408,39 @@ class PcControlRuntime:
         except (PcCommandConflictError, PcCommandUnknownError) as exc:
             return self._build_error(message, code=exc.code, error_message=exc.message)
         return None
+
+    def handle_projection_batch(
+        self,
+        message: PcProjectionBatchMessage,
+        *,
+        connection_id: str,
+    ) -> dict[str, Any] | None:
+        try:
+            self._node_store.touch_connection(
+                pc_id=message.pc_id,
+                connection_id=connection_id,
+                connection_epoch=message.connection_epoch,
+                last_seen_at=message.sent_at,
+            )
+            if self._projection_store is None:
+                raise PcCommandDispatchValidationError(
+                    "projection_store_unavailable",
+                    "projection store is not configured",
+                )
+            if message.payload["scope"] == "probe":
+                self._apply_probe_projection_batch(message)
+            else:
+                self._apply_session_projection_batch(message)
+            return self._build_delivery_ack(
+                message,
+                request_id=message.payload["batch_id"],
+                message_type="projection_batch",
+            )
+        except PcNodeFenceError as exc:
+            return self._build_error(message, code=exc.code, error_message=exc.message)
+        except (ProjectionStoreConflictError, PcCommandDispatchValidationError, ValueError) as exc:
+            code = getattr(exc, "code", "invalid_projection_batch")
+            return self._build_error(message, code=code, error_message=str(exc))
 
     def handle_mailbox_lease(
         self,
@@ -829,6 +892,18 @@ class PcControlRuntime:
             message=error_message,
         )
 
+    def _build_delivery_ack(self, message, *, request_id: str, message_type: str) -> dict[str, Any]:
+        return build_delivery_ack(
+            message_id=self._message_id_factory("delivery_ack"),
+            trace_id=message.trace_id,
+            pc_id=getattr(message, "pc_id", None),
+            connection_epoch=getattr(message, "connection_epoch", 0),
+            sent_at=self._clock(),
+            request_id=request_id,
+            message_type=message_type,
+            delivery_status="committed",
+        )
+
     def _notify_command_enqueued(self, record: PcCommandRecord) -> None:
         callback = self._command_enqueue_callback
         if callback is None:
@@ -841,6 +916,416 @@ class PcControlRuntime:
                 record.pc_id,
                 record.command_id,
             )
+
+    def _project_live_process_from_command(
+        self,
+        *,
+        pc_id: str,
+        command_id: str,
+        stream_id: str,
+    ) -> None:
+        if self._projection_store is None:
+            return
+        record = self._command_store.get_command(pc_id, command_id)
+        if record is None or not record.session_id:
+            return
+        aggregate = self._aggregate_live_process(record=record, stream_id=stream_id)
+        if aggregate is None or not aggregate["items"]:
+            return
+        self._projection_store.upsert_session_live_process(
+            pc_id=record.pc_id,
+            workspace_id=record.workspace_id,
+            session_id=record.session_id,
+            command_id=record.command_id,
+            stream_id=stream_id,
+            task_id=aggregate["task_id"],
+            last_seq=aggregate["last_seq"],
+            items=aggregate["items"],
+            updated_at=aggregate["updated_at"],
+            status=aggregate["status"],
+        )
+
+    def _freeze_live_process_for_terminal_result(
+        self,
+        *,
+        pc_id: str,
+        command_id: str,
+    ) -> None:
+        if self._projection_store is None:
+            return
+        record = self._command_store.get_command(pc_id, command_id)
+        if record is None or not record.session_id or not record.output_chunks:
+            return
+        stream_id = self._latest_live_process_stream_id(record)
+        if stream_id is None:
+            return
+        aggregate = self._aggregate_live_process(record=record, stream_id=stream_id)
+        if aggregate is None or not aggregate["items"]:
+            return
+        self._projection_store.upsert_session_live_process(
+            pc_id=record.pc_id,
+            workspace_id=record.workspace_id,
+            session_id=record.session_id,
+            command_id=record.command_id,
+            stream_id=stream_id,
+            task_id=aggregate["task_id"],
+            last_seq=aggregate["last_seq"],
+            items=[
+                {
+                    **item,
+                    "status": "completed",
+                }
+                for item in aggregate["items"]
+            ],
+            updated_at=aggregate["updated_at"],
+            status="completed",
+        )
+
+    def _aggregate_live_process(
+        self,
+        *,
+        record: PcCommandRecord,
+        stream_id: str,
+    ) -> dict[str, Any] | None:
+        chunks = sorted(
+            [chunk for chunk in record.output_chunks if chunk.stream_id == stream_id],
+            key=lambda item: item.seq,
+        )
+        visible_chunks = (
+            chunks
+            if self._is_gap_free_live_process_window(chunks)
+            else self._visible_live_process_chunks(chunks)
+        )
+        if not visible_chunks:
+            return None
+        items: list[dict[str, Any]] = []
+        for chunk in visible_chunks:
+            process_kind = self._live_process_kind(chunk)
+            if items and items[-1]["kind"] == process_kind:
+                current = dict(items[-1])
+            else:
+                current = {
+                    "item_id": f"process:{stream_id}:{chunk.seq}",
+                    "kind": process_kind,
+                    "created_at": chunk.sent_at,
+                    "updated_at": chunk.sent_at,
+                    "status": chunk.status or "streaming",
+                    "text": "",
+                }
+                items.append(current)
+            current["text"] = chunk.text if chunk.text is not None else f"{current['text']}{chunk.delta or ''}"
+            current["updated_at"] = chunk.sent_at
+            current["status"] = chunk.status or current["status"] or "streaming"
+            items[-1] = current
+        normalized_items = [
+            item
+            for item in items
+            if str(item.get("text") or "").strip()
+        ]
+        if not normalized_items:
+            return None
+        consumed_chunk = visible_chunks[-1]
+        return {
+            "task_id": self._command_task_id(record=record, stream_id=stream_id),
+            "items": normalized_items,
+            "last_seq": consumed_chunk.seq,
+            "updated_at": consumed_chunk.sent_at,
+            "status": "streaming",
+        }
+
+    @staticmethod
+    def _is_gap_free_live_process_window(chunks: list[PcOutputChunkRecord]) -> bool:
+        if not chunks:
+            return False
+        expected_seq = chunks[0].seq
+        for chunk in chunks:
+            if chunk.seq != expected_seq:
+                return False
+            expected_seq = chunk.seq + 1
+        return chunks[0].seq == 1 or chunks[0].text is not None
+
+    @staticmethod
+    def _visible_live_process_chunks(chunks: list[PcOutputChunkRecord]) -> list[PcOutputChunkRecord]:
+        if not chunks:
+            return []
+        latest_full_text_index = max(
+            (index for index, chunk in enumerate(chunks) if chunk.text is not None),
+            default=None,
+        )
+        start_index = latest_full_text_index if latest_full_text_index is not None else 0
+        expected_seq = chunks[start_index].seq
+        if latest_full_text_index is None and expected_seq != 1:
+            return []
+        visible: list[PcOutputChunkRecord] = []
+        for chunk in chunks[start_index:]:
+            if chunk.seq != expected_seq:
+                break
+            visible.append(chunk)
+            expected_seq = chunk.seq + 1
+        return visible
+
+    @staticmethod
+    def _latest_live_process_stream_id(record: PcCommandRecord) -> str | None:
+        latest_chunk_by_stream: dict[str, tuple[str, int]] = {}
+        for chunk in record.output_chunks:
+            existing = latest_chunk_by_stream.get(chunk.stream_id)
+            candidate = (chunk.sent_at, chunk.seq)
+            if existing is None or candidate > existing:
+                latest_chunk_by_stream[chunk.stream_id] = candidate
+        if not latest_chunk_by_stream:
+            return None
+        return max(
+            latest_chunk_by_stream.items(),
+            key=lambda item: (item[1][0], item[1][1], item[0]),
+        )[0]
+
+    @staticmethod
+    def _live_process_kind(chunk: PcOutputChunkRecord) -> str:
+        kind = str(chunk.kind or "").strip().lower()
+        item_type = str(chunk.item_type or "").strip().lower()
+        if kind.startswith("assistant."):
+            return "assistant"
+        if kind.startswith("tool.") or "tool" in item_type:
+            return "tool"
+        if item_type == "reasoning" or kind.startswith("turn."):
+            return "system"
+        return "system"
+
+    @staticmethod
+    def _command_task_id(record: PcCommandRecord, *, stream_id: str) -> str | None:
+        if record.result is not None:
+            task_id = str(record.result.structured_payload.get("task_id") or "").strip()
+            if task_id:
+                return task_id
+        for event in reversed(record.events):
+            task_id = str(event.payload.get("task_id") or "").strip()
+            if task_id:
+                return task_id
+        stream_parts = [part.strip() for part in str(stream_id or "").split(":") if part.strip()]
+        return stream_parts[-1] if stream_parts else None
+
+    def _apply_session_projection_batch(self, message: PcProjectionBatchMessage) -> None:
+        if self._projection_store is None:
+            raise PcCommandDispatchValidationError("projection_store_unavailable", "projection store is not configured")
+        session_payload: dict[str, Any] | None = None
+        round_payloads: list[dict[str, Any]] = []
+        closeout_payloads: list[dict[str, Any]] = []
+        for item in message.payload["items"]:
+            item_type = str(item.get("type") or "").strip()
+            if item_type == "session_projection_upsert":
+                if session_payload is not None:
+                    raise PcCommandDispatchValidationError(
+                        "invalid_projection_batch",
+                        "session projection batch may contain only one session_projection_upsert",
+                    )
+                session_payload = dict(item)
+                continue
+            if item_type == "session_round_upsert":
+                round_payloads.append(dict(item))
+                continue
+            if item_type == "session_closeout_upsert":
+                closeout_payloads.append(dict(item))
+                continue
+            raise PcCommandDispatchValidationError(
+                "invalid_projection_batch",
+                f"unsupported session projection item type: {item_type}",
+            )
+        if session_payload is None:
+            raise PcCommandDispatchValidationError(
+                "invalid_projection_batch",
+                "session projection batch requires one session_projection_upsert item",
+            )
+        self._validate_session_projection_identity(message, session_payload)
+        session_upsert = ProjectionSessionUpsert(**self._projection_session_upsert_payload(session_payload))
+        rounds = [
+            ProjectionRoundUpsert(**self._projection_round_upsert_payload(message, item))
+            for item in round_payloads
+        ]
+        closeouts = [
+            ProjectionCloseoutUpsert(**self._projection_closeout_upsert_payload(message, item))
+            for item in closeout_payloads
+        ]
+        self._projection_store.apply_session_batch(
+            ProjectionSessionBatch(
+                batch_id=message.payload["batch_id"],
+                connection_epoch=message.connection_epoch,
+                sent_at=message.sent_at,
+                session=session_upsert,
+                rounds=rounds,
+                closeouts=closeouts,
+            )
+        )
+
+    def _apply_probe_projection_batch(self, message: PcProjectionBatchMessage) -> None:
+        if self._projection_store is None:
+            raise PcCommandDispatchValidationError("projection_store_unavailable", "projection store is not configured")
+        if len(message.payload["items"]) != 1:
+            raise PcCommandDispatchValidationError(
+                "invalid_projection_batch",
+                "probe projection batch requires exactly one item",
+            )
+        item = dict(message.payload["items"][0])
+        item_type = str(item.get("type") or "").strip()
+        if item_type != "transport_probe_observation_upsert":
+            raise PcCommandDispatchValidationError(
+                "invalid_projection_batch",
+                f"unsupported probe projection item type: {item_type}",
+            )
+        self._projection_store.upsert_probe_observation(
+            ProjectionProbeObservationUpsert(
+                **{
+                    key: value
+                    for key, value in item.items()
+                    if key
+                    in {
+                        "idempotency_key",
+                        "probe_id",
+                        "summary_text",
+                        "observation_status",
+                        "observed_at",
+                        "payload",
+                        "pc_id",
+                        "request_id",
+                        "packet_id",
+                        "receipt_id",
+                        "mailbox_message_id",
+                    }
+                }
+            ),
+            batch_id=message.payload["batch_id"],
+        )
+
+    def _validate_session_projection_identity(
+        self,
+        message: PcProjectionBatchMessage,
+        session_payload: dict[str, Any],
+    ) -> None:
+        required_identity = {
+            "pc_id": message.pc_id,
+            "workspace_id": message.payload["workspace_id"],
+            "session_id": message.payload["session_id"],
+            "thread_id": message.payload["thread_id"],
+            "projection_version": message.payload["projection_version"],
+        }
+        for field_name, expected in required_identity.items():
+            actual = session_payload.get(field_name)
+            if actual != expected:
+                raise PcCommandDispatchValidationError(
+                    "invalid_projection_batch",
+                    f"{field_name} does not match the batch envelope",
+                )
+
+    @staticmethod
+    def _projection_session_upsert_payload(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in item.items()
+            if key
+            in {
+                "idempotency_key",
+                "projection_version",
+                "pc_id",
+                "workspace_id",
+                "session_id",
+                "thread_id",
+                "session_name",
+                "backend",
+                "backend_transport",
+                "profile",
+                "permission",
+                "repo_path",
+                "workdir",
+                "list_status",
+                "snapshot_status",
+                "lifecycle",
+                "current_task_id",
+                "queued_task_id",
+                "pending_task_count",
+                "last_summary",
+                "last_active_at",
+                "last_progress_at",
+                "paused_from_status",
+                "backend_session_id",
+                "backend_session_resumable",
+                "question_state",
+                "timeline_items",
+                "created_at",
+                "updated_at",
+                "source_updated_at",
+            }
+        }
+
+    def _projection_round_upsert_payload(
+        self,
+        message: PcProjectionBatchMessage,
+        item: dict[str, Any],
+    ) -> dict[str, Any]:
+        for field_name in ("pc_id", "workspace_id", "session_id", "thread_id", "projection_version"):
+            expected = message.pc_id if field_name == "pc_id" else message.payload[field_name]
+            if item.get(field_name) != expected:
+                raise PcCommandDispatchValidationError(
+                    "invalid_projection_batch",
+                    f"{field_name} does not match the batch envelope",
+                )
+        payload = {
+            key: value
+            for key, value in item.items()
+            if key
+            in {
+                "idempotency_key",
+                "round_id",
+                "task_id",
+                "round_sort_at",
+                "status",
+                "speaker_label",
+                "input_text",
+                "process_items",
+                "result_text",
+                "input_attachments",
+                "result_attachments",
+                "source_updated_at",
+                "projection_version",
+            }
+        }
+        payload["created_at"] = item.get("round_sort_at") or message.sent_at
+        return payload
+
+    def _projection_closeout_upsert_payload(
+        self,
+        message: PcProjectionBatchMessage,
+        item: dict[str, Any],
+    ) -> dict[str, Any]:
+        for field_name in ("pc_id", "workspace_id", "session_id", "thread_id"):
+            expected = message.pc_id if field_name == "pc_id" else message.payload[field_name]
+            if item.get(field_name) != expected:
+                raise PcCommandDispatchValidationError(
+                    "invalid_projection_batch",
+                    f"{field_name} does not match the batch envelope",
+                )
+        payload = {
+            key: value
+            for key, value in item.items()
+            if key
+            in {
+                "idempotency_key",
+                "closeout_key",
+                "task_id",
+                "request_id",
+                "packet_id",
+                "receipt_id",
+                "action_type",
+                "target_session_identity",
+                "last_summary",
+                "terminal_mail_message_id",
+                "terminal_mail_subject",
+                "generated_at",
+                "source_updated_at",
+                "projection_version",
+            }
+        }
+        if payload.get("projection_version") is None:
+            payload["projection_version"] = message.payload["projection_version"]
+        return payload
 
 
 def build_pc_control_runtime(
@@ -856,6 +1341,7 @@ def build_pc_control_runtime(
     command_enqueue_callback: Callable[[PcCommandRecord], None] | None = None,
 ) -> PcControlRuntime:
     state_root = Path(config.state_dir) / "pc_control"
+    state_root.mkdir(parents=True, exist_ok=True)
     resolved_credential_registry = credential_registry or PersistentPcCredentialRegistry(
         Path(config.pc_control_credentials_path).expanduser()
         if config.pc_control_credentials_path
@@ -866,12 +1352,16 @@ def build_pc_control_runtime(
     resolved_workspace_store = workspace_store or PersistentWorkspaceInventoryStore(state_root / "workspaces.json")
     resolved_command_store = command_store or PersistentPcCommandStore(state_root / "commands.json")
     resolved_ingress_store = ingress_store or PersistentPcIngressStore(state_root / "ingress_truth.json")
+    projection_store_path = Path(config.resolved_android_projection_store_path)
+    projection_store_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_projection_store = RelayProjectionStore(projection_store_path)
     return PcControlRuntime(
         credential_registry=resolved_credential_registry,
         node_store=resolved_node_store,
         workspace_store=resolved_workspace_store,
         command_store=resolved_command_store,
         ingress_store=resolved_ingress_store,
+        projection_store=resolved_projection_store,
         keepalive_seconds=keepalive_seconds,
         clock=clock,
         command_enqueue_callback=command_enqueue_callback,

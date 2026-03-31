@@ -1,4 +1,4 @@
-"""External delivery helpers for oversized outgoing artifacts."""
+"""External delivery helpers for outgoing artifacts."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import yaml
 
 from .config import AppConfig, PROJECT_ROOT
 from .external_delivery_index import write_external_delivery_index
-from .file_surface import SINGLE_FILE_UPLOAD_LIMIT_BYTES, derive_file_surface_url, upload_artifact_to_file_surface
+from .file_surface import derive_file_surface_url, upload_artifact_to_file_surface
 from .models import ExternalDelivery, OutgoingAttachment, RunArtifact, RunResult
 
 _LOCAL_COS_CONFIG_PATH = PROJECT_ROOT / "mail_config.cos.local.yaml"
@@ -141,6 +141,10 @@ def _resolve_file_surface_url(config: AppConfig) -> str | None:
         return None
 
 
+def _uses_relay_file_surface_owner_lane(config: AppConfig) -> bool:
+    return str(config.outbound_transport or "").strip().lower() == "relay"
+
+
 def _select_external_delivery_backend(
     config: AppConfig,
     *,
@@ -148,8 +152,12 @@ def _select_external_delivery_backend(
     file_surface_url: str | None,
     task_root: Path | None,
 ) -> str | None:
-    preference = str(config.external_delivery_backend_preference or "").strip().lower() or "file_surface"
     file_surface_available = file_surface_url is not None and task_root is not None
+    if _uses_relay_file_surface_owner_lane(config):
+        if file_surface_available:
+            return "file_surface"
+        return None
+    preference = str(config.external_delivery_backend_preference or "").strip().lower() or "file_surface"
     if preference == "file_surface":
         if file_surface_available:
             return "file_surface"
@@ -180,19 +188,15 @@ def _absolute_file_surface_url(file_surface_url: str, location: str) -> str:
 
 def _select_backend_for_artifact(
     selected_backend: str,
-    *,
-    artifact_path: Path,
-    cos_settings: dict[str, str] | None,
 ) -> str:
-    if (
-        selected_backend == "file_surface"
-        and cos_settings is not None
-        and artifact_path.stat().st_size > SINGLE_FILE_UPLOAD_LIMIT_BYTES
-    ):
-        # During file-surface cutover, keep COS as a compatibility lane for
-        # artifacts that the live /v1/files surface cannot yet accept.
-        return "cos"
     return selected_backend
+
+
+def _relay_file_surface_unavailable_notice(artifact: RunArtifact) -> str:
+    return (
+        f"External delivery failed for {artifact.name}: relay file surface is unavailable. "
+        "The file was not attached because relay artifact delivery is fixed to /v1/files."
+    )
 
 
 def prepare_external_deliveries(
@@ -210,6 +214,7 @@ def prepare_external_deliveries(
     settings = _resolve_cos_settings(config)
     file_surface_url = _resolve_file_surface_url(config)
     resolved_task_root = Path(task_root) if task_root is not None else None
+    relay_file_surface_owner_lane = _uses_relay_file_surface_owner_lane(config)
     selected_backend = _select_external_delivery_backend(
         config,
         cos_settings=settings,
@@ -217,7 +222,7 @@ def prepare_external_deliveries(
         task_root=resolved_task_root,
     )
     threshold_bytes = max(int(config.external_delivery_threshold_mb), 0) * 1024 * 1024
-    if selected_backend is None:
+    if selected_backend is None and not relay_file_surface_owner_lane:
         return list(artifacts), list(attachments), [], []
 
     attachment_map = {
@@ -239,16 +244,23 @@ def prepare_external_deliveries(
             and (attachment.attach or attachment.inline)
             and artifact_path.exists()
             and artifact_path.is_file()
-            and artifact_path.stat().st_size > threshold_bytes
+            and (
+                relay_file_surface_owner_lane
+                or artifact_path.stat().st_size > threshold_bytes
+            )
         )
         if not should_attempt_external:
             effective_artifacts.append(artifact)
             continue
 
+        if selected_backend is None:
+            externalized_keys.add(attachment_key)
+            effective_artifacts.append(replace(artifact, inline_preview=False))
+            notices.append(_relay_file_surface_unavailable_notice(artifact))
+            continue
+
         artifact_backend = _select_backend_for_artifact(
             selected_backend,
-            artifact_path=artifact_path,
-            cos_settings=settings,
         )
 
         if artifact_backend == "cos":

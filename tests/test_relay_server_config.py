@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from mail_runner.relay_server.config import RelayServerConfig, load_relay_server_config
@@ -33,6 +35,7 @@ def test_load_relay_server_config_reads_explicit_values(monkeypatch: pytest.Monk
         tls_keyfile=None,
         log_level="DEBUG",
         server_name="relay-dev",
+        action_log_enabled=True,
     )
 
 
@@ -64,6 +67,7 @@ def test_load_relay_server_config_reads_environment(monkeypatch: pytest.MonkeyPa
         tls_keyfile=None,
         log_level="WARNING",
         server_name="relay-env",
+        action_log_enabled=True,
     )
 
 
@@ -97,6 +101,16 @@ def test_load_relay_server_config_reads_android_app_token(monkeypatch: pytest.Mo
     config = load_relay_server_config()
 
     assert config.android_app_token == "android-secret"
+    assert config.action_log_enabled is True
+
+
+def test_load_relay_server_config_reads_action_log_enabled_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAIL_RELAY_TOKEN", "env-token")
+    monkeypatch.setenv("MAIL_RELAY_ACTION_LOG_ENABLED", "false")
+
+    config = load_relay_server_config()
+
+    assert config.action_log_enabled is False
 
 
 def test_load_relay_server_config_reads_task_root_from_mail_runner_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,6 +120,31 @@ def test_load_relay_server_config_reads_task_root_from_mail_runner_env(monkeypat
     config = load_relay_server_config()
 
     assert config.task_root == "/srv/mail-runner/tasks"
+
+
+def test_load_relay_server_config_reads_android_projection_store_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAIL_RELAY_TOKEN", "env-token")
+    monkeypatch.setenv("MAIL_RELAY_ANDROID_PROJECTION_STORE_PATH", "/srv/mail-runner/projection.sqlite3")
+
+    config = load_relay_server_config()
+
+    assert config.android_projection_store_path == "/srv/mail-runner/projection.sqlite3"
+    assert config.resolved_android_projection_store_path == "/srv/mail-runner/projection.sqlite3"
+
+
+def test_relay_server_config_defaults_projection_store_path_under_state_dir() -> None:
+    config = RelayServerConfig(
+        host="127.0.0.1",
+        port=8787,
+        transport_token="relay-secret",
+        state_dir="relay_state",
+    )
+
+    assert config.android_projection_store_path == ""
+    assert config.resolved_android_projection_store_path == os.path.join(
+        "relay_state",
+        "android_projection_store.sqlite3",
+    )
 
 
 def test_relay_server_config_rejects_missing_transport_token() -> None:

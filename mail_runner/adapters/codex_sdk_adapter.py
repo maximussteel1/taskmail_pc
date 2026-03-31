@@ -430,7 +430,7 @@ class CodexSdkAdapter(WorkerAdapter):
                 json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
-            final_response = str(payload.get("final_response") or "").strip()
+            final_response = str(payload.get("final_response") or "")
             structured_result = parse_run_result_capsule(final_response)
             visible_response = strip_run_result_capsules(final_response)
             pending_questions, question_block = _pending_questions_from_text(final_response, task_id=task.task_id)

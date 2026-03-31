@@ -8,11 +8,24 @@ from dataclasses import dataclass
 from ..config import AppConfig
 
 _LOG_LEVELS = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}
+_TRUE_BOOL_VALUES = {"1", "true", "yes", "on"}
+_FALSE_BOOL_VALUES = {"0", "false", "no", "off", ""}
 
 
 def _require_text(value: str, field_name: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be a non-empty string")
+
+
+def _coerce_bool(value: bool | str | None, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value or "").strip().lower()
+    if normalized in _TRUE_BOOL_VALUES:
+        return True
+    if normalized in _FALSE_BOOL_VALUES:
+        return False
+    raise ValueError(f"{field_name} must be a boolean or one of: 1/0, true/false, yes/no, on/off")
 
 
 @dataclass(slots=True)
@@ -41,6 +54,8 @@ class RelayServerConfig:
     tls_keyfile: str | None = None
     log_level: str = "INFO"
     server_name: str = "mail-runner-relay"
+    action_log_enabled: bool = True
+    android_projection_store_path: str = ""
 
     def __post_init__(self) -> None:
         _require_text(self.host, "host")
@@ -101,6 +116,16 @@ class RelayServerConfig:
             allowed = ", ".join(sorted(_LOG_LEVELS))
             raise ValueError(f"log_level must be one of: {allowed}")
         _require_text(self.server_name, "server_name")
+        self.action_log_enabled = _coerce_bool(self.action_log_enabled, "action_log_enabled")
+        if self.android_projection_store_path:
+            _require_text(self.android_projection_store_path, "android_projection_store_path")
+
+    @property
+    def resolved_android_projection_store_path(self) -> str:
+        configured = str(self.android_projection_store_path or "").strip()
+        if configured:
+            return configured
+        return os.path.join(self.state_dir, "android_projection_store.sqlite3")
 
     @property
     def taskmail_direct_ingress_enabled(self) -> bool:
@@ -167,6 +192,8 @@ def load_relay_server_config(
     tls_keyfile: str | None = None,
     log_level: str | None = None,
     server_name: str | None = None,
+    action_log_enabled: bool | str | None = None,
+    android_projection_store_path: str | None = None,
 ) -> RelayServerConfig:
     raw_port = port if port is not None else os.getenv("MAIL_RELAY_PORT", "8787")
     raw_smtp_port = smtp_port if smtp_port is not None else os.getenv("MAIL_RELAY_SMTP_PORT", "465")
@@ -214,4 +241,13 @@ def load_relay_server_config(
         tls_keyfile=(tls_keyfile or os.getenv("MAIL_RELAY_TLS_KEYFILE", "")).strip() or None,
         log_level=(log_level or os.getenv("MAIL_RELAY_LOG_LEVEL", "INFO")).strip(),
         server_name=(server_name or os.getenv("MAIL_RELAY_SERVER_NAME", "mail-runner-relay")).strip(),
+        action_log_enabled=_coerce_bool(
+            action_log_enabled
+            if action_log_enabled is not None
+            else os.getenv("MAIL_RELAY_ACTION_LOG_ENABLED", os.getenv("MAIL_RUNNER_ACTION_LOG_ENABLED", "1")),
+            "action_log_enabled",
+        ),
+        android_projection_store_path=(
+            android_projection_store_path or os.getenv("MAIL_RELAY_ANDROID_PROJECTION_STORE_PATH", "")
+        ).strip(),
     )

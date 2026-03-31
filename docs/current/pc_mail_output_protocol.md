@@ -542,25 +542,24 @@ Rules:
 - missing manifest items are skipped, not fatal,
 - skipped files must be mentioned in the status body.
 
-## 11.3 Oversized Delivery
+## 11.3 Relay Artifact Delivery
 
-For oversized artifacts:
+For relay-backed outbound delivery:
 
-- upload via external delivery,
-- keep the item listed in `Artifacts`,
-- add `External Deliveries` section,
-- omit oversized file from MIME attachments,
-- if upload fails, keep sending the status mail and include a failure notice.
+- if `outbound_transport=relay` with `relay_url + relay_transport_token`, attachable run artifacts now always use the relay host's `/v1/files` file surface, regardless of size
+- keep the item listed in `Artifacts`
+- add `External Deliveries` section
+- omit the externally delivered file from MIME attachments
+- if upload fails, keep sending the status mail and include a failure notice; do not silently fall back to MIME attachment or COS on this relay owner lane
 
 Current runtime backend selection:
 
-- if `outbound_transport=relay` with `relay_url + relay_transport_token`, oversized artifacts now default to the relay host's `/v1/files` file surface
-- if `external_delivery_backend_preference=auto` and COS delivery is configured, oversized artifacts keep the legacy compatibility-default COS-first selection
-- if `external_delivery_backend_preference=cos`, oversized artifacts explicitly use COS
-- if a specific artifact exceeds the live `/v1/files` upload limit and `COS` is still available, the current cutover behavior keeps `COS` only for that oversize artifact instead of dropping the whole owner lane back to `COS`
+- relay owner lane is fixed to `/v1/files`
+- `external_delivery_threshold_mb` no longer gates relay artifact delivery
+- legacy COS external delivery may still exist outside this relay owner lane, but it is not the TaskMail/VPS mainline
 - relay file-surface external delivery writes a local
   `artifact_file_binding_index.json` sidecar alongside `artifact_index.json`
-- successful external delivery now also writes a local
+- successful relay external delivery now also writes a local
   `external_delivery_index.json` sidecar alongside `artifact_index.json`,
   recording provider-level URL evidence without changing artifact truth
 

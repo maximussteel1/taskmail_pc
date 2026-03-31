@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -141,15 +142,18 @@ def compute_task_root_fingerprint(local_task_root: str | Path) -> str:
     digest.update(b"task_root_v1\0")
     for path in _iter_task_root_entries(root):
         relative = path.relative_to(root).as_posix()
-        stat = path.stat()
-        entry_kind = "dir" if path.is_dir() else "file"
+        try:
+            path_stat = path.stat()
+        except FileNotFoundError:
+            continue
+        entry_kind = "dir" if stat.S_ISDIR(path_stat.st_mode) else "file"
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
         digest.update(entry_kind.encode("ascii"))
         digest.update(b"\0")
-        digest.update(str(stat.st_size).encode("ascii"))
+        digest.update(str(path_stat.st_size).encode("ascii"))
         digest.update(b"\0")
-        digest.update(str(stat.st_mtime_ns).encode("ascii"))
+        digest.update(str(path_stat.st_mtime_ns).encode("ascii"))
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -161,10 +165,17 @@ def build_task_root_archive(local_task_root: str | Path, archive_path: str | Pat
     archive = Path(archive_path)
     file_count = 0
     with tarfile.open(archive, "w:gz") as tar:
-        for child in sorted(root.iterdir()):
-            tar.add(child, arcname=child.name)
         for path in _iter_task_root_entries(root):
-            if path.is_file():
+            relative = path.relative_to(root).as_posix()
+            try:
+                path_stat = path.stat()
+            except FileNotFoundError:
+                continue
+            try:
+                tar.add(path, arcname=relative, recursive=False)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(path_stat.st_mode):
                 file_count += 1
     return file_count
 
